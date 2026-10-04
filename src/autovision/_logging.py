@@ -1,0 +1,50 @@
+# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+"""Logging setup: colored console output + rotating file log in the run dir."""
+
+from __future__ import annotations
+
+import logging
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+
+from autovision._distributed import is_global_rank_zero
+from autovision._env import Env
+
+__all__ = ["set_up_console_logging", "set_up_file_logging"]
+
+_FORMAT_FILE = "[%(asctime)s][%(levelname)s] %(message)s"
+
+_LOGGER_NAMES = ("autovision", "torch", "py.warnings")
+
+
+def set_up_console_logging() -> None:
+    level = getattr(logging, Env.LOG_LEVEL.value.upper(), logging.INFO)
+    console = logging.StreamHandler()
+    console.setLevel(level)
+    console.setFormatter(logging.Formatter("%(message)s"))
+    for name in _LOGGER_NAMES:
+        logger = logging.getLogger(name)
+        logger.setLevel(logging.DEBUG)
+        logger.handlers = [h for h in logger.handlers if not isinstance(h, RotatingFileHandler)]
+        if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, RotatingFileHandler) for h in logger.handlers):
+            logger.addHandler(console)
+
+
+def set_up_file_logging(log_file: Path) -> None:
+    """Attach a rotating file handler (rank zero only).
+
+    Also raises the ``autovision`` logger to DEBUG: left unconfigured it
+    inherits the root logger's WARNING level, which would silently drop
+    every INFO record before it reaches the handler (an empty train.log).
+    """
+    if not is_global_rank_zero():
+        return
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(
+        log_file, maxBytes=1 << 30, backupCount=4, mode="a"
+    )
+    handler.setFormatter(logging.Formatter(_FORMAT_FILE))
+    logger = logging.getLogger("autovision")
+    if logger.level == logging.NOTSET or logger.level > logging.DEBUG:
+        logger.setLevel(logging.DEBUG)
+    logger.addHandler(handler)

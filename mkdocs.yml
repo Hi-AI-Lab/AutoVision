@@ -1,0 +1,18 @@
+site_name: Autovision
+site_description: Enterprise visual model training framework
+theme: {name: material}
+nav:
+  - Home: index.md
+  - Design:
+      - Overview: design/01-overview-and-architecture.md
+      - API & Config: design/02-public-api-and-config.md
+      - Model Layer: design/03-model-layer.md
+      - Pretraining: design/04-pretraining-methods.md
+      - Task Models: design/05-task-models.md
+      - Data Layer: design/06-data-layer.md
+      - Runtime: design/07-runtime-and-experiments.md
+      - Deployment: design/08-assets-and-deployment.md
+      - Quality & Security: design/09-quality-security-observability.md
+      - Process & Roadmap: design/10-process-roadmap-risks.md
+      - Baseline Appendix: design/11-appendix-baseline-analysis.md
+      - Gap Implementation: design/12-gap-implementation-status.md

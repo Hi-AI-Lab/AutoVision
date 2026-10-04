@@ -1,0 +1,118 @@
+# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+import pickle
+
+import pytest
+
+from autovision._data._serialize.memory_mapped_sequence import (
+    MemoryMappedSequence,
+    write_items_to_file,
+)
+from autovision._data.mmap_helpers import (
+    dataset_mmap_context,
+    get_dataset_temp_mmap_path,
+)
+
+
+def items(n: int):
+    return [{"filenames": f"img_{i:03d}.jpg", "index": i} for i in range(n)]
+
+
+class TestMemoryMappedSequence:
+    def test_roundtrip(self, tmp_path):
+        path = tmp_path / "data.mmap"
+        write_items_to_file(items(100), path)
+        seq = MemoryMappedSequence.from_file(path)
+        assert len(seq) == 100
+        assert seq[0] == {"filenames": "img_000.jpg", "index": 0}
+        assert seq[99]["index"] == 99
+
+    def test_empty(self, tmp_path):
+        path = tmp_path / "empty.mmap"
+        write_items_to_file([], path)
+        seq = MemoryMappedSequence.from_file(path)
+        assert len(seq) == 0
+
+    def test_slicing(self, tmp_path):
+        path = tmp_path / "data.mmap"
+        write_items_to_file(items(10), path)
+        seq = MemoryMappedSequence.from_file(path)
+        assert [row["index"] for row in seq[2:5]] == [2, 3, 4]
+        assert [row["index"] for row in seq[8:2:-2]] == [8, 6, 4]
+        assert seq[3:3] == []
+
+    def test_pickle_carries_no_data(self, tmp_path):
+        path = tmp_path / "data.mmap"
+        write_items_to_file(items(5), path)
+        seq = MemoryMappedSequence.from_file(path)
+        state = pickle.dumps(seq)
+        assert len(state) < 1000  # path + columns only
+        restored = pickle.loads(state)
+        assert len(restored) == 5
+        assert restored[2] == seq[2]
+
+    def test_lazy_table_per_pid(self, tmp_path):
+        path = tmp_path / "data.mmap"
+        write_items_to_file(items(3), path)
+        seq = MemoryMappedSequence.from_file(path)
+        assert seq._table is None  # from_file does not keep the table open
+        assert seq[0]["index"] == 0  # table opened lazily on first access
+        assert seq._pid is not None
+        seq._table = None
+        assert seq[1]["index"] == 1  # reopened lazily again
+
+
+class TestMmapPath:
+    def test_collision_guard(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("VTRAIN_DATA_CACHE_DIR", str(tmp_path / "cache"))
+        out = tmp_path / "run1"
+        path = get_dataset_temp_mmap_path(data="data", out_dir=out)
+        path.touch()
+        with pytest.raises(RuntimeError, match="multiple runs"):
+            get_dataset_temp_mmap_path(data="data", out_dir=out)
+        # resume/overwrite tolerate the existing file
+        assert get_dataset_temp_mmap_path(data="data", out_dir=out, overwrite=True) == path
+        assert (
+            get_dataset_temp_mmap_path(data="data", out_dir=out, resume_interrupted=True)
+            == path
+        )
+
+    def test_reuse_mode_ignores_out_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("VTRAIN_DATA_CACHE_DIR", str(tmp_path / "cache"))
+        monkeypatch.setenv("VTRAIN_MMAP_REUSE_FILE", "1")
+        path1 = get_dataset_temp_mmap_path(data="shared-data", out_dir=tmp_path / "run1")
+        path2 = get_dataset_temp_mmap_path(data="shared-data", out_dir=tmp_path / "run2")
+        assert path1 == path2
+        path3 = get_dataset_temp_mmap_path(data="other-data", out_dir=tmp_path / "run1")
+        assert path3 != path1
+
+
+class TestMmapContext:
+    def test_write_and_cleanup(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("VTRAIN_DATA_CACHE_DIR", str(tmp_path / "cache"))
+        out = tmp_path / "run"
+        with dataset_mmap_context(lambda: items(7), data="d", out_dir=out) as seq:
+            assert len(seq) == 7
+            assert seq[6]["filenames"] == "img_006.jpg"
+        # refcount dropped to zero -> file removed (reuse off)
+        assert not seq.path.exists()
+
+    def test_nested_contexts_share_file(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("VTRAIN_DATA_CACHE_DIR", str(tmp_path / "cache"))
+        out = tmp_path / "run"
+        with dataset_mmap_context(lambda: items(7), data="d", out_dir=out) as s1:
+            # File now exists; a second context on the same run reuses it.
+            with dataset_mmap_context(lambda: items(7), data="d", out_dir=out) as s2:
+                assert s1.path == s2.path
+                assert len(s2) == 7
+        # refcount decremented twice -> file removed
+        assert not s1.path.exists()
+
+    def test_premature_exit_still_cleans(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("VTRAIN_DATA_CACHE_DIR", str(tmp_path / "cache"))
+        out = tmp_path / "run"
+        with pytest.raises(ValueError):
+            with dataset_mmap_context(lambda: items(3), data="d", out_dir=out):
+                raise ValueError("boom")
+        cache = tmp_path / "cache"
+        leftovers = [p for p in cache.iterdir() if p.suffix in (".mmap", ".ref_count")]
+        assert leftovers == []

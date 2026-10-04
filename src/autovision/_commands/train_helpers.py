@@ -1,0 +1,174 @@
+# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+"""Pretraining command helpers: ordered config resolution and assembly.
+
+Resolution order (design doc §5.3, mirrors the baseline):
+
+    transform_args -> epochs -> strategy/precision -> batch_size/num_workers
+    -> optimizer_args(wrapped_model) -> method_args(scaling_info, optimizer_args,
+    wrapped_model)
+
+Each resolver validates its input against the method-provided config class,
+resolves ``"auto"`` in place, and asserts the result is fully resolved.
+"""
+
+from __future__ import annotations
+
+import math
+from typing import Any, TypeVar
+
+import torch
+from torch.utils.data import DataLoader
+
+from autovision._configs.validate import (
+    assert_config_resolved,
+    no_auto,
+    pydantic_model_validate,
+)
+from autovision._methods.method import Method
+from autovision._scaling import (
+    IMAGENET_SIZE,
+    ScalingInfo,
+    epochs_from_steps,
+)
+from autovision._transforms.method_transform import MethodTransform
+from autovision._transforms.transform_args import MethodTransformArgs
+from autovision.errors import UnresolvedAutoError
+
+__all__ = [
+    "get_dataloader",
+    "get_epochs",
+    "get_method",
+    "get_method_args",
+    "get_optimizer_args",
+    "get_transform",
+    "get_transform_args",
+]
+
+T = TypeVar("T")
+
+
+def get_transform_args(
+    method_cls: type[Method], transform_args: dict | MethodTransformArgs | None
+) -> MethodTransformArgs:
+    args_cls = method_cls.transform_cls().transform_args_cls()
+    args = pydantic_model_validate(args_cls, dict(transform_args or {}))
+    args.resolve_auto()
+    args.resolve_incompatible()
+    assert_config_resolved(args)
+    return args
+
+
+def get_transform(
+    method_cls: type[Method], transform_args: MethodTransformArgs
+) -> MethodTransform:
+    assert_config_resolved(transform_args)
+    return method_cls.transform_cls()(transform_args)
+
+
+def get_dataset_size(dataset) -> int:
+    try:
+        return len(dataset)
+    except TypeError as error:
+        raise UnresolvedAutoError(
+            "Dataset size is required to resolve 'epochs=auto'."
+        ) from error
+
+
+def get_epochs(
+    method_cls: type[Method],
+    epochs: int | str,
+    dataset_size: int,
+    batch_size: int,
+) -> int:
+    """Resolve ``epochs``: user value > step-based recipe > default epochs."""
+    if epochs != "auto":
+        return int(epochs)
+    args_cls = method_cls.method_args_cls()
+    default_steps = getattr(args_cls, "default_steps", None)
+    if default_steps is not None:
+        return epochs_from_steps(default_steps, batch_size, dataset_size)
+    default_epochs = getattr(args_cls, "default_epochs", None)
+    if default_epochs is None:
+        raise ValueError(
+            f"{args_cls.__name__} defines neither 'default_steps' nor "
+            f"'default_epochs'; set epochs explicitly."
+        )
+    return int(default_epochs)
+
+
+def get_scaling_info(dataset_size: int, epochs: int) -> ScalingInfo:
+    return ScalingInfo(dataset_size=dataset_size, epochs=epochs)
+
+
+def get_optimizer_args(
+    method_cls: type[Method],
+    optim: str,
+    optim_args: dict | Any | None,
+    wrapped_model: Any,
+) -> Any:
+    args_cls = method_cls.optimizer_args_cls(optim)
+    args = pydantic_model_validate(args_cls, dict(optim_args or {}))
+    args.resolve_auto(wrapped_model=wrapped_model)
+    assert_config_resolved(args)
+    return args
+
+
+def get_method_args(
+    method_cls: type[Method],
+    method_args: dict | Any | None,
+    scaling_info: ScalingInfo,
+    optimizer_args: Any,
+    wrapped_model: Any,
+) -> Any:
+    args_cls = method_cls.method_args_cls()
+    args = pydantic_model_validate(args_cls, dict(method_args or {}))
+    args.resolve_auto(
+        scaling_info=scaling_info,
+        optimizer_args=optimizer_args,
+        wrapped_model=wrapped_model,
+    )
+    assert_config_resolved(args)
+    return args
+
+
+def get_method(
+    method_cls: type[Method],
+    method_args: Any,
+    optimizer_args: Any,
+    embedding_model: Any,
+    global_batch_size: int,
+    num_input_channels: int,
+) -> Method:
+    return method_cls(
+        method_args=method_args,
+        optimizer_args=optimizer_args,
+        embedding_model=embedding_model,
+        global_batch_size=global_batch_size,
+        num_input_channels=num_input_channels,
+    )
+
+
+def get_dataloader(
+    dataset,
+    batch_size_per_device: int,
+    num_workers: int,
+    collate_fn: Any = None,
+) -> DataLoader:
+    timeout = (
+        _dataloader_timeout() if num_workers > 0 else 0.0
+    )
+    return DataLoader(
+        dataset,
+        batch_size=batch_size_per_device,
+        shuffle=True,
+        drop_last=True,
+        num_workers=num_workers,
+        collate_fn=collate_fn,
+        timeout=timeout,
+    )
+
+
+def _dataloader_timeout() -> float:
+    from autovision._env import Env
+
+    return Env.DATALOADER_TIMEOUT_SEC.value

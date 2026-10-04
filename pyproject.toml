@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autovision"
+version = "0.1.0"
+description = "VTrain: enterprise visual model training framework (pretrain/distill -> finetune -> evaluate -> export)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "filelock>=3.0",
+    "numpy>=1.23",
+    "pyarrow>=15.0.0",
+    "pydantic>=2.7",
+    "pyyaml>=6.0",
+    "torch>=2.4",
+    "torchvision>=0.19",
+    "tqdm>=4.0",
+]
+
+[project.scripts]
+autovision-cli = "autovision._cli:cli_entrypoint"
+
+[project.optional-dependencies]
+tensorboard = ["tensorboard>=2.10"]
+mlflow = ["mlflow>=2.8"]
+wandb = ["wandb>=0.17"]
+bitsandbytes = ["bitsandbytes>=0.43"]
+timm = ["timm>=1.0.3"]
+super-gradients = ["super-gradients>=3.5"]
+# AGPL-3.0: extras-only by policy — never a core dependency, never imported
+# at module level (see src/autovision/_models/ultralytics/).
+ultralytics = ["ultralytics>=8.1.0"]
+# DINOv2/DINOv3 and RF-DETR backbones via HuggingFace transformers (per
+# framework policy: prefer transformers over third-party/vendored model
+# code; see src/autovision/_models/rfdetr/). Both extras share one floor:
+# the RfDetr classes ship in recent transformers releases (mid-2026), and
+# the RF-DETR package gates on class presence at runtime, so a single
+# floor keeps every extra's promise true regardless of which is installed.
+transformers = ["transformers>=4.56"]
+rfdetr = ["transformers>=4.56"]
+# ONNX export pipeline (torch.export -> dynamo/legacy ONNX -> FP16 ->
+# onnxslim -> verification gates); also required by the deployment tests.
+export = ["onnx>=1.15", "onnxruntime>=1.17", "onnxslim>=0.1"]
+dev = ["pytest>=8.0", "pytest-mock>=3.14"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
