@@ -56,7 +56,7 @@
 | 进度条 data_wait | `_callbacks/tqdm_progress_bar.py:50-58` | 照抄 + 升格一等指标 |
 | out 目录多 rank 握手 | `common_helpers.py:159-209` | 照抄（§10.2） |
 | rank 环境变量探测链 | `_distributed.py`、`_lightning_rank_zero.py` | 照抄 + K8s 变量（§10.2） |
-| env 变量面 | `_env.py`（17 项，附录 C） | 等价 `VTRAIN_*` 全套 + OFFLINE/MIRROR/TELEMETRY（§10.7） |
+| env 变量面 | `_env.py`（17 项，附录 C） | 等价 `AUTOVISION_*` 全套 + OFFLINE/MIRROR/TELEMETRY（§10.7） |
 | 遥测 | `_events/tracker.py`（PostHog，默认开） | 结构采纳，默认关；env 解析容错教训（§14.1） |
 | 双引擎 | Trainer（pretrain）/ Fabric 手写循环（task） | 单引擎薄封装（ADR-0001），四原语内建（§10.1/R3） |
 | NaNCapture/UnderflowOverflow 调试 | `_debug/` | 收敛为 `debug_args` 健康监控配置（§10.3/§15.1） |
@@ -97,7 +97,7 @@
 
 ## 附录 C：基线环境变量全表
 
-（`_env.py`；VTrain 等价物前缀 `VTRAIN_`）
+（`_env.py`；VTrain 等价物前缀 `AUTOVISION_`）
 
 | 变量 | 默认 | 作用 |
 |---|---|---|

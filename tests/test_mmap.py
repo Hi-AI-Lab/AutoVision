@@ -63,7 +63,7 @@ class TestMemoryMappedSequence:
 
 class TestMmapPath:
     def test_collision_guard(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("VTRAIN_DATA_CACHE_DIR", str(tmp_path / "cache"))
+        monkeypatch.setenv("AUTOVISION_DATA_CACHE_DIR", str(tmp_path / "cache"))
         out = tmp_path / "run1"
         path = get_dataset_temp_mmap_path(data="data", out_dir=out)
         path.touch()
@@ -77,8 +77,8 @@ class TestMmapPath:
         )
 
     def test_reuse_mode_ignores_out_dir(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("VTRAIN_DATA_CACHE_DIR", str(tmp_path / "cache"))
-        monkeypatch.setenv("VTRAIN_MMAP_REUSE_FILE", "1")
+        monkeypatch.setenv("AUTOVISION_DATA_CACHE_DIR", str(tmp_path / "cache"))
+        monkeypatch.setenv("AUTOVISION_MMAP_REUSE_FILE", "1")
         path1 = get_dataset_temp_mmap_path(data="shared-data", out_dir=tmp_path / "run1")
         path2 = get_dataset_temp_mmap_path(data="shared-data", out_dir=tmp_path / "run2")
         assert path1 == path2
@@ -88,7 +88,7 @@ class TestMmapPath:
 
 class TestMmapContext:
     def test_write_and_cleanup(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("VTRAIN_DATA_CACHE_DIR", str(tmp_path / "cache"))
+        monkeypatch.setenv("AUTOVISION_DATA_CACHE_DIR", str(tmp_path / "cache"))
         out = tmp_path / "run"
         with dataset_mmap_context(lambda: items(7), data="d", out_dir=out) as seq:
             assert len(seq) == 7
@@ -97,7 +97,7 @@ class TestMmapContext:
         assert not seq.path.exists()
 
     def test_nested_contexts_share_file(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("VTRAIN_DATA_CACHE_DIR", str(tmp_path / "cache"))
+        monkeypatch.setenv("AUTOVISION_DATA_CACHE_DIR", str(tmp_path / "cache"))
         out = tmp_path / "run"
         with dataset_mmap_context(lambda: items(7), data="d", out_dir=out) as s1:
             # File now exists; a second context on the same run reuses it.
@@ -108,7 +108,7 @@ class TestMmapContext:
         assert not s1.path.exists()
 
     def test_premature_exit_still_cleans(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("VTRAIN_DATA_CACHE_DIR", str(tmp_path / "cache"))
+        monkeypatch.setenv("AUTOVISION_DATA_CACHE_DIR", str(tmp_path / "cache"))
         out = tmp_path / "run"
         with pytest.raises(ValueError):
             with dataset_mmap_context(lambda: items(3), data="d", out_dir=out):

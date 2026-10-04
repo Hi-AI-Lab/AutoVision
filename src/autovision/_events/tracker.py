@@ -2,7 +2,7 @@
 """Opt-in usage telemetry.
 
 Compliance-first (design doc §14): telemetry is **disabled by default**
-(the inverse of the baseline) and enables only via ``VTRAIN_TELEMETRY=1``.
+(the inverse of the baseline) and enables only via ``AUTOVISION_TELEMETRY=1``.
 Payloads contain framework/model metadata only — never data paths or
 image contents. Every send is best-effort: all transport errors are
 swallowed so telemetry can never affect training.

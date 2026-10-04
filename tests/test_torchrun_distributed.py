@@ -137,7 +137,7 @@ def _run_torchrun(worker: Path, args: list[str], cwd: Path) -> str:
     env.update(
         CUDA_VISIBLE_DEVICES="",  # CPU + gloo: no accelerator requirement
         OMP_NUM_THREADS="1",
-        AUTOVISION_TELEMETRY_DISABLED="1",
+        AUTOVISION_TELEMETRY="0",  # the real switch (default off regardless)
     )
     for name in ("RANK", "LOCAL_RANK", "WORLD_SIZE", "GROUP_RANK", "ROLE_RANK"):
         env.pop(name, None)  # torchrun injects these itself

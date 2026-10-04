@@ -61,7 +61,7 @@ def resolve_downloadable(
 ) -> Path:
     """Resolve a downloadable model name to a verified local file.
 
-    Downloads the pinned URL into the cache (env ``VTRAIN_CACHE_DIR`` or
+    Downloads the pinned URL into the cache (env ``AUTOVISION_CACHE_DIR`` or
     ~/.cache/autovision by default), verifies sha256, and returns the path.
     An existing cache hit is re-verified (corruption is healed by
     re-download).
@@ -100,7 +100,7 @@ def resolve_downloadable(
 def _default_cache_dir() -> Path:
     import os
 
-    env = os.environ.get("VTRAIN_CACHE_DIR")
+    env = os.environ.get("AUTOVISION_CACHE_DIR")
     if env:
         return Path(env)
     return Path.home() / ".cache" / "autovision" / "downloadable_models"

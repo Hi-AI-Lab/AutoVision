@@ -206,7 +206,7 @@ class TestLoadPretrainedVerified:
 class TestOfflineAndMirror:
     def test_offline_uses_cache_without_network(self, monkeypatch, tmp_path: Path):
         snapshot = _write_snapshot(tmp_path, GOOD_CONTENT, write=True)
-        monkeypatch.setenv("VTRAIN_OFFLINE", "1")
+        monkeypatch.setenv("AUTOVISION_OFFLINE", "1")
         network_attempts: list[tuple] = []
 
         def fake_download(
@@ -237,19 +237,19 @@ class TestOfflineAndMirror:
     ):
         from huggingface_hub.errors import LocalEntryNotFoundError
 
-        monkeypatch.setenv("VTRAIN_OFFLINE", "1")
+        monkeypatch.setenv("AUTOVISION_OFFLINE", "1")
         monkeypatch.setattr(
             "autovision._models.weight_verification._download_snapshot",
             lambda *a, **k: (_ for _ in ()).throw(
                 LocalEntryNotFoundError("not cached")
             ),
         )
-        with pytest.raises(RuntimeError, match="VTRAIN_OFFLINE"):
+        with pytest.raises(RuntimeError, match="AUTOVISION_OFFLINE"):
             load_pretrained_verified(FakeModelCls, "org/model")
 
     def test_offline_unpinned_skips_verification(self, monkeypatch, tmp_path: Path):
         snapshot = _write_snapshot(tmp_path, BAD_CONTENT, write=True)
-        monkeypatch.setenv("VTRAIN_OFFLINE", "1")
+        monkeypatch.setenv("AUTOVISION_OFFLINE", "1")
         monkeypatch.setattr(
             "autovision._models.weight_verification.get_weight_artifact",
             lambda repo_id: make_artifact(sha256={}),
@@ -264,7 +264,7 @@ class TestOfflineAndMirror:
     def test_mirror_url_bridges_to_hf_endpoint(
         self, monkeypatch, fake_download
     ):
-        monkeypatch.setenv("VTRAIN_MIRROR_URL", "https://mirror.example/hf")
+        monkeypatch.setenv("AUTOVISION_MIRROR_URL", "https://mirror.example/hf")
         monkeypatch.delenv("HF_ENDPOINT", raising=False)
         load_pretrained_verified(FakeModelCls, "org/model")
         import os
@@ -274,7 +274,7 @@ class TestOfflineAndMirror:
     def test_existing_hf_endpoint_wins(self, monkeypatch, fake_download):
         import os
 
-        monkeypatch.setenv("VTRAIN_MIRROR_URL", "https://mirror.example/hf")
+        monkeypatch.setenv("AUTOVISION_MIRROR_URL", "https://mirror.example/hf")
         monkeypatch.setenv("HF_ENDPOINT", "https://explicit.example")
         load_pretrained_verified(FakeModelCls, "org/model")
         assert os.environ["HF_ENDPOINT"] == "https://explicit.example"

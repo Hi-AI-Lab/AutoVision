@@ -117,7 +117,7 @@ pytest tests            # 520+ 个测试(含金标准 loss 轨迹快照)
 
 ## 环境变量
 
-见 `src/autovision/_env.py`(`VTRAIN_*`,遥测默认关闭)。
+见 `src/autovision/_env.py`(`AUTOVISION_*`,遥测默认关闭)。
 
 ## 已知边界(下一里程碑)
 
@@ -125,6 +125,6 @@ pytest tests            # 520+ 个测试(含金标准 loss 轨迹快照)
 - EOMT 分割家族、DINOv2/DINOv3 方法、DenseCL/DetCon、PicoDet、D-FINE FGL/DDF 为 M4+ 范围(实现蓝图见 `docs/design/12-gap-implementation-status.md`)
 - 任务 DDP 已实现(torchrun;验证经指标状态汇聚 + rank0 广播),但与预训练 DDP 一样尚无多进程自动化测试
 - ONNX FP16 parity 门禁在无 CUDA execution provider 时跳过并告警;TensorRT 导出需自行安装 `tensorrt`
-- 权重下载哈希校验、`VTRAIN_MIRROR_URL`/`VTRAIN_OFFLINE` 消费端为待办(见分册 12 §3)
+- 权重下载哈希校验、`AUTOVISION_MIRROR_URL`/`AUTOVISION_OFFLINE` 消费端为待办(见分册 12 §3)
 - MLflow/W&B/TensorBoard/bitsandbytes 为可选 extras,缺失时惰性降级
 - 蒸馏教师默认请求预训练权重(`teacher_pretrained=True`),离线时传 `teacher_pretrained=False`

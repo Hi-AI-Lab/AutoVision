@@ -38,7 +38,7 @@ class TestCI:
         config = yaml.safe_load((ROOT / ".gitlab-ci.yml").read_text())
         variables = config["test"].get("variables", {})
         # Compliance: CI must not enable telemetry.
-        assert variables.get("VTRAIN_TELEMETRY", "0") != "1"
+        assert variables.get("AUTOVISION_TELEMETRY", "0") != "1"
 
 
 class TestDocker:

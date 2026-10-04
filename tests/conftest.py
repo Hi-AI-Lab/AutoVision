@@ -15,16 +15,16 @@ import pytest
 def isolate_cache_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Redirect every VTRAIN cache dir to a per-test temp directory."""
     cache_dir = tmp_path / "autovision-cache"
-    monkeypatch.setenv("VTRAIN_CACHE_DIR", str(cache_dir))
+    monkeypatch.setenv("AUTOVISION_CACHE_DIR", str(cache_dir))
     yield cache_dir
     shutil.rmtree(cache_dir, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)
 def clean_framework_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Remove all VTRAIN_* and rank variables so tests start from defaults."""
+    """Remove all AUTOVISION_* and rank variables so tests start from defaults."""
     for name in list(os.environ):
-        if name.startswith("VTRAIN_"):
+        if name.startswith("AUTOVISION_"):
             monkeypatch.delenv(name, raising=False)
     for name in (
         "RANK",

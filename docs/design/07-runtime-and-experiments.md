@@ -76,7 +76,7 @@ exported .pt = {"model_class_path", "model_init_args",
 
 ### 10.7 环境变量面【基线】
 
-全部 17 项见附录 C。VTrain 等价物 `VTRAIN_*` 全套 + 新增 `VTRAIN_OFFLINE / VTRAIN_MIRROR_URL / VTRAIN_TELEMETRY(默认0) / VTRAIN_STEP_TIMEOUT_SEC / VTRAIN_DATA_CACHE_DIR`。基线的 `EnvVar[T]` 冻结 dataclass（`name/_default/_type/convert_empty_str_to_default`，空串回退默认值）值得照抄。
+全部 17 项见附录 C。VTrain 等价物 `AUTOVISION_*` 全套 + 新增 `AUTOVISION_OFFLINE / AUTOVISION_MIRROR_URL / AUTOVISION_TELEMETRY(默认0) / AUTOVISION_STEP_TIMEOUT_SEC / AUTOVISION_DATA_CACHE_DIR`。基线的 `EnvVar[T]` 冻结 dataclass（`name/_default/_type/convert_empty_str_to_default`，空串回退默认值）值得照抄。
 
 ---
 

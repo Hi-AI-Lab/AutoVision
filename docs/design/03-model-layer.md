@@ -94,7 +94,7 @@ class MultiScaleFeaturePackage(Package): ...   # wrapper 返回 MultiScale 协�
 - Wrapper 语义：`forward_features` 可选 `n_blocks>1` 取中间层拼接；DINOv2 `forward_pool` 返回 **cls_token**（非平均池化）；`make_teacher()` 关闭 stochastic depth 供蒸馏；`input_normalization="none"` 的 TiPSv2 变体在前向里先**抵消**框架已做的 ImageNet 归一化（`dinov2_vit.py:118-125`，易踩坑点，VTrain 以模型元数据声明归一化代替这种隐式抵消）。
 - 通道适配 hooks：`patch_embed_adjust_input_channels_hook`（checkpoint 通道多则裁剪、少则重复拼接）、`interpolate_pos_embed_hook`（bicubic 插值位置编码，`_models/_model_helpers.py:21-111`）。
 
-【差异】VTrain 策略：优先用依赖（transformers 已含 DINOv2），能力缺口才 vendor；vendor 必须带 ORIGIN.md + 升级脚本。**权重供应链为 VTrain 硬性增强**（基线全链路零校验）：`{url, sha256, license, source}` 强制校验、失败删缓存重试一次、内网镜像源 `VTRAIN_MIRROR_URL`、`VTRAIN_OFFLINE=1`。包级许可标签随 `list_models()` 暴露。
+【差异】VTrain 策略：优先用依赖（transformers 已含 DINOv2），能力缺口才 vendor；vendor 必须带 ORIGIN.md + 升级脚本。**权重供应链为 VTrain 硬性增强**（基线全链路零校验）：`{url, sha256, license, source}` 强制校验、失败删缓存重试一次、内网镜像源 `AUTOVISION_MIRROR_URL`、`AUTOVISION_OFFLINE=1`。包级许可标签随 `list_models()` 暴露。
 
 ### 6.4 检测任务模型协议【设计】（基线无显式协议，此为从基线实践中归纳的契约）
 

@@ -40,7 +40,7 @@
       output directory ...") —— 多 run 撞目录的防护（common_helpers.py:439-479）
 ```
 
-【差异】VTrain 增补：fsspec 远程数据集按需拉取 + 本地二级缓存（`VTRAIN_DATA_CACHE_DIR` 语义扩展）；清单内容参与数据指纹。
+【差异】VTrain 增补：fsspec 远程数据集按需拉取 + 本地二级缓存（`AUTOVISION_DATA_CACHE_DIR` 语义扩展）；清单内容参与数据指纹。
 
 ### 9.3 批组装与 dataloader【基线】
 

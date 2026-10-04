@@ -15,9 +15,10 @@ but no provider configured, spans land on the API's built-in no-op tracer.
 from __future__ import annotations
 
 import logging
-import os
 from contextlib import nullcontext
 from typing import Any, Iterator
+
+from autovision._env import Env
 
 __all__ = ["end_span", "get_tracer", "is_otel_enabled", "otel_span", "start_span"]
 
@@ -25,13 +26,13 @@ logger = logging.getLogger("autovision")
 
 TRACER_NAME = "autovision"
 
-_TRUE_VALUES = {"1", "true", "yes", "on"}
 _otel_disabled_logged = False
 
 
 def is_otel_enabled() -> bool:
-    """``AUTOVISION_OTEL`` gate (fault-tolerant parsing, per §14 lesson)."""
-    return os.getenv("AUTOVISION_OTEL", "").strip().lower() in _TRUE_VALUES
+    """``AUTOVISION_OTEL`` gate — declared in the Env registry like every
+    other framework variable (fault-tolerant boolean parsing there)."""
+    return Env.OTEL.value
 
 
 def _get_opentelemetry_trace() -> Any | None:

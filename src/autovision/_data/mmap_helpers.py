@@ -60,7 +60,7 @@ def get_dataset_temp_mmap_path(
     The identifier combines the resolved output directory and the data
     fingerprint (paths + mtimes), so a run re-using an output directory with
     different data gets a fresh dataset file. When
-    ``VTRAIN_MMAP_REUSE_FILE`` is set, only the data fingerprint is used
+    ``AUTOVISION_MMAP_REUSE_FILE`` is set, only the data fingerprint is used
     (shared across runs). A pre-existing file *without an active refcount*
     means a stale file from a crashed run on the same (out, data) pair —
     an error unless resume/overwrite/reuse.
@@ -102,7 +102,7 @@ def get_dataset_mmap_file(
     """Ensure the mmap file exists and return the sequence for this process.
 
     Local rank zero writes to a temp file and atomically renames; other ranks
-    poll until the file appears (or ``VTRAIN_MMAP_TIMEOUT_SEC`` elapses; the
+    poll until the file appears (or ``AUTOVISION_MMAP_TIMEOUT_SEC`` elapses; the
     timer resets while rank zero is still writing).
     """
     mmap_filepath.parent.mkdir(parents=True, exist_ok=True)

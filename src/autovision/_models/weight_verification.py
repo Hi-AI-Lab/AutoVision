@@ -3,9 +3,9 @@
 
 Every pretrained download goes through :func:`load_pretrained_verified`:
 
-1. ``VTRAIN_MIRROR_URL`` is bridged to the HF endpoint mechanism when the
+1. ``AUTOVISION_MIRROR_URL`` is bridged to the HF endpoint mechanism when the
    process has not already configured ``HF_ENDPOINT`` (the mirror consumer).
-2. ``VTRAIN_OFFLINE=1`` resolves from the local HF cache only; a missing
+2. ``AUTOVISION_OFFLINE=1`` resolves from the local HF cache only; a missing
    snapshot raises an actionable error instead of attempting network I/O.
 3. The snapshot's weight files are sha256-verified against the manifest in
    :mod:`autovision._models.weight_hashes`. Pinned hashes verify fully
@@ -43,7 +43,7 @@ _WEIGHT_PATTERNS = ("*.safetensors", "*.bin")
 _SNAPSHOT_PATTERNS = ("config.json", "*.safetensors", "*.bin")
 _RETRY_MESSAGE = (
     "If the failure persists the download source may be compromised or "
-    "truncated: set VTRAIN_MIRROR_URL to a trusted mirror, or download the "
+    "truncated: set AUTOVISION_MIRROR_URL to a trusted mirror, or download the "
     "model manually and pass a local directory via model_args."
 )
 
@@ -189,7 +189,7 @@ def load_pretrained_verified(
         return model_cls.from_pretrained(repo_id, **(config_kwargs or {}))
     revision = artifact.revision
 
-    # Mirror consumer (§3.2): VTRAIN_MIRROR_URL -> HF endpoint, unless the
+    # Mirror consumer (§3.2): AUTOVISION_MIRROR_URL -> HF endpoint, unless the
     # process already pinned one explicitly.
     mirror_url = Env.MIRROR_URL.value
     if mirror_url and not os.getenv("HF_ENDPOINT"):
@@ -203,8 +203,8 @@ def load_pretrained_verified(
             )
         except LocalEntryNotFoundError as error:
             raise RuntimeError(
-                f"VTRAIN_OFFLINE=1 and no cached snapshot for '{repo_id}'. "
-                "Run once without VTRAIN_OFFLINE to populate the cache, or "
+                f"AUTOVISION_OFFLINE=1 and no cached snapshot for '{repo_id}'. "
+                "Run once without AUTOVISION_OFFLINE to populate the cache, or "
                 "download the model manually and point model_args at it."
             ) from error
         if artifact.sha256:

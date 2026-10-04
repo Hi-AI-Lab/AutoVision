@@ -1,7 +1,7 @@
 # Autovision training image (CUDA runtime base).
 FROM pytorch/pytorch:2.5.1-cuda11.8-cudnn9-runtime AS runtime
 
-ENV VTRAIN_CACHE_DIR=/home/autovision/.cache/autovision \
+ENV AUTOVISION_CACHE_DIR=/home/autovision/.cache/autovision \
     PIP_NO_CACHE_DIR=1
 WORKDIR /workspace
 

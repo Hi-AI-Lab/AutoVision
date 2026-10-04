@@ -6,7 +6,7 @@ from autovision._env import Env
 
 class TestDefaults:
     def test_defaults(self, monkeypatch):
-        monkeypatch.delenv("VTRAIN_LOG_LEVEL", raising=False)
+        monkeypatch.delenv("AUTOVISION_LOG_LEVEL", raising=False)
         assert Env.LOG_LEVEL.value == "INFO"
         assert Env.CACHE_DIR.value.name == "autovision-cache"  # from conftest
         assert Env.MODEL_CACHE_DIR.value == Env.CACHE_DIR.value / "models"
@@ -21,8 +21,8 @@ class TestDefaults:
 
     def test_values_snapshot_covers_all_vars(self):
         values = Env.values()
-        assert values["VTRAIN_LOG_LEVEL"] == "INFO"
-        assert "VTRAIN_TELEMETRY" in values
+        assert values["AUTOVISION_LOG_LEVEL"] == "INFO"
+        assert "AUTOVISION_TELEMETRY" in values
 
 
 class TestParsing:
@@ -37,16 +37,16 @@ class TestParsing:
             ("false", False),
             ("", False),  # empty string falls back to default -> False
         ]:
-            monkeypatch.setenv("VTRAIN_MMAP_REUSE_FILE", raw)
+            monkeypatch.setenv("AUTOVISION_MMAP_REUSE_FILE", raw)
             assert Env.MMAP_REUSE_FILE.value is expected, raw
 
     def test_empty_string_converts_to_default(self, monkeypatch):
-        monkeypatch.setenv("VTRAIN_LOG_LEVEL", "")
+        monkeypatch.setenv("AUTOVISION_LOG_LEVEL", "")
         assert Env.LOG_LEVEL.value == "INFO"
 
     def test_invalid_int_raises(self, monkeypatch):
-        monkeypatch.setenv("VTRAIN_MAX_NUM_WORKERS_AUTO", "eight")
-        with pytest.raises(ValueError, match="VTRAIN_MAX_NUM_WORKERS_AUTO"):
+        monkeypatch.setenv("AUTOVISION_MAX_NUM_WORKERS_AUTO", "eight")
+        with pytest.raises(ValueError, match="AUTOVISION_MAX_NUM_WORKERS_AUTO"):
             Env.MAX_NUM_WORKERS_AUTO.value
 
     def test_set_and_unset(self, monkeypatch):
@@ -56,5 +56,5 @@ class TestParsing:
         assert Env.OFFLINE.value is False
 
     def test_mirror_url(self, monkeypatch):
-        monkeypatch.setenv("VTRAIN_MIRROR_URL", "https://mirror.internal")
+        monkeypatch.setenv("AUTOVISION_MIRROR_URL", "https://mirror.internal")
         assert Env.MIRROR_URL.value == "https://mirror.internal"

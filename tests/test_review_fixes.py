@@ -57,7 +57,7 @@ class TestP1MmapRefcount:
     """P1: attaching to an existing mmap must register a reference."""
 
     def test_exists_path_increments_refcount(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("VTRAIN_DATA_CACHE_DIR", str(tmp_path / "cache"))
+        monkeypatch.setenv("AUTOVISION_DATA_CACHE_DIR", str(tmp_path / "cache"))
         from autovision._data.mmap_helpers import get_dataset_mmap_file
 
         def items():
