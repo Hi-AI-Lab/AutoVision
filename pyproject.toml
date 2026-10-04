@@ -13,11 +13,14 @@ dependencies = [
     "filelock>=3.0",
     "numpy>=1.23",
     "pyarrow>=15.0.0",
+    "pycocotools>=2.0.7",
     "pydantic>=2.7",
     "pyyaml>=6.0",
+    "scipy>=1.10",
     "torch>=2.4",
     "torchvision>=0.19",
     "tqdm>=4.0",
+    "typer>=0.12",
 ]
 
 [project.scripts]
@@ -29,7 +32,11 @@ mlflow = ["mlflow>=2.8"]
 wandb = ["wandb>=0.17"]
 bitsandbytes = ["bitsandbytes>=0.43"]
 timm = ["timm>=1.0.3"]
-super-gradients = ["super-gradients>=3.5"]
+# Floor 3.6.1: earlier releases pin pycocotools==2.0.6, which conflicts
+# with the core pycocotools requirement. super-gradients itself pins
+# onnxruntime==1.15.0 upstream, so this extra can never co-install with
+# the `export` extra — declared as an extra conflict in [tool.uv].
+super-gradients = ["super-gradients>=3.6.1"]
 # AGPL-3.0: extras-only by policy — never a core dependency, never imported
 # at module level (see src/autovision/_models/ultralytics/).
 ultralytics = ["ultralytics>=8.1.0"]
@@ -45,6 +52,18 @@ rfdetr = ["transformers>=4.56"]
 # onnxslim -> verification gates); also required by the deployment tests.
 export = ["onnx>=1.15", "onnxruntime>=1.17", "onnxslim>=0.1"]
 dev = ["pytest>=8.0", "pytest-mock>=3.14"]
+
+[tool.uv]
+# super-gradients upstream pins onnxruntime==1.15.0, which can never
+# co-install with the `export` extra's onnxruntime>=1.17. Declare the
+# mutual exclusion so `uv lock` can resolve both branches honestly
+# (pip fails loudly if a user installs both extras together).
+conflicts = [
+    [
+        { extra = "export" },
+        { extra = "super-gradients" },
+    ],
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
