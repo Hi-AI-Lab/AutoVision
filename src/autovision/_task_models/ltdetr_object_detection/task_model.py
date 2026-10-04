@@ -11,7 +11,6 @@ family. Per-variant encoder/decoder recipes come from the registry spec.
 from __future__ import annotations
 
 import pathlib
-import pickle
 from typing import Any, Literal
 
 import torch
@@ -20,6 +19,7 @@ from torch import nn
 from autovision._models import get_wrapped_model
 from autovision._models.dinov2.dinov2_wrapper import TransformersDinov2Wrapper
 from autovision._export import ONNXExportMixin, ONNXExportPrecisionPolicy
+from autovision.errors import CheckpointError
 from autovision._task_models.object_detection_components.decode import (
     decode_detection_outputs,
 )
@@ -209,15 +209,15 @@ class LTDETRObjectDetection(ONNXExportMixin, TaskModel):
             state = torch.load(
                 backbone_weights, map_location="cpu", weights_only=True
             )
-        except TypeError:
-            # torch < 2.0 has no weights_only; fall back to a full load.
-            state = torch.load(backbone_weights, map_location="cpu")
-        except pickle.UnpicklingError:
-            # Legacy checkpoint with non-tensor entries (e.g. numpy): the
-            # trusted-file fallback deserializes the full pickle.
-            state = torch.load(
-                backbone_weights, map_location="cpu", weights_only=False
-            )
+        except Exception as error:
+            raise CheckpointError(
+                f"Failed to load backbone weights '{backbone_weights}' "
+                f"under the safe loader (weights_only=True): {error}. "
+                f"Legacy pickles with non-tensor payloads are rejected; "
+                f"convert the file once with torch.load(..., "
+                f"weights_only=False) in a trusted context and re-save "
+                f"the plain state_dict with torch.save."
+            ) from error
         if isinstance(state, dict) and "state_dict" in state:
             state = state["state_dict"]
         target = self.backbone.backbone_model

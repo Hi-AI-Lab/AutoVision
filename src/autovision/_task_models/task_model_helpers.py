@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import importlib
 import logging
+import pickle
+import re
 from pathlib import Path
 from typing import Any, Literal
 
@@ -13,6 +15,7 @@ import torch
 from autovision._env import Env  # noqa: F401  (cache dir contract)
 from autovision.errors import CheckpointError
 from autovision._accelerator import npu_available
+from autovision._task_models.task_model import TaskModel
 from autovision.types import PathLike
 
 __all__ = ["load_model"]
@@ -21,6 +24,21 @@ logger = logging.getLogger("autovision")
 
 # Class-path migration table: old exports keep loading after refactors.
 _CLASS_PATH_MIGRATIONS: dict[str, str] = {}
+
+# Allowlist for dynamically imported model classes: exported files carry
+# ``model_class_path`` and are untrusted input, so only concrete TaskModel
+# classes inside this package may ever be reconstructed (a tampered file
+# must not be able to instantiate arbitrary callables).
+_TASK_MODEL_PACKAGE_PREFIX = "autovision._task_models."
+
+# Exports legitimately embed autovision class references (the task-model
+# class itself rides along in ``model_init_args``), which the default
+# weights_only unpickler refuses. Blocked globals are extracted from the
+# loader error and only admitted after verifying they really resolve to
+# ``autovision.*`` objects — anything else (os.system, builtins, ...) stays
+# rejected, so the unpickler never constructs foreign objects.
+_BLOCKED_GLOBAL_RE = re.compile(r"GLOBAL ([\w.]+) was not an allowed global")
+_MAX_ALLOWLIST_UPGRADES = 8
 
 
 def _resolve_device(device: str | torch.device | None) -> torch.device:
@@ -35,6 +53,45 @@ def _resolve_device(device: str | torch.device | None) -> torch.device:
     return torch.device("cpu")
 
 
+def _verify_autovision_global(qualname: str) -> Any | None:
+    """Return the object for ``qualname`` if it truly lives in autovision."""
+    if not qualname.startswith("autovision."):
+        return None
+    module_path, _, attr = qualname.rpartition(".")
+    if not module_path.startswith("autovision."):
+        return None
+    try:
+        module = importlib.import_module(module_path)
+        obj = getattr(module, attr)
+    except (ImportError, AttributeError):
+        return None
+    if not str(getattr(obj, "__module__", "")).startswith("autovision."):
+        return None
+    return obj
+
+
+def _safe_load_export(path: Path) -> Any:
+    """weights_only load that self-upgrades its allowlist with verified
+    autovision-internal globals the export legitimately embedded."""
+    allowed: list[Any] = []
+    for _ in range(_MAX_ALLOWLIST_UPGRADES):
+        try:
+            with torch.serialization.safe_globals(allowed):
+                return torch.load(path, map_location="cpu", weights_only=True)
+        except pickle.UnpicklingError as error:
+            match = _BLOCKED_GLOBAL_RE.search(str(error))
+            if match is None:
+                raise
+            obj = _verify_autovision_global(match.group(1))
+            if obj is None or any(obj is seen for seen in allowed):
+                raise
+            allowed.append(obj)
+    raise CheckpointError(
+        f"Exported model '{path}' references too many non-default "
+        f"globals; refusing to extend the safe-loader allowlist further."
+    )
+
+
 def load_task_model(
     model: PathLike, device: str | torch.device | None = None
 ) -> Any:
@@ -44,16 +101,29 @@ def load_task_model(
     ``train_model`` (EMA-prefixed state dict); the class is imported
     dynamically and the state dict loaded through the model's loader
     (EMA prefix stripped by the TaskModel).
+
+    Security contract: exported files are untrusted input. They are
+    deserialized with ``torch.load(weights_only=True)`` (no pickle object
+    execution; autovision-internal class references are admitted only
+    after verification) and the embedded class path may only resolve to a
+    concrete :class:`TaskModel` subclass inside
+    ``autovision._task_models``.
     """
     device = _resolve_device(device)
     path = Path(model)
     if not path.exists():
         raise CheckpointError(f"Exported model does not exist: '{path}'")
     try:
-        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+        checkpoint = _safe_load_export(path)
+    except CheckpointError:
+        raise
     except Exception as error:
         raise CheckpointError(
-            f"Failed to load exported model '{path}': {error}"
+            f"Failed to load exported model '{path}': {error}. Exported "
+            f"models are only ever read with the pickle-free safe loader "
+            f"(weights_only=True); if this file came from another "
+            f"framework or an unsafe writer, re-export it from a trusted "
+            f"training run instead of disabling the loader guard."
         ) from error
     if not isinstance(checkpoint, dict) or "model_class_path" not in checkpoint:
         raise CheckpointError(
@@ -62,6 +132,14 @@ def load_task_model(
     class_path: str = _CLASS_MIGRATIONS.get(
         checkpoint["model_class_path"], checkpoint["model_class_path"]
     )
+    if not isinstance(class_path, str) or not class_path.startswith(
+        _TASK_MODEL_PACKAGE_PREFIX
+    ):
+        raise CheckpointError(
+            f"Refusing to rebuild '{class_path!r}' from exported model "
+            f"'{path}': only autovision task-model classes "
+            f"('{_TASK_MODEL_PACKAGE_PREFIX}.*') may be imported."
+        )
     module_path, class_name = class_path.rsplit(".", 1)
     try:
         module = importlib.import_module(module_path)
@@ -71,6 +149,15 @@ def load_task_model(
             f"Cannot import '{class_path}' from the installed autovision "
             f"version: {error}"
         ) from error
+    if not (
+        isinstance(model_class, type)
+        and issubclass(model_class, TaskModel)
+        and model_class is not TaskModel
+    ):
+        raise CheckpointError(
+            f"Refusing to instantiate '{class_path}' from exported model "
+            f"'{path}': not a concrete autovision TaskModel subclass."
+        )
 
     init_args = dict(checkpoint.get("model_init_args", {}))
     init_args.pop("load_weights", None)

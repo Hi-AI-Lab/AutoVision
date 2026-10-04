@@ -116,6 +116,25 @@ class NaNCaptureMonitor:
         )
 
 
-def load_nan_capture(path: Path | str) -> dict[str, Any]:
-    """Load a NaN snapshot for deterministic replay."""
-    return torch.load(path, map_location="cpu", weights_only=False)
+def load_nan_capture(
+    path: Path | str, trust_source: bool = False
+) -> dict[str, Any]:
+    """Load a NaN snapshot for deterministic replay.
+
+    Snapshots carry numpy/torch RNG state objects that the pickle-free
+    safe loader cannot restore, so full replay needs ``trust_source=True``
+    (a plain ``weights_only=False`` load). Only flip it for snapshots you
+    wrote yourself — a snapshot is executable pickle input like any
+    checkpoint.
+    """
+    try:
+        return torch.load(path, map_location="cpu", weights_only=True)
+    except Exception as error:
+        if not trust_source:
+            raise ValueError(
+                f"NaN snapshot '{path}' cannot be loaded with the safe "
+                f"loader ({error}). RNG-state replay requires "
+                f"trust_source=True, which deserializes the full pickle — "
+                f"only do this for snapshots you created yourself."
+            ) from error
+        return torch.load(path, map_location="cpu", weights_only=False)

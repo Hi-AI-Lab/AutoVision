@@ -145,10 +145,10 @@ class TestTelemetry:
         track_event("test_event", {"x": 1})  # must be a no-op
 
     def test_enabled_sends_payload(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("VTRAIN_TELEMETRY", "1")
-        monkeypatch.setenv("VTRAIN_CACHE_DIR", str(tmp_path))
+        monkeypatch.setenv("AUTOVISION_TELEMETRY", "1")
+        monkeypatch.setenv("AUTOVISION_CACHE_DIR", str(tmp_path))
         monkeypatch.setenv(
-            "VTRAIN_TELEMETRY_ENDPOINT", str(tmp_path / "endpoint")
+            "AUTOVISION_TELEMETRY_ENDPOINT", str(tmp_path / "endpoint")
         )  # invalid URL scheme -> transport error path is swallowed
         from autovision._events import tracker
 
@@ -166,9 +166,9 @@ class TestTelemetry:
         assert str(tmp_path) not in json.dumps(sent["payload"])
 
     def test_rate_limit(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("VTRAIN_TELEMETRY", "1")
-        monkeypatch.setenv("VTRAIN_CACHE_DIR", str(tmp_path))
-        monkeypatch.setenv("VTRAIN_TELEMETRY_ENDPOINT", str(tmp_path / "e"))
+        monkeypatch.setenv("AUTOVISION_TELEMETRY", "1")
+        monkeypatch.setenv("AUTOVISION_CACHE_DIR", str(tmp_path))
+        monkeypatch.setenv("AUTOVISION_TELEMETRY_ENDPOINT", str(tmp_path / "e"))
         from autovision._events import tracker
 
         monkeypatch.setattr(tracker, "_sender", lambda *a: None)
@@ -177,8 +177,8 @@ class TestTelemetry:
         assert len(tracker._events) == 0
 
     def test_user_id_persisted(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("VTRAIN_TELEMETRY", "1")
-        monkeypatch.setenv("VTRAIN_CACHE_DIR", str(tmp_path))
+        monkeypatch.setenv("AUTOVISION_TELEMETRY", "1")
+        monkeypatch.setenv("AUTOVISION_CACHE_DIR", str(tmp_path))
         from autovision._events import tracker
 
         uid1 = tracker._anonymous_user_id()
@@ -207,7 +207,11 @@ class TestDebug:
             monitor.check_loss(bad_loss)
         path = tmp_path / "nan_capture" / "nan_capture.pt"
         assert path.exists()
-        snapshot = load_nan_capture(path)
+        # Snapshots carry RNG-state objects: the safe loader must reject
+        # them by default, and replay requires the explicit opt-in.
+        with pytest.raises(ValueError, match="trust_source"):
+            load_nan_capture(path)
+        snapshot = load_nan_capture(path, trust_source=True)
         assert snapshot["trigger"] == "loss"
         assert snapshot["model_class_path"] == "fake.Path"
         assert len(snapshot["microbatches"]) == 1

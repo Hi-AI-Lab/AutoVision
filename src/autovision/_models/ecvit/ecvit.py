@@ -31,6 +31,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from autovision._models._model_helpers import adapt_conv_input_channels
+from autovision.errors import CheckpointError
 from autovision._models.model_wrapper import (
     ArchitectureInfo,
     ForwardFeaturesOutput,
@@ -603,8 +604,13 @@ class ECViTModelWrapper(nn.Module):
             raise FileNotFoundError(f"ECViT weights_path does not exist: {path}")
         try:
             state = torch.load(path, map_location="cpu", weights_only=True)
-        except TypeError:
-            state = torch.load(path, map_location="cpu", weights_only=False)
+        except Exception as error:
+            raise CheckpointError(
+                f"Failed to load ECViT weights '{path}' under the safe "
+                f"loader (weights_only=True): {error}. Convert the file "
+                f"once in a trusted context and re-save the plain "
+                f"state_dict with torch.save."
+            ) from error
         state_dict = dict(_unwrap_state_dict(state))
         # The RoPE periods buffer is non-persistent (fully determined by
         # base + head dim); drop it if a checkpoint still carries it.
