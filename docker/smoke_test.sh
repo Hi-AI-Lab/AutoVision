@@ -3,10 +3,16 @@
 set -euo pipefail
 python - << 'PY'
 import sys, tempfile, pathlib
-sys.path.insert(0, "tests")
-from conftest import create_images
+import numpy as np
+from PIL import Image
+
 tmp = pathlib.Path(tempfile.mkdtemp())
-create_images(tmp / "images", num_images=8, size=(64, 64))
+(tmp / "images").mkdir(parents=True)
+rng = np.random.default_rng(0)
+for i in range(8):
+    array = rng.integers(0, 255, (64, 64, 3), dtype=np.uint8)
+    Image.fromarray(array).save(tmp / "images" / f"img_{i:03d}.jpg")
+
 import autovision
 result = autovision.pretrain(
     out=tmp / "run", data=tmp / "images", model="torchvision/resnet18",
