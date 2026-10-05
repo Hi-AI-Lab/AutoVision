@@ -31,6 +31,9 @@ from autovision._task_models.object_detection_components.hybrid_encoder import (
 from autovision._task_models.object_detection_components.rtdetrv2_decoder import (
     RTDETRv2Decoder,
 )
+from autovision._task_models.object_detection_components.ssl_contrastive import (
+    SSLProjectionHead,
+)
 from autovision._task_models.rtdetr_object_detection.task_model import (
     ObjectDetectionOutput,
 )
@@ -47,10 +50,14 @@ from .backbone_wrappers import (
     ViTDetectionBackbone,
 )
 from .config import (
+    LTDETRDensityArgs,
+    LTDETRSSLArgs,
     LTDETRVariantSpec,
     check_image_size,
     resolve_ltdetr_variant,
 )
+from .dome_decoder import DomeDFINEv2Decoder
+from .dome_encoder import DomeHybridEncoder
 
 __all__ = ["LTDETRObjectDetection"]
 
@@ -103,9 +110,21 @@ class LTDETRObjectDetection(ONNXExportMixin, TaskModel):
         backbone_pretrained: bool = False,
         backbone_weights: str | None = None,
         load_weights: bool = True,
+        pyramid_levels: int = 3,
+        density: LTDETRDensityArgs | dict | None = None,
+        ssl: LTDETRSSLArgs | dict | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(init_args=locals(), ignore_args={"load_weights", "kwargs", "self"})
+        # Exported checkpoints are deserialized with the pickle-free safe
+        # loader (weights_only=True), which rejects arbitrary objects —
+        # snapshot the density/ssl configs as plain dicts; __init__
+        # re-coerces dicts back into the args classes below, so the round
+        # trip is lossless.
+        if isinstance(self._init_args.get("density"), LTDETRDensityArgs):
+            self._init_args["density"] = self._init_args["density"].model_dump()
+        if isinstance(self._init_args.get("ssl"), LTDETRSSLArgs):
+            self._init_args["ssl"] = self._init_args["ssl"].model_dump()
         self.num_classes = num_classes
         self.num_top_queries = num_top_queries
         self.normalize = NormalizeArgs()
@@ -134,6 +153,64 @@ class LTDETRObjectDetection(ONNXExportMixin, TaskModel):
         if decoder not in ("rtdetrv2", "dfine"):
             raise ValueError(f"Unknown LT-DETR decoder: '{decoder}'.")
         self.decoder_name = decoder
+
+        # Density-guided branch (Dome-DETR port). ``None`` keeps the
+        # baseline contract bit-for-bit: no dome modules are constructed.
+        if pyramid_levels not in (3, 4):
+            raise ValueError(
+                f"pyramid_levels must be 3 or 4, got {pyramid_levels}."
+            )
+        if pyramid_levels == 4 and spec.family != "convnext":
+            raise ValueError(
+                f"pyramid_levels=4 needs a ConvNeXt-family backbone (the "
+                f"only wrapper exposing a stride-4 stage); "
+                f"'{spec.backbone_name}' is family '{spec.family}'."
+            )
+        if isinstance(density, dict):
+            density = LTDETRDensityArgs(**density)
+        if density is not None:
+            if decoder != "dfine":
+                raise ValueError(
+                    "density (dynamic queries / DeFE / MWAS) requires the "
+                    "D-FINE decoder; pass decoder='dfine' (the evaluated "
+                    "v1 combination, design doc 13 §3.3)."
+                )
+            if num_queries > density.max_num_select:
+                raise ValueError(
+                    f"num_queries ({num_queries}) must not exceed "
+                    f"density.max_num_select ({density.max_num_select})."
+                )
+        self.density_args: LTDETRDensityArgs | None = density
+        self._density_enabled = density is not None
+
+        # Per-object contrastive SSL branch (design doc 14). ``None`` or
+        # ``mode="off"`` keeps the baseline contract: no head is constructed
+        # (mode="off" + two_crop is the batch-matched no-SSL baseline — the
+        # doubled data pipeline runs, the loss does not).
+        if isinstance(ssl, dict):
+            ssl = LTDETRSSLArgs(**ssl)
+        if ssl is not None and decoder != "dfine":
+            # v1 boundary (design doc 14 §3.3): the RT-DETRv2 decoder has
+            # no query_features emission, so the whole ssl config —
+            # including the mode="off" batch-matched baseline — is
+            # restricted to the D-FINE decoder family.
+            raise ValueError(
+                "ssl (per-object contrastive head) requires the D-FINE "
+                "decoder in v1; pass decoder='dfine' (design doc 14 §3.3)."
+            )
+        self.ssl_args: LTDETRSSLArgs | None = ssl
+        # Route B (design doc 14 §4.10): label-free SSL-only pretraining off
+        # the decoder's top-k candidate features. The density-gated selection
+        # is not supported as an instance source (zero-padded candidates).
+        self._ssl_candidates_mode = (
+            ssl is not None and ssl.instance_source == "encoder_candidates"
+        )
+        if self._ssl_candidates_mode and self._density_enabled:
+            raise ValueError(
+                "ssl instance_source='encoder_candidates' (SSL-only "
+                "pretraining) is not supported with the density branch; "
+                "disable density (design doc 14 §4.10)."
+            )
 
         if spec.requires_dinov3 and not _dinov3_supported():
             raise ValueError(
@@ -170,7 +247,10 @@ class LTDETRObjectDetection(ONNXExportMixin, TaskModel):
             self.backbone = ECViTDetectionBackbone(backbone_wrapper)
         else:
             self.backbone = ConvNeXtDetectionBackbone(
-                backbone_wrapper, finetune=True
+                backbone_wrapper,
+                finetune=True,
+                patch_size=spec.patch_size,
+                num_stages=pyramid_levels,
             )
         in_channels = self.backbone.in_channels
 
@@ -178,21 +258,45 @@ class LTDETRObjectDetection(ONNXExportMixin, TaskModel):
             # ECViT loads its backbone weights inside the wrapper.
             self._load_backbone_weights(backbone_weights)
 
-        self.encoder = HybridEncoder(
-            in_channels,
-            hidden_dim=hidden_dim,
-            dim_feedforward=spec.enc_dim_feedforward,
-            expansion=spec.enc_expansion,
-            depth_mult=spec.enc_depth_mult,
-        )
+        if self._density_enabled:
+            self.encoder = DomeHybridEncoder(
+                in_channels,
+                hidden_dim=hidden_dim,
+                dim_feedforward=spec.enc_dim_feedforward,
+                expansion=spec.enc_expansion,
+                depth_mult=spec.enc_depth_mult,
+                use_encoder_idx=[pyramid_levels - 1],
+                density=density,
+            )
+        else:
+            self.encoder = HybridEncoder(
+                in_channels,
+                hidden_dim=hidden_dim,
+                dim_feedforward=spec.enc_dim_feedforward,
+                expansion=spec.enc_expansion,
+                depth_mult=spec.enc_depth_mult,
+                use_encoder_idx=[pyramid_levels - 1],
+            )
+        # Pyramid strides: 3-level [8, 16, 32]; 4-level prepends the
+        # ConvNeXt stride-4 stage (Dome-faithful, design doc 13 D1).
+        feat_strides = [8, 16, 32] if pyramid_levels == 3 else [4, 8, 16, 32]
+        num_points = list(spec.dec_num_points)
+        if len(num_points) != pyramid_levels:
+            if len(set(num_points)) != 1:
+                raise ValueError(
+                    f"dec_num_points {num_points} cannot be expanded to "
+                    f"pyramid_levels={pyramid_levels}; specify per-level "
+                    f"values explicitly."
+                )
+            num_points = num_points[:1] * pyramid_levels
         decoder_kwargs: dict[str, Any] = dict(
             num_classes=num_classes,
             hidden_dim=hidden_dim,
             num_queries=num_queries,
-            feat_channels=[hidden_dim] * 3,
-            feat_strides=[8, 16, 32],
-            num_levels=3,
-            num_points=list(spec.dec_num_points),
+            feat_channels=[hidden_dim] * pyramid_levels,
+            feat_strides=feat_strides,
+            num_levels=pyramid_levels,
+            num_points=num_points,
             nhead=num_heads,
             num_layers=dec_layers,
             num_denoising=num_denoising,
@@ -200,24 +304,56 @@ class LTDETRObjectDetection(ONNXExportMixin, TaskModel):
             box_noise_scale=box_noise_scale,
         )
         if decoder == "dfine":
-            self.decoder: nn.Module = DFINEv2Decoder(
-                **decoder_kwargs, reg_max=reg_max
-            )
+            if self._density_enabled:
+                self.decoder: nn.Module = DomeDFINEv2Decoder(
+                    **decoder_kwargs,
+                    reg_max=reg_max,
+                    min_num_select=density.resolved_min_num_select(num_queries),
+                    max_num_select=density.max_num_select,
+                    nms_iou_base=density.nms_iou_base,
+                    nms_iou_density_scale=density.nms_iou_density_scale,
+                )
+            else:
+                self.decoder = DFINEv2Decoder(
+                    **decoder_kwargs,
+                    reg_max=reg_max,
+                    ssl_candidate_features=self._ssl_candidates_mode,
+                )
         else:
             self.decoder = RTDETRv2Decoder(**decoder_kwargs)
+
+        # The SSL head is built LAST so its random init never shifts the
+        # RNG stream of the baseline modules: with a fixed seed, an
+        # ssl-enabled model and the baseline model carry IDENTICAL
+        # backbone/encoder/decoder weights (bit-for-bit eval contract).
+        self.ssl_head: nn.Module | None = None
+        if ssl is not None and ssl.mode != "off":
+            self.ssl_head = SSLProjectionHead(
+                hidden_dim=hidden_dim,
+                projection_dim=ssl.projector_dim,
+                kind=ssl.projector,
+                dropout=ssl.projector_dropout,
+            )
 
     # ── backbone weights ────────────────────────────────────────────────
     def _load_backbone_weights(self, backbone_weights: str) -> None:
         try:
-            state = torch.load(
-                backbone_weights, map_location="cpu", weights_only=True
-            )
+            if str(backbone_weights).endswith(".safetensors"):
+                # Safetensors is the preferred source format: no pickle
+                # surface at all, tensors only.
+                from safetensors.torch import load_file as safetensors_load_file
+
+                state = safetensors_load_file(str(backbone_weights), device="cpu")
+            else:
+                state = torch.load(
+                    backbone_weights, map_location="cpu", weights_only=True
+                )
         except Exception as error:
             raise CheckpointError(
                 f"Failed to load backbone weights '{backbone_weights}' "
-                f"under the safe loader (weights_only=True): {error}. "
-                f"Legacy pickles with non-tensor payloads are rejected; "
-                f"convert the file once with torch.load(..., "
+                f"under the safe loader (weights_only=True / safetensors): "
+                f"{error}. Legacy pickles with non-tensor payloads are "
+                f"rejected; convert the file once with torch.load(..., "
                 f"weights_only=False) in a trusted context and re-save "
                 f"the plain state_dict with torch.save."
             ) from error
@@ -262,8 +398,47 @@ class LTDETRObjectDetection(ONNXExportMixin, TaskModel):
         self, x: torch.Tensor, targets: list[dict[str, torch.Tensor]] | None = None
     ) -> dict:
         feats = list(self.backbone(x))
-        outs = self.encoder(feats)
-        return self.decoder(outs, targets=targets)
+        if self._density_enabled:
+            outs, defe_info = self.encoder(feats, targets=targets)
+            out = self.decoder(outs, targets=targets, defe_info=defe_info)
+        else:
+            outs = self.encoder(feats)
+            out = self.decoder(outs, targets=targets)
+        if self.ssl_head is not None:
+            if self._ssl_candidates_mode:
+                # Route B: the pool is the top-k candidate features. Emitted
+                # in train AND eval — the contrastive loss is the only
+                # objective, so the validation loss is the held-out SSL loss.
+                candidate_features = out.get("ssl_candidate_features")
+                if candidate_features is None:
+                    raise ValueError(
+                        "ssl instance_source='encoder_candidates' requires the "
+                        "decoder to emit ssl_candidate_features; the SSL-only "
+                        "mode requires the D-FINE decoder family "
+                        "(design doc 14 §4.10)."
+                    )
+                out["ssl_z1"] = self.ssl_head(candidate_features)
+                out["ssl_z2"] = self.ssl_head(candidate_features)
+            elif self.training:
+                # Two independent dropout draws through the projection head
+                # give the two views of every query; the criterion selects
+                # the matched rows (and the cross-view pairs under two_crop).
+                query_features = out.get("query_features")
+                if query_features is None:
+                    raise ValueError(
+                        "ssl_head is enabled but the decoder produced no "
+                        "query_features; the SSL head requires the D-FINE "
+                        "decoder family (design doc 14 §4.3)."
+                    )
+                out["ssl_z1"] = self.ssl_head(query_features)
+                out["ssl_z2"] = self.ssl_head(query_features)
+        return out
+
+    # deploy(): inherited from TaskModel — it recursively calls
+    # ``convert_to_deploy`` on every module, which is exactly the export
+    # hook the density-guided modules implement (design doc 13 §4.8):
+    # DomeHybridEncoder/DomeDFINEv2Decoder fall back to the fixed-proposal
+    # baseline graph, while density-off models behave exactly as before.
 
     def forward_backend(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         out = self._forward_train(x)
@@ -332,8 +507,14 @@ def _dinov3_supported() -> bool:
     try:
         import transformers
 
-        return hasattr(transformers, "Dinov3ConvNextModel") and hasattr(
-            transformers, "Dinov3ViTModel"
-        )
+        # transformers ships the classes as ``DINOv3*`` (4.x lazy exports
+        # and 5.x alike); keep the ``Dinov3*`` fallbacks for older layouts.
+        vit = getattr(
+            transformers, "DINOv3ViTModel", None
+        ) or getattr(transformers, "Dinov3ViTModel", None)
+        convnext = getattr(
+            transformers, "DINOv3ConvNextModel", None
+        ) or getattr(transformers, "Dinov3ConvNextModel", None)
+        return vit is not None and convnext is not None
     except ImportError:
         return False

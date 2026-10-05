@@ -260,6 +260,20 @@ class TestTaskModel:
         with pytest.raises(ValueError, match="unknown to the backbone"):
             train_model.model._load_backbone_weights(str(path))
 
+    def test_backbone_weights_accept_safetensors(self, tmp_path):
+        from safetensors.torch import save_file
+
+        train_model = make_train_model()
+        state = train_model.model.backbone.backbone_model.state_dict()
+        path = tmp_path / "backbone.safetensors"
+        save_file(state, str(path))
+        # Loads without raising and produces the same backbone weights.
+        fresh = make_train_model()
+        fresh.model._load_backbone_weights(str(path))
+        reference = train_model.model.backbone.backbone_model.state_dict()
+        for key, value in fresh.model.backbone.backbone_model.state_dict().items():
+            assert torch.equal(value, reference[key])
+
 
 class TestOptimizerGroups:
     def test_vit_lr_groups(self):

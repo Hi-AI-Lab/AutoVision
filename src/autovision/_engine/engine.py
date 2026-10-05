@@ -476,6 +476,11 @@ class TaskEngine(Engine):
         seed_everything(seed)
         device = resolve_device(devices)
         train_model.to(device)
+        if device.type == "cuda":
+            # Ampere+ tensor cores for the fp32 remainder (EMA, optimizer,
+            # non-autocast ops); autocast-covered bf16 ops are unaffected.
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
 
         # ── distributed setup (torchrun) ──
         ddp_train_model: nn.Module = train_model
@@ -681,7 +686,9 @@ class TaskEngine(Engine):
                                 f"Non-finite loss at step {step}. Check data or lower lr."
                             )
                         loss.backward()
-                        accumulated_loss += float(step_result.loss.detach())
+                        # Kept on-device: one sync at logging time instead
+                        # of one per microbatch.
+                        accumulated_loss = accumulated_loss + step_result.loss.detach()
                     if nan_monitor is not None:
                         nan_monitor.check_gradients(train_model)
                     train_model.clip_gradients(optimizer)
@@ -695,8 +702,14 @@ class TaskEngine(Engine):
                     and is_rank_zero
                     and (step + 1) % log_every_n_steps == 0
                 ):
-                    metrics = {"train_loss": accumulated_loss / gradient_accumulation_steps}
-                    metrics.update(step_result.log_dict)
+                    metrics = {
+                        "train_loss": float(accumulated_loss)
+                        / gradient_accumulation_steps
+                    }
+                    metrics.update({
+                        key: float(value) if torch.is_tensor(value) else value
+                        for key, value in step_result.log_dict.items()
+                    })
                     logger_fn(metrics, step + 1)
 
                 is_last_step = step == steps - 1

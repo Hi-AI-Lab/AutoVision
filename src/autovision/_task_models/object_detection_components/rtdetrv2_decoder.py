@@ -760,6 +760,13 @@ class RTDETRv2Decoder(nn.Module):
             output_memory, enc_outputs_logits, enc_outputs_coord_unact, self.num_queries
         )
 
+        if getattr(self, "_emit_candidate_features", False):
+            # Route B (design doc 14 §4.10): the pre-detach top-k candidate
+            # features are the contrastive pool's instances — gradients flow
+            # back through enc_output into the encoder memory. Inert unless
+            # the decoder was built with ssl_candidate_features=True.
+            self._candidate_features = enc_topk_memory
+
         if self.learn_query_content:
             content = self.tgt_embed.weight.unsqueeze(0).tile([memory.shape[0], 1, 1])
         else:

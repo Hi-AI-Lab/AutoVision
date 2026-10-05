@@ -40,14 +40,29 @@ class ModelEMA:
         ) else self.decay
         model_state: dict[str, Any] = model.state_dict()
         ema_state = self.model.state_dict()
+        float_targets: list[torch.Tensor] = []
+        float_sources: list[torch.Tensor] = []
+        other_targets: list[torch.Tensor] = []
+        other_sources: list[torch.Tensor] = []
         for key, value in ema_state.items():
             source = model_state[key]
             if source.device != value.device:
                 source = source.detach().to(value.device)
             if value.dtype.is_floating_point:
-                value.mul_(decay).add_(source, alpha=1.0 - decay)
+                float_targets.append(value)
+                float_sources.append(source)
             else:
-                value.copy_(source)
+                other_targets.append(value)
+                other_sources.append(source)
+        # Foreach batches the update into a handful of kernel launches
+        # instead of two per tensor (hundreds of launches on a detector).
+        # The foreach ops reject empty tensor lists (a float-only or
+        # non-float-only model leaves one bucket empty).
+        if float_targets:
+            torch._foreach_mul_(float_targets, decay)
+            torch._foreach_add_(float_targets, float_sources, alpha=1.0 - decay)
+        if other_targets:
+            torch._foreach_copy_(other_targets, other_sources)
 
     def state_dict(self) -> dict[str, Any]:
         return {

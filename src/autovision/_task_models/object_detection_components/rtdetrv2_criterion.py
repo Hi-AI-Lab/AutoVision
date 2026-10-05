@@ -34,12 +34,18 @@ def loss_labels_vfl(
     num_boxes: torch.Tensor,
     alpha: float = 0.75,
     gamma: float = 2.0,
+    query_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Varifocal loss with IoU-scored targets on the matched queries.
 
     Positives: BCE against the matched IoU score, weighted by
     ``target_score^gamma``. Negatives: BCE against 0, weighted by
     ``pred_score^gamma`` (the quality-focal formulation).
+
+    ``query_mask``: optional (B, Q) bool marking *valid* queries. With
+    density-guided dynamic queries the padded tail of every image is
+    excluded from the classification loss (baseline Dome semantics —
+    box losses need no mask, they only touch matched pairs).
     """
     logits = outputs["pred_logits"]  # (B, Q, C)
     batch_size, num_queries, num_classes = logits.shape
@@ -59,7 +65,10 @@ def loss_labels_vfl(
     # Baseline RT-DETRv2 VFL: weight = alpha * pred^gamma * (1 - target) + target
     weight = alpha * pred_scores.detach().pow(gamma) * (1 - target_scores) + target_scores
     loss = F.binary_cross_entropy_with_logits(logits, target_scores, reduction="none")
-    return (loss * weight).sum() / num_boxes.clamp(min=1)
+    loss = loss * weight
+    if query_mask is not None:
+        loss = loss * query_mask.to(loss.dtype).unsqueeze(-1)
+    return loss.sum() / num_boxes.clamp(min=1)
 
 
 def _matched_iou(pred_boxes: torch.Tensor, target_boxes: torch.Tensor) -> torch.Tensor:
@@ -133,9 +142,10 @@ class RTDETRCriterionV2(nn.Module):
         targets: list[dict[str, torch.Tensor]],
         indices: list[tuple[torch.Tensor, torch.Tensor]],
         num_boxes: torch.Tensor,
+        query_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Delegate to the module-level VFL loss (subclass override seam)."""
-        return loss_labels_vfl(outputs, targets, indices, num_boxes)
+        return loss_labels_vfl(outputs, targets, indices, num_boxes, query_mask=query_mask)
 
     def loss_boxes(
         self,
@@ -154,6 +164,7 @@ class RTDETRCriterionV2(nn.Module):
         world_size: int = 1,
         dn_outputs: list[dict[str, torch.Tensor]] | None = None,
         dn_meta: dict | None = None,
+        query_mask: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         num_boxes = sum(int(t["boxes"].shape[0]) for t in targets)
         num_boxes = torch.tensor(float(num_boxes), device=outputs_list[-1]["pred_logits"].device)
@@ -166,7 +177,9 @@ class RTDETRCriterionV2(nn.Module):
         for output_index, outputs in enumerate(outputs_list):
             indices = self.matcher(outputs, targets)
             suffix = "" if output_index == num_entries - 1 else f"_aux_{output_index}"
-            losses[f"loss_vfl{suffix}"] = self.loss_labels(outputs, targets, indices, num_boxes)
+            losses[f"loss_vfl{suffix}"] = self.loss_labels(
+                outputs, targets, indices, num_boxes, query_mask=query_mask
+            )
             for name, value in self.loss_boxes(outputs, targets, indices, num_boxes).items():
                 losses[f"{name}{suffix}"] = value
 

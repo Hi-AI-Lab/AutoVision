@@ -61,8 +61,15 @@ class COCOMAPEvaluator:
     accumulate per validation round and ``compute()`` runs ``COCOeval``.
     """
 
-    def __init__(self, categories: dict[int, str]) -> None:
+    def __init__(self, categories: dict[int, str], max_dets: int = 100) -> None:
+        """``max_dets`` caps detections per image in the COCO eval.
+
+        Default 100 matches pycocotools. Dense benchmarks evaluate higher
+        (the VisDrone official protocol uses 500: crowded frames hold
+        hundreds of objects, and the cap directly bounds recall).
+        """
         self.categories = categories  # internal id -> name
+        self.max_dets = max_dets
         self._predictions: list[dict] = []
         self._ground_truth: list[dict] = []  # {"boxes","labels","size"} per image
 
@@ -183,10 +190,38 @@ class COCOMAPEvaluator:
             return {"map": 0.0, "map_50": 0.0}
         coco_dt = coco_gt.loadRes(dt_list)
         evaluator = COCOeval(coco_gt, coco_dt, "bbox")
+        # Three-element ladder per pycocotools convention; [1, 10, 100]
+        # equals the library default, so the default path is numerically
+        # unchanged.
+        evaluator.params.maxDets = [1, 10, self.max_dets]
         evaluator.evaluate()
         evaluator.accumulate()
-        evaluator.summarize()
+        if self.max_dets == 100:
+            # Official path: stats[0]/stats[1] are AP/AP50 at maxDets=100.
+            evaluator.summarize()
+            return {
+                "map": float(evaluator.stats[0]),
+                "map_50": float(evaluator.stats[1]),
+            }
+        # For other caps, summarize() is unusable as-is: its headline
+        # stats[0] is pinned to maxDets=100 in pycocotools (the bare
+        # ``_summarize(1)`` call), returning -1 under any other ladder.
+        # Compute AP/AP50 at the configured cap directly from the precision
+        # array — numerically identical to the official stats when the cap
+        # is 100.
+        import numpy as np
+
+        params = evaluator.params
+        tind = int(np.where(params.iouThrs == 0.5)[0][0])
+        aind = params.areaRngLbl.index("all")
+        mind = len(params.maxDets) - 1
+        precision = evaluator.eval["precision"]  # [T, R, K, A, M]
+
+        def _mean(values) -> float:
+            valid = values[values > -1]
+            return float(valid.mean()) if valid.size else -1.0
+
         return {
-            "map": float(evaluator.stats[0]),
-            "map_50": float(evaluator.stats[1]),
+            "map": _mean(precision[tind:, :, :, aind, mind]),
+            "map_50": _mean(precision[tind, :, :, aind, mind]),
         }

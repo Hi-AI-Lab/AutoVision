@@ -8,6 +8,7 @@ from autovision._transforms.detection_transforms.args import (
 )
 from autovision._transforms.detection_transforms.collate import (
     RTDETRDetectionCollateFunction,
+    TwoViewDetectionCollateFunction,
 )
 from autovision._transforms.detection_transforms.oriented_transform import (
     OrientedObjectDetectionCollateFunction,
@@ -34,6 +35,7 @@ __all__ = [
     "ScaleJitterArgs",
     "StepSchedule",
     "StepScheduledCompose",
+    "TwoViewDetectionCollateFunction",
     "build_oriented_val_transform_args",
     "build_val_transform_args",
     "resolve_detection_step_schedule",

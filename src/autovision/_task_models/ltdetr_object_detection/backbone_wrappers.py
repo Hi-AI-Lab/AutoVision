@@ -36,11 +36,18 @@ from autovision._models.dinov2.dinov2_wrapper import TransformersDinov2Wrapper
 from autovision._models.dinov3.dinov3_wrapper import TransformersDinov3ConvNextWrapper
 
 __all__ = [
+    "CONVNEXT_DETECTION_PATCH_SIZE",
     "ConvNeXtDetectionBackbone",
     "ECViTDetectionBackbone",
     "SpatialPriorModule",
     "ViTDetectionBackbone",
 ]
+
+#: DINOv3 ConvNeXt has no patch embedding; the detection pipeline still
+#: treats the family as patch-16 for image-size arithmetic. Default only —
+#: :class:`ConvNeXtDetectionBackbone` receives the authoritative value
+#: from the variant spec.
+CONVNEXT_DETECTION_PATCH_SIZE = 16
 
 
 def _ceil_half(value: int) -> int:
@@ -246,19 +253,41 @@ class ViTDetectionBackbone(Module):
 
 
 class ConvNeXtDetectionBackbone(Module):
-    """DINOv3 ConvNeXt -> last three stages (strides 8/16/32)."""
+    """DINOv3 ConvNeXt -> detection pyramid from consecutive stages.
 
-    #: 0-based stage indices tapped for the detection pyramid.
+    ``num_stages=3`` (default) taps stages 1/2/3 (strides 8/16/32);
+    ``num_stages=4`` taps all four stages (strides 4/8/16/32) — the
+    Dome-faithful pyramid for tiny-object workloads (design doc 13 §5/D1).
+    """
+
+    #: 0-based stage indices for the default 3-level pyramid.
     STAGE_INDICES = (1, 2, 3)
 
     def __init__(
         self,
         model_wrapper: TransformersDinov3ConvNextWrapper,
         finetune: bool = True,
+        patch_size: int = CONVNEXT_DETECTION_PATCH_SIZE,
+        num_stages: int = 3,
     ) -> None:
         super().__init__()
         self._model_wrapper = model_wrapper
-        self.patch_size = model_wrapper.get_model().patch_size
+        self.patch_size = patch_size
+        hidden_sizes = list(model_wrapper.config.hidden_sizes)
+        if num_stages not in (3, 4):
+            raise ValueError(
+                f"ConvNeXtDetectionBackbone num_stages must be 3 or 4, "
+                f"got {num_stages}."
+            )
+        if num_stages > len(hidden_sizes):
+            raise ValueError(
+                f"Backbone has {len(hidden_sizes)} stages; "
+                f"{num_stages} requested."
+            )
+        self.num_stages = num_stages
+        self.stage_indices = tuple(
+            range(len(hidden_sizes) - num_stages, len(hidden_sizes))
+        )
         if not finetune:
             model_wrapper.eval()
             model_wrapper.requires_grad_(False)
@@ -270,19 +299,20 @@ class ConvNeXtDetectionBackbone(Module):
     @property
     def in_channels(self) -> list[int]:
         hidden_sizes = list(self._model_wrapper.config.hidden_sizes)
-        return [hidden_sizes[i] for i in self.STAGE_INDICES]
+        return [hidden_sizes[i] for i in self.stage_indices]
 
-    def forward(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    def forward(self, x: Tensor) -> tuple[Tensor, ...]:
         outputs = self._model_wrapper.get_model()(
             pixel_values=x, output_hidden_states=True
         )
         hidden_states = outputs.hidden_states  # (embeddings, stage_0, ...)
         feats = tuple(
-            hidden_states[i + 1] for i in self.STAGE_INDICES
+            hidden_states[i + 1] for i in self.stage_indices
         )
-        if len(feats) != 3:
+        if len(feats) != self.num_stages:
             raise ValueError(
-                f"Expected 3 ConvNeXt stage features, got {len(feats)}."
+                f"Expected {self.num_stages} ConvNeXt stage features, "
+                f"got {len(feats)}."
             )
         return feats
 

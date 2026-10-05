@@ -28,11 +28,23 @@ from autovision._models.dinov3 import (
 
 
 class TestGating:
-    def test_no_support_lists_empty(self):
-        # The real installed transformers has no DINOv3 classes.
-        assert DINOV3_PACKAGE.list_model_names() == []
+    def test_support_matches_installed_transformers(self):
+        # The real transformers may or may not ship DINOv3 classes; the
+        # package must agree with whatever is installed.
+        from autovision._models.dinov3.dinov3_package import _dinov3_classes
+
+        has_support = _dinov3_classes() is not None
+        names = DINOV3_PACKAGE.list_model_names()
+        assert bool(names) is has_support
+        if has_support:
+            assert "dinov3/vits16" in names
+            assert "dinov3/convnext-tiny" in names
 
     def test_no_support_raises_on_get_model(self):
+        from autovision._models.dinov3.dinov3_package import _dinov3_classes
+
+        if _dinov3_classes() is not None:
+            pytest.skip("installed transformers ships DINOv3")
         with pytest.raises(ImportError, match="DINOv3 support"):
             DINOV3_PACKAGE.get_model("vits16", load_weights=False)
 

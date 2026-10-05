@@ -51,6 +51,8 @@ def get_contrastive_denoising_training_group(
     num_denoising: int = 100,
     label_noise_ratio: float = 0.5,
     box_noise_scale: float = 1.0,
+    batch_queries_num: list[int] | None = None,
+    num_heads: int | None = None,
 ):
     """Build the contrastive denoising query group.
 
@@ -62,13 +64,21 @@ def get_contrastive_denoising_training_group(
     - ``query_boxes_unact``: ``(B, dn, 4)`` noised boxes in inverse-sigmoid
       space, ready to be used as decoder reference boxes.
     - ``attn_mask``: ``(dn + num_queries, dn + num_queries)`` bool mask,
-      ``True`` = masked out.
+      ``True`` = masked out. With per-image query counts (see below) it is
+      3-D: ``(B * num_heads, dn + num_queries, ...)``, ``True`` = masked.
     - ``dn_meta``: ``{"dn_positive_idx", "dn_num_group", "dn_num_split"}``
       consumed by the criterion (:func:`get_cdn_matched_indices`) and by the
       decoder's output split.
 
     Returns ``(None, None, None, None)`` when denoising is disabled for the
     batch (``num_denoising <= 0`` or no GT boxes anywhere).
+
+    Density-guided dynamic queries (design doc 13 §4.4): when
+    ``batch_queries_num`` (per-image valid query counts, padded to
+    ``num_queries``) and ``num_heads`` are given, the mask is expanded
+    per batch head so that valid queries and padding queries are mutually
+    invisible (padding sees only itself, keeping the softmax finite).
+    With no actual padding the 2-D mask is returned unchanged.
     """
     if num_denoising <= 0 or not targets:
         return None, None, None, None
@@ -159,6 +169,30 @@ def get_contrastive_denoising_training_group(
         else:
             attn_mask[start:end, end:num_denoising_queries] = True
             attn_mask[start:end, :start] = True
+
+    if (
+        batch_queries_num is not None
+        and num_heads is not None
+        and any(n < num_queries for n in batch_queries_num)
+    ):
+        assert max(batch_queries_num) == num_queries, (
+            "num_queries must be the padded maximum of batch_queries_num"
+        )
+        attn_mask = attn_mask.unsqueeze(0).repeat(batch_size * num_heads, 1, 1)
+        for image_index, valid_queries in enumerate(batch_queries_num):
+            padding_start = num_denoising_queries + valid_queries
+            if padding_start >= tgt_size:
+                continue
+            head_start = image_index * num_heads
+            head_end = (image_index + 1) * num_heads
+            # Valid queries cannot see padding, padding cannot see valid;
+            # padding queries attend to themselves so softmax stays finite.
+            attn_mask[
+                head_start:head_end, :padding_start, padding_start:
+            ] = True
+            attn_mask[
+                head_start:head_end, padding_start:, :padding_start
+            ] = True
 
     dn_meta = {
         "dn_positive_idx": dn_positive_idx,

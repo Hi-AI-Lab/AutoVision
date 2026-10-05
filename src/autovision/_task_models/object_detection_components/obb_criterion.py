@@ -115,7 +115,12 @@ def loss_boxes_oriented(
 
 
 class OrientedRTDETRCriterion(RTDETRCriterionV2):
-    """Oriented criterion: overrides the two box-quality seams of the parent."""
+    """Oriented criterion: overrides the two box-quality seams of the parent.
+
+    ``loss_labels`` accepts the parent's ``query_mask`` seam (density-
+    guided dynamic queries) but ignores it — oriented detection keeps the
+    fixed-proposal contract, so there are never padded queries to mask.
+    """
 
     def loss_labels(
         self,
@@ -123,6 +128,7 @@ class OrientedRTDETRCriterion(RTDETRCriterionV2):
         targets: list[dict[str, torch.Tensor]],
         indices: list[tuple[torch.Tensor, torch.Tensor]],
         num_boxes: torch.Tensor,
+        query_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return loss_labels_vfl_oriented(outputs, targets, indices, num_boxes)
 

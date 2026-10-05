@@ -29,10 +29,15 @@ class TrainModelArgs(PydanticConfig):
 
 @dataclass
 class TaskStepResult:
-    """Result of one training/validation step."""
+    """Result of one training/validation step.
+
+    ``log_dict`` values may be float or detached tensors: the engine only
+    converts them to floats at logging time (every ``log_every_n_steps``),
+    so per-step GPU->CPU syncs stay off the hot path.
+    """
 
     loss: torch.Tensor
-    log_dict: dict[str, float] = field(default_factory=dict)
+    log_dict: dict[str, float | torch.Tensor] = field(default_factory=dict)
 
 
 class TrainModel(nn.Module):

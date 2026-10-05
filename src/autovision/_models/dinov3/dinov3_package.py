@@ -125,16 +125,27 @@ def _dinov3_classes() -> dict[str, Any] | None:
         transformers = importlib.import_module("transformers")
     except ImportError:
         return None
+    # transformers exports the DINOv3 classes as ``DINOv3*`` (both the 4.x
+    # lazy exports and 5.x); the ``Dinov3*`` spellings are defensive
+    # fallbacks for intermediate layouts.
     vit_config = (
-        getattr(transformers, "Dinov3ViTConfig", None)
+        getattr(transformers, "DINOv3ViTConfig", None)
+        or getattr(transformers, "Dinov3ViTConfig", None)
         or getattr(transformers, "Dinov3Config", None)
     )
     vit_model = (
-        getattr(transformers, "Dinov3ViTModel", None)
+        getattr(transformers, "DINOv3ViTModel", None)
+        or getattr(transformers, "Dinov3ViTModel", None)
         or getattr(transformers, "Dinov3Model", None)
     )
-    convnext_config = getattr(transformers, "Dinov3ConvNextConfig", None)
-    convnext_model = getattr(transformers, "Dinov3ConvNextModel", None)
+    convnext_config = (
+        getattr(transformers, "DINOv3ConvNextConfig", None)
+        or getattr(transformers, "Dinov3ConvNextConfig", None)
+    )
+    convnext_model = (
+        getattr(transformers, "DINOv3ConvNextModel", None)
+        or getattr(transformers, "Dinov3ConvNextModel", None)
+    )
     if None in (vit_config, vit_model, convnext_config, convnext_model):
         return None
     return {

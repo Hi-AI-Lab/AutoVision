@@ -15,7 +15,7 @@ from typing import Any
 
 import torch
 
-__all__ = ["RTDETRDetectionCollateFunction"]
+__all__ = ["RTDETRDetectionCollateFunction", "TwoViewDetectionCollateFunction"]
 
 
 class RTDETRDetectionCollateFunction:
@@ -163,3 +163,47 @@ class RTDETRDetectionCollateFunction:
             "original_size": original_sizes,
             "input_size": input_size,
         }
+
+
+class TwoViewDetectionCollateFunction:
+    """Collate ``(view1, view2)`` item pairs into one view-major doubled batch.
+
+    Wraps a base detection collate for the SSL two_crop pipeline (design
+    doc 14 §4.5): the pairs are flattened view-major — rows ``r`` and
+    ``r + B`` are the two augmented views of the same source image — and
+    handed to the base collate in a SINGLE call. One call means one shared
+    batch scale-jitter draw and one joint batch: splitting the views into
+    two collate calls would need joint padding across different scales,
+    which would break the normalized-cxcywh coordinate contract.
+
+    Mixup / mosaic / small-box filtering keep their base behavior: mixed-in
+    neighbor content simply fails the cross-view IoU+label pairing and is
+    dropped from the contrastive pool (diagnosed via ``ssl_paired_ratio``).
+
+    The step-scheduling hooks are delegated so the wrapper can take the
+    base collate's place in the engine's ``step_hooks`` list.
+    """
+
+    def __init__(self, base: RTDETRDetectionCollateFunction) -> None:
+        self.base = base
+
+    def set_step(self, step: int) -> None:
+        self.base.set_step(step)
+
+    def requires_dataloader_reinitialization(self) -> bool:
+        return self.base.requires_dataloader_reinitialization()
+
+    def mark_dataloader_as_reinitialized(self) -> None:
+        self.base.mark_dataloader_as_reinitialized()
+
+    @property
+    def step(self) -> int:
+        return self.base.step
+
+    def __call__(self, batch: list[tuple[dict[str, Any], dict[str, Any]]]) -> dict[str, Any]:
+        # View-major flattening (SimCSE convention): all view-1 items first,
+        # then all view-2 items — row r and row r + B share the source
+        # image, which is the boundary the SSL criterion splits on.
+        views1 = [pair[0] for pair in batch]
+        views2 = [pair[1] for pair in batch]
+        return self.base(views1 + views2)

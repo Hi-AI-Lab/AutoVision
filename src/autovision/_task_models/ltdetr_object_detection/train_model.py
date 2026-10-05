@@ -81,6 +81,9 @@ class LTDETRObjectDetectionTrain(TrainModel):
             backbone_pretrained=model_args.backbone_pretrained,
             backbone_weights=model_args.backbone_weights,
             load_weights=model_args.backbone_pretrained,
+            pyramid_levels=model_args.pyramid_levels,
+            density=model_args.density,
+            ssl=model_args.ssl,
         )
         super().__init__(task_model=task_model)
         self.model_args = model_args
@@ -89,10 +92,36 @@ class LTDETRObjectDetectionTrain(TrainModel):
         if decoder == "auto":
             _, variant = resolve_ltdetr_variant(f"ltdetr/{model_args.backbone}")
             decoder = variant.decoder_default
+        density = model_args.density
+        ssl_args = model_args.ssl
+        # The SSL criterion wiring only exists on the D-FINE criterion (v1,
+        # design doc 14 §3.3); the batch-matched baseline (mode="off") needs
+        # no wiring anywhere.
+        ssl_params = (
+            ssl_args.to_ssl_params()
+            if ssl_args is not None and ssl_args.mode != "off"
+            else None
+        )
+        if ssl_args is not None and decoder != "dfine":
+            raise ValueError(
+                "ssl (per-object contrastive head) requires the D-FINE "
+                "decoder in v1; pass decoder='dfine' (design doc 14 §3.3)."
+            )
         if decoder == "dfine":
             self.criterion: RTDETRCriterionV2 | DFINECriterionV2 = DFINECriterionV2(
                 self.matcher,
                 reg_max=model_args.reg_max,
+                defe_density_map_weight=(
+                    density.density_map_weight if density else 1.0
+                ),
+                defe_count_loss_weight=density.count_loss_weight if density else 1.0,
+                defe_underestimation_penalty=(
+                    density.density_underestimation_penalty if density else 0.3
+                ),
+                defe_count_underestimation_weight=(
+                    density.count_underestimation_weight if density else 2.0
+                ),
+                ssl_params=ssl_params,
             )
         else:
             self.criterion = RTDETRCriterionV2(self.matcher)
@@ -106,7 +135,24 @@ class LTDETRObjectDetectionTrain(TrainModel):
             else None
         )
         self.categories: dict[int, str] = {}
+        self._max_dets = model_args.eval_max_dets
         self._evaluators: dict[str, COCOMAPEvaluator] = {}
+        # Route B (SSL-only pretraining) flag, resolved once (design doc 14 §4.10).
+        self._ssl_only = (
+            ssl_args is not None and ssl_args.instance_source == "encoder_candidates"
+        )
+        if self._ssl_only:
+            # Best-checkpoint signal for stage 1: "val_ssl_loss" is a key the
+            # val metrics never carry, so the engine's
+            # ``get(watch_key, -val_loss)`` fallback watches the NEGATED
+            # world-averaged validation loss (the held-out contrastive
+            # loss) — exactly the lower-is-better signal needed. The class
+            # attribute stays "val_metric/map" for stage 2 / joint runs.
+            self.watch_metric = "val_ssl_loss"
+        # Density-guided query diagnostics accumulated over the val split
+        # (per-image (query_count, gt_count)); consumed by compute_metrics
+        # so the engine persists them (validation log_dict is dropped).
+        self._val_query_stats: list[tuple[int, int]] = []
 
     # ── steps ───────────────────────────────────────────────────────────
     def training_step(self, batch: dict, step: int) -> TaskStepResult:
@@ -119,7 +165,16 @@ class LTDETRObjectDetectionTrain(TrainModel):
         outputs_list = list(out.get("aux_outputs", [])) + [
             {"pred_logits": out["pred_logits"], "pred_boxes": out["pred_boxes"]}
         ]
+        # Density-guided extras (design doc 13 §4.6): the query-validity
+        # mask keeps padded queries out of the classification loss; the
+        # defe dict carries the density map / GT heatmap / count estimate.
+        query_mask = out.get("query_valid_mask")
+        defe_info = out.get("defe_info")
         if isinstance(self.criterion, DFINECriterionV2):
+            # SSL stride state lives on the criterion, written per step
+            # (design doc 14 §4.4); the features come from the model's
+            # train-only projection head.
+            self.criterion.ssl_step = step
             loss_dict = self.criterion(
                 outputs_list,
                 targets,
@@ -130,6 +185,10 @@ class LTDETRObjectDetectionTrain(TrainModel):
                 ref_boxes_list=out.get("ref_boxes_list"),
                 dn_corners_list=out.get("dn_pred_corners_list"),
                 dn_ref_boxes_list=out.get("dn_ref_boxes_list"),
+                query_mask=query_mask,
+                defe_info=defe_info,
+                ssl_z1=out.get("ssl_z1"),
+                ssl_z2=out.get("ssl_z2"),
             )
         else:
             loss_dict = self.criterion(
@@ -138,8 +197,25 @@ class LTDETRObjectDetectionTrain(TrainModel):
                 world_size=1,
                 dn_outputs=out.get("dn_aux_outputs", []),
                 dn_meta=out.get("dn_meta"),
+                query_mask=query_mask,
             )
-        log_dict = {key: float(value.detach()) for key, value in loss_dict.items()}
+        # Detached GPU tensors: the engine floats them only when logging
+        # (every log_every_n_steps); per-item float() here would sync the
+        # GPU once per loss term on every step.
+        log_dict = {key: value.detach() for key, value in loss_dict.items()}
+        # SSL pool diagnostics (design doc 14 D10): paired_ratio is the
+        # fraction of view-1 instances that found a validated cross-view
+        # partner — a two_crop pair consumes two pool entries, so the
+        # denominator is pool/2 (1.0 = perfect pairing); under the dropout
+        # view every instance pairs trivially (denominator = pool).
+        ssl_stats = getattr(self.criterion, "last_ssl_stats", None)
+        if ssl_stats:
+            pool = float(ssl_stats.get("pool_size", 0.0))
+            paired = float(ssl_stats.get("paired_size", 0.0))
+            ssl_view = self.criterion.ssl_params.view if self.criterion.ssl_params else "two_crop"
+            denominator = max(pool / 2.0 if ssl_view == "two_crop" else pool, 1.0)
+            log_dict["ssl_pool_size"] = pool
+            log_dict["ssl_paired_ratio"] = paired / denominator
         return TaskStepResult(loss=loss_dict["loss"], log_dict=log_dict)
 
     @torch.no_grad()
@@ -150,13 +226,36 @@ class LTDETRObjectDetectionTrain(TrainModel):
         # therefore not directly comparable for decoder="dfine".
         x = batch["image"]
         model = self.ema_model.model if self.ema_model is not None else self.model
-        outputs = model(x)
+        query_mask = None
+        queries_num = None
+        ssl_z1 = ssl_z2 = None
+        if self._ssl_only:
+            # Route B: the decoder emits candidate features in eval too, so
+            # the validation loss is the held-out contrastive loss (design
+            # doc 14 §4.10). The mAP eval below still runs — its curve is
+            # expected to be noise until stage-2 finetuning.
+            raw = model._forward_train(x)
+            outputs = (raw["pred_logits"], raw["pred_boxes"])
+            ssl_z1 = raw.get("ssl_z1")
+            ssl_z2 = raw.get("ssl_z2")
+        elif getattr(model, "_density_enabled", False):
+            # Dynamic-query models: the raw forward dict carries the
+            # per-image query counts (dome metrics) and the padded-tail
+            # query mask (design doc 13 §4.6).
+            raw = model._forward_train(x)
+            outputs = (raw["pred_logits"], raw["pred_boxes"])
+            query_mask = raw.get("query_valid_mask")
+            queries_num = raw.get("batch_queries_num")
+        else:
+            outputs = model(x)
         decoded = model.postprocess(
             outputs,
             [{"orig_w": w, "orig_h": h} for w, h in batch["original_size"]],
             threshold=0.05,
         )
-        evaluator = self._evaluators.setdefault("val", COCOMAPEvaluator(self.categories))
+        evaluator = self._evaluators.setdefault(
+            "val", COCOMAPEvaluator(self.categories, max_dets=self._max_dets)
+        )
         evaluator.update(decoded)
         evaluator.update_targets(
             [
@@ -173,6 +272,11 @@ class LTDETRObjectDetectionTrain(TrainModel):
             outputs_list = [
                 {"pred_logits": outputs.logits, "pred_boxes": outputs.boxes}
             ]
+        criterion_kwargs: dict[str, Any] = {}
+        if isinstance(self.criterion, DFINECriterionV2):
+            # Route B: the SSL-only branch consumes the candidate features;
+            # the auxiliary path ignores them (absent in eval).
+            criterion_kwargs = {"ssl_z1": ssl_z1, "ssl_z2": ssl_z2}
         losses = self.criterion(
             outputs_list,
             [
@@ -180,11 +284,26 @@ class LTDETRObjectDetectionTrain(TrainModel):
                 for b, c in zip(batch["bboxes"], batch["classes"])
             ],
             world_size=1,
+            query_mask=query_mask,
+            **criterion_kwargs,
         )
-        return TaskStepResult(
-            loss=losses["loss"],
-            log_dict={key: float(value) for key, value in losses.items()},
-        )
+        log_dict = {key: float(value) for key, value in losses.items()}
+        if queries_num is not None:
+            # Dome diagnostics (baseline "defe Ample Rate" / "Average
+            # Anchor Number", design doc 13 §1.3): how often the dynamic
+            # selection keeps at least one query per GT, and the mean
+            # query count (efficiency readout against the fixed baseline).
+            # Accumulated per image and surfaced through compute_metrics.
+            gt_counts = [int(boxes.shape[0]) for boxes in batch["bboxes"]]
+            self._val_query_stats.extend(zip(queries_num, gt_counts))
+            log_dict["dome_avg_queries"] = float(
+                sum(queries_num) / max(len(queries_num), 1)
+            )
+            log_dict["dome_ample_rate"] = float(
+                sum(n >= g for n, g in zip(queries_num, gt_counts))
+                / max(len(queries_num), 1)
+            )
+        return TaskStepResult(loss=losses["loss"], log_dict=log_dict)
 
     def set_categories(self, categories: dict[int, str]) -> None:
         self.categories = dict(categories)
@@ -195,24 +314,50 @@ class LTDETRObjectDetectionTrain(TrainModel):
             return {}
         metrics = evaluator.compute()
         evaluator.reset()
+        if split == "val" and self._val_query_stats:
+            # Density-guided diagnostics (design doc 13 §1.3), consumed
+            # here so the engine's val logging / metrics.jsonl carry them.
+            stats = self._val_query_stats
+            metrics["dome_avg_queries"] = float(
+                sum(n for n, _ in stats) / max(len(stats), 1)
+            )
+            metrics["dome_ample_rate"] = float(
+                sum(n >= g for n, g in stats) / max(len(stats), 1)
+            )
+            self._val_query_stats.clear()
         return {f"{split}_metric/{name}": value for name, value in metrics.items()}
 
     def reset_metrics(self, split: str) -> None:
         evaluator = self._evaluators.get(split)
         if evaluator is not None:
             evaluator.reset()
+        if split == "val":
+            self._val_query_stats.clear()
 
     def export_metric_state(self, split: str) -> dict | None:
         evaluator = self._evaluators.get(split)
-        return evaluator.export_state() if evaluator is not None else None
+        evaluator_state = evaluator.export_state() if evaluator is not None else None
+        if split == "val":
+            # Fold the dome query stats into the gathered payload so the
+            # rank-zero merge sees every rank's shard (DDP path).
+            return {
+                "evaluator": evaluator_state,
+                "dome_query_stats": list(self._val_query_stats),
+            }
+        return evaluator_state
 
     def merge_metric_state(self, split: str, state: dict | None) -> None:
         if state is None:
             return
+        evaluator_state = state
+        if split == "val" and isinstance(state, dict) and "evaluator" in state:
+            evaluator_state = state.get("evaluator")
+            self._val_query_stats.extend(state.get("dome_query_stats", []))
         evaluator = self._evaluators.setdefault(
-            split, COCOMAPEvaluator(self.categories)
+            split, COCOMAPEvaluator(self.categories, max_dets=self._max_dets)
         )
-        evaluator.merge_state(state)
+        if evaluator_state is not None:
+            evaluator.merge_state(evaluator_state)
 
     # ── optimization ────────────────────────────────────────────────────
     def get_optimizer(
@@ -295,6 +440,27 @@ class LTDETRObjectDetectionTrain(TrainModel):
                 }
             )
 
+        # The SSL projection head lives on the task model root (outside
+        # encoder/decoder), so it needs its own explicit group at the base
+        # LR — mirroring RF-DETR-SSL, which assigns the head the base LR.
+        if getattr(self.model, "ssl_head", None) is not None:
+            ssl_all = [
+                p for p in self.model.ssl_head.parameters() if p.requires_grad
+            ]
+            ssl_wd = [p for p in ssl_all if id(p) not in params_no_wd]
+            ssl_no_wd = [p for p in ssl_all if id(p) in params_no_wd]
+            if ssl_wd:
+                param_groups.append({"name": "ssl", "params": ssl_wd, "lr": lr})
+            if ssl_no_wd:
+                param_groups.append(
+                    {
+                        "name": "ssl_no_wd",
+                        "params": ssl_no_wd,
+                        "lr": lr,
+                        "weight_decay": 0.0,
+                    }
+                )
+
         optimizer = torch.optim.AdamW(
             param_groups, lr=lr, betas=args.optimizer_betas, weight_decay=args.weight_decay
         )
@@ -317,7 +483,45 @@ class LTDETRObjectDetectionTrain(TrainModel):
         if self.ema_model is not None:
             self.ema_model.update(self.model)
 
-    # ── export state ────────────────────────────────────────────────────
+    # ── checkpoint hooks ────────────────────────────────────────────────
+    @staticmethod
+    def _is_ssl_head_key(key: str) -> bool:
+        """Match SSL-head keys in every state-dict layout: bare
+        (``ssl_head.*`` inside an EMA copy), train-wrapper
+        (``model.ssl_head.*``) or export (``ema_model.ssl_head.*``)."""
+        return key.startswith("ssl_head.") or ".ssl_head." in key
+
+    def _fill_missing_ssl_keys(self, incoming: dict[str, Any]) -> dict[str, Any]:
+        """Fill SSL-head keys absent from *incoming* with their current values.
+
+        Adding the SSL branch on top of a detection-pretrained checkpoint is
+        a supported workflow: the head keeps its fresh init instead of
+        failing the strict load. Only keys that belong to the SSL head are
+        filled — any other missing key, and any unexpected key, stays loud.
+        """
+        own = self.state_dict()
+        missing_ssl = {
+            key: value for key, value in own.items() if self._is_ssl_head_key(key) and key not in incoming
+        }
+        if missing_ssl:
+            incoming = {**incoming, **missing_ssl}
+        return incoming
+
+    def load_state_dict(self, state_dict, strict: bool = True, **kwargs: Any):
+        incoming = dict(state_dict)
+        own_keys = set(self.state_dict().keys())
+        # Stage-2 workflow (design doc 14 §4.10): a stage-1 SSL-only
+        # checkpoint carries the pretraining-only projection head — drop it
+        # when the new config has no head, instead of failing the strict
+        # load. (The engine's ``checkpoint=`` init path lands here; resume
+        # with a mismatched ssl config stays loud for every non-SSL key.)
+        incoming = {
+            key: value
+            for key, value in incoming.items()
+            if not (self._is_ssl_head_key(key) and key not in own_keys)
+        }
+        return super().load_state_dict(self._fill_missing_ssl_keys(incoming), strict=strict, **kwargs)
+
     def on_save_checkpoint(self, checkpoint: dict) -> None:
         if self.ema_model is not None:
             checkpoint["ema"] = self.ema_model.state_dict()
@@ -325,8 +529,18 @@ class LTDETRObjectDetectionTrain(TrainModel):
     def on_load_checkpoint(self, checkpoint: dict) -> None:
         ema_state = checkpoint.get("ema")
         if ema_state is not None and self.ema_model is not None:
+            ema_weights = dict(ema_state.get("model", {}))
+            own_ema = self.ema_model.model.state_dict()
+            missing_ssl = {
+                key: value
+                for key, value in own_ema.items()
+                if self._is_ssl_head_key(key) and key not in ema_weights
+            }
+            if missing_ssl:
+                ema_state = {**ema_state, "model": {**ema_weights, **missing_ssl}}
             self.ema_model.load_state_dict(ema_state)
 
+    # ── export state ────────────────────────────────────────────────────
     def get_export_state_dict(self) -> dict[str, Any]:
         if self.ema_model is not None:
             return {

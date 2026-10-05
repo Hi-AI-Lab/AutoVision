@@ -37,6 +37,7 @@ from autovision._transforms.detection_transforms import (
     RTDETRDetectionCollateFunction,
     RTDETRDetectionTransform,
     RTDETRDetectionTransformArgs,
+    TwoViewDetectionCollateFunction,
     build_val_transform_args,
 )
 from autovision.types import PathLike
@@ -155,6 +156,13 @@ def train_object_detection(
         resolved_model_args.resolve_image_size()
     default_image_size = resolved_model_args.image_size
 
+    # SSL two_crop pipeline (design doc 14 §4.5): every loader item becomes
+    # an (view1, view2) pair — the batch doubles to 2B view-major rows.
+    # The batch-matched baseline (ssl.mode="off") runs the same doubled
+    # pipeline, so both runs see identical data throughput.
+    ssl_args = getattr(resolved_model_args, "ssl", None)
+    ssl_two_crop = ssl_args is not None and ssl_args.view == "two_crop"
+
     # 3. save args
     save_args = pydantic_model_validate(
         _SaveCheckpointArgs, dict(save_checkpoint_args or {})
@@ -203,6 +211,10 @@ def train_object_detection(
         overwrite=overwrite,
     ) as val_rows:
         train_dataset = ObjectDetectionDataset(data_args, train_rows)
+        if ssl_two_crop:
+            from autovision._data.two_view import TwoViewObjectDetectionDataset
+
+            train_dataset = TwoViewObjectDetectionDataset(train_dataset)
         val_dataset = ObjectDetectionDataset(data_args, val_rows)
         train_loader = common_helpers.build_task_dataloader(
             train_dataset, batch_size=per_device_batch,
@@ -247,6 +259,8 @@ def train_object_detection(
         train_dataset.set_transform(train_transform)
         val_dataset.set_transform(val_transform)
         train_collate = RTDETRDetectionCollateFunction(train_transform_args, train=True)
+        if ssl_two_crop:
+            train_collate = TwoViewDetectionCollateFunction(train_collate)
         val_collate = RTDETRDetectionCollateFunction(val_transform_args, train=False)
         train_loader.collate_fn = train_collate
         val_loader.collate_fn = val_collate

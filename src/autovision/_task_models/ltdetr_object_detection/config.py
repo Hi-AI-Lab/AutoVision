@@ -31,12 +31,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
+from pydantic import Field, model_validator
+
 from autovision._configs.base import PydanticConfig
+from autovision._task_models.object_detection_components.ssl_contrastive import (
+    SSLParams,
+)
 from autovision._task_models.train_model import TrainModelArgs
 from autovision.types import ImageSizeTuple
 
 __all__ = [
     "LTDETR_MODEL_REGISTRY",
+    "LTDETRDensityArgs",
+    "LTDETRSSLArgs",
     "LTDETRVariantSpec",
     "LTDETRObjectDetectionTrainArgs",
     "list_ltdetr_model_names",
@@ -371,6 +378,162 @@ def check_image_size(image_size: tuple[int, int], spec: LTDETRVariantSpec) -> No
         )
 
 
+class LTDETRDensityArgs(PydanticConfig):
+    """Density-guided query/feature branch (Dome-DETR port, doc 13 §4.7).
+
+    ``None`` (the default on the train args) keeps the baseline contract
+    bit-for-bit. Baseline Dome VisDrone recipe: min 250 / max 500,
+    window 10, IoU threshold ``0.4 + 0.5 * density``.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    #: Always-kept proposal count ("auto" inherits ``num_queries``).
+    min_num_select: int | Literal["auto"] = "auto"
+    #: Upper bound on the per-image dynamic query count.
+    max_num_select: int = 500
+    #: Masked window attention on the stride-16 encoder level.
+    use_mwas: bool = True
+    #: Window side in stride-16 feature cells.
+    mwas_window_size: int = 10
+    #: Weight of the density-map MSE (Dome ``defe_density_map_weight``).
+    density_map_weight: float = 1.0
+    #: Extra penalty for underestimating high-density regions.
+    density_underestimation_penalty: float = 0.3
+    #: Weight of the object-count regression loss.
+    count_loss_weight: float = 1.0
+    #: Extra penalty for underestimating the object count.
+    count_underestimation_weight: float = 2.0
+    #: Window-gate threshold and descent step (baseline adaptive filter).
+    window_threshold: float = 0.05
+    window_threshold_step: float = 0.01
+    #: Per-candidate NMS IoU threshold = base + scale * density.
+    nms_iou_base: float = 0.4
+    nms_iou_density_scale: float = 0.5
+    #: GT heatmap sigma = ratio * box (w, h).
+    gaussian_sigma_ratio: float = 1.2
+
+    def resolved_min_num_select(self, num_queries: int) -> int:
+        if self.min_num_select == "auto":
+            return num_queries
+        return int(self.min_num_select)
+
+
+class LTDETRSSLArgs(PydanticConfig):
+    """Per-object contrastive SSL branch (RF-DETR-SSL port, doc 14 §4.7).
+
+    ``None`` (the default on the train args) keeps the baseline contract
+    bit-for-bit. ``mode="off"`` + ``view="two_crop"`` is the batch-matched
+    no-SSL baseline: the doubled two-view data pipeline runs but neither
+    the projection head nor the contrastive loss is built. Recommended
+    start point (upstream M4 ablation): ``unsup`` / ``two_crop`` /
+    ``loss_coef=0.1`` / ``temp=0.05`` / ``iou_match=0.55``.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    #: Contrastive objective: SimCSE InfoNCE ("unsup"), the SupCon-style
+    #: same-label extension ("sup"), or their sum ("both"). "off" disables
+    #: the loss while keeping the view's data pipeline (baseline runs).
+    mode: Literal["off", "unsup", "sup", "both"] = "unsup"
+    #: Weight λ of ``loss_ssl`` in the total loss. Upstream M4: 0.1–0.25 is
+    #: the robust range; 1.0 was the only harmful setting. Constrained
+    #: ``ge=0`` so the "off" baseline may carry 0; the validator requires
+    #: ``> 0`` whenever the mode is active.
+    loss_coef: float = Field(default=0.1, ge=0.0)
+    #: Temperature of the cosine logits.
+    temp: float = Field(default=0.05, gt=0.0)
+    #: "two_crop" pairs every image with a second independent augmentation
+    #: (doubled batch); "dropout" draws two stochastic samples through the
+    #: projection head with zero data-pipeline changes (ablation control).
+    view: Literal["two_crop", "dropout"] = "two_crop"
+    #: Projection head architecture: SimCSE's Linear+Tanh or the paper's
+    #: two-layer MLP ablation.
+    projector: Literal["simcse", "mlp2"] = "simcse"
+    #: Contrastive embedding width.
+    projector_dim: int = Field(default=256, ge=1)
+    #: Dropout applied to the head input (the dropout view's noise source).
+    projector_dropout: float = Field(default=0.1, ge=0.0, lt=1.0)
+    #: Cross-view IoU threshold for instance correspondence (two_crop).
+    iou_match: float = Field(default=0.55, gt=0.0, le=1.0)
+    #: Score cross-view candidate pairs under the horizontal-mirror
+    #: alignment too when pairing: the two views flip independently, so a
+    #: mirrored object is the same object and its raw normalized-box IoU is
+    #: ~0. Disable to restore the strict identity-alignment pairing.
+    flip_invariant_pairing: bool = True
+    #: Weight λ_w of the IoU soft-alignment logit bias (positives only).
+    iou_bias: float = Field(default=0.5, ge=0.0)
+    #: Exponent on the alignment IoU before the log bias.
+    iou_gamma: float = Field(default=1.0, gt=0.0)
+    #: Restrict same-label soft positives to same-image pairs (sup modes).
+    same_image_positive_only: bool = False
+    #: Gather the contrastive pool across DDP ranks (padded gather).
+    gather_distributed: bool = True
+    #: Apply the SSL objective only every k-th step. Controls the SSL
+    #: gradient frequency only — it does NOT reduce the doubled two_crop
+    #: pipeline compute (design doc 14 §4.4).
+    every_n_steps: int = Field(default=1, ge=1)
+    #: Instance pool source. "matched_gt" = the final Hungarian match
+    #: (auxiliary objective alongside the detection losses).
+    #: "encoder_candidates" = the decoder's top-k candidate features —
+    #: label-free, requires ``mode="unsup"`` + ``view="dropout"``, and the
+    #: contrastive loss REPLACES the detection losses entirely (SSL-only
+    #: stage-1 pretraining; pair with a supervised stage-2 finetune).
+    instance_source: Literal["matched_gt", "encoder_candidates"] = "matched_gt"
+
+    @model_validator(mode="after")
+    def _validate_ssl_configuration(self) -> "LTDETRSSLArgs":
+        if self.mode != "off" and self.loss_coef <= 0.0:
+            raise ValueError(
+                f"ssl mode={self.mode!r} requires loss_coef > 0, got {self.loss_coef}."
+            )
+        if self.same_image_positive_only and self.view != "two_crop":
+            # Under the dropout view every instance shares one image, so
+            # the same-image restriction carries no information.
+            raise ValueError(
+                "ssl same_image_positive_only=True requires view='two_crop'."
+            )
+        if self.instance_source == "encoder_candidates":
+            # Route B (design doc 14 §4.10): label-free SSL-only pretraining.
+            if self.mode != "unsup":
+                raise ValueError(
+                    "ssl instance_source='encoder_candidates' is label-free "
+                    "and requires mode='unsup'."
+                )
+            if self.view != "dropout":
+                raise ValueError(
+                    "ssl instance_source='encoder_candidates' requires "
+                    "view='dropout' (candidate proposals are not comparable "
+                    "across independent crops)."
+                )
+            if self.every_n_steps > 1:
+                # The stride gate exists to interleave the SSL gradient with
+                # the detection losses; here there is nothing to interleave
+                # with, so a >1 value would be silently meaningless.
+                raise ValueError(
+                    "ssl every_n_steps has no effect with "
+                    "instance_source='encoder_candidates'; use 1."
+                )
+        return self
+
+    def to_ssl_params(self) -> SSLParams:
+        """Map onto the shared-component :class:`SSLParams` contract."""
+        return SSLParams(
+            mode=self.mode,
+            loss_coef=self.loss_coef,
+            temp=self.temp,
+            view=self.view,
+            iou_match=self.iou_match,
+            iou_bias=self.iou_bias,
+            iou_gamma=self.iou_gamma,
+            flip_invariant_pairing=self.flip_invariant_pairing,
+            same_image_positive_only=self.same_image_positive_only,
+            gather_distributed=self.gather_distributed,
+            every_n_steps=self.every_n_steps,
+            instance_source=self.instance_source,
+        )
+
+
 class LTDETRObjectDetectionTrainArgs(TrainModelArgs, PydanticConfig):
     """Training/architecture args for the LT-DETR detection family."""
 
@@ -419,6 +582,26 @@ class LTDETRObjectDetectionTrainArgs(TrainModelArgs, PydanticConfig):
     use_ema_model: bool = True
     ema_momentum: float = 0.9999
     ema_warmup_steps: int = 2000
+
+    #: Detections-per-image cap in the COCO eval (pycocotools default 100).
+    #: Dense benchmarks use the official higher cap — VisDrone: 500.
+    eval_max_dets: int = 100
+
+    #: Detection pyramid depth: 3 (strides 8/16/32, historical default) or
+    #: 4 (strides 4/8/16/32 — the Dome-faithful tiny-object pyramid,
+    #: design doc 13 §5/D1). 4 requires a ConvNeXt-family backbone (the
+    #: only wrapper exposing a stride-4 stage); ViT/ECViT are fixed
+    #: 3-level and reject the value.
+    pyramid_levels: int = 3
+
+    #: Density-guided dynamic queries / DeFE / MWAS branch (Dome-DETR).
+    #: ``None`` keeps the baseline contract bit-for-bit.
+    density: LTDETRDensityArgs | None = None
+
+    #: Per-object contrastive SSL branch (design doc 14). ``None`` keeps
+    #: the baseline contract bit-for-bit; ``mode="off"`` + ``view=
+    #: "two_crop"`` is the batch-matched no-SSL baseline.
+    ssl: LTDETRSSLArgs | None = None
 
     def resolve_auto(
         self, total_steps: int, train_num_batches: int, gradient_accumulation_steps: int

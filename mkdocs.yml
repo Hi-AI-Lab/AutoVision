@@ -16,3 +16,4 @@ nav:
       - Process & Roadmap: design/10-process-roadmap-risks.md
       - Baseline Appendix: design/11-appendix-baseline-analysis.md
       - Gap Implementation: design/12-gap-implementation-status.md
+      - LT-DETR × Dome-DETR Integration: design/13-ltdetr-dome-integration.md

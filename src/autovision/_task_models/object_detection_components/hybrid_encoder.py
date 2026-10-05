@@ -287,8 +287,11 @@ class HybridEncoder(nn.Module):
     def forward(self, feats):
         assert len(feats) == len(self.in_channels)
         proj_feats = [self.input_proj[i](feat) for i, feat in enumerate(feats)]
+        proj_feats = self._run_aifi(proj_feats)
+        return self._run_fpn_pan(proj_feats)
 
-        # AIFI on the selected (deepest) levels
+    def _run_aifi(self, proj_feats):
+        """AIFI transformer encoder on the selected (deepest) levels."""
         if self.num_encoder_layers > 0:
             for i, enc_ind in enumerate(self.use_encoder_idx):
                 h, w = proj_feats[enc_ind].shape[2:]
@@ -301,7 +304,10 @@ class HybridEncoder(nn.Module):
                 proj_feats[enc_ind] = (
                     memory.permute(0, 2, 1).reshape(-1, self.hidden_dim, h, w).contiguous()
                 )
+        return proj_feats
 
+    def _run_fpn_pan(self, proj_feats):
+        """Top-down FPN fusion followed by the bottom-up PAN pass."""
         # top-down FPN
         inner_outs = [proj_feats[-1]]
         for idx in range(len(self.in_channels) - 1, 0, -1):
