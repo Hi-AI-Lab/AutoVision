@@ -8,13 +8,12 @@ from torch import nn
 from autovision._methods import get_method_cls, list_methods
 from autovision._methods.dinov2 import DINOv2, DINOv2AdamWArgs, DINOv2Args
 from autovision._methods.dinov2.dinov2 import (
-    _MaskGenerator,
     _dino_pair_loss,
     _koleo_loss,
+    _MaskGenerator,
 )
 from autovision._models import EmbeddingModel
 from autovision._scaling import ScalingInfo
-from tests.helpers_models import TinyMultiscaleWrapper
 
 pytestmark = pytest.mark.filterwarnings("ignore::UserWarning")
 
@@ -215,7 +214,7 @@ class TestTrainingStep:
             optimizer.step()
             scheduler.step()
             losses.append(float(loss.detach()))
-        assert all(torch.isfinite(torch.tensor(l)) for l in losses)
+        assert all(torch.isfinite(torch.tensor(loss)) for loss in losses)
         assert losses[-1] < losses[0]
 
     def test_log_dict_keys(self):

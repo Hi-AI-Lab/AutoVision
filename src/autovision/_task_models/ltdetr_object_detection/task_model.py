@@ -11,15 +11,14 @@ family. Per-variant encoder/decoder recipes come from the registry spec.
 from __future__ import annotations
 
 import pathlib
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 from torch import nn
 
+from autovision._export import ONNXExportMixin, ONNXExportPrecisionPolicy
 from autovision._models import get_wrapped_model
 from autovision._models.dinov2.dinov2_wrapper import TransformersDinov2Wrapper
-from autovision._export import ONNXExportMixin, ONNXExportPrecisionPolicy
-from autovision.errors import CheckpointError
 from autovision._task_models.object_detection_components.decode import (
     decode_detection_outputs,
 )
@@ -37,6 +36,10 @@ from autovision._task_models.rtdetr_object_detection.task_model import (
 )
 from autovision._task_models.task_model import TaskModel
 from autovision._transforms.transform_args import NormalizeArgs
+from autovision.errors import CheckpointError
+
+if TYPE_CHECKING:
+    from autovision._models.ecvit.ecvit import ECViTModelWrapper
 
 from .backbone_wrappers import (
     ConvNeXtDetectionBackbone,
@@ -231,6 +234,7 @@ class LTDETRObjectDetection(ONNXExportMixin, TaskModel):
     # ── three-stage contract ────────────────────────────────────────────
     def preprocess_image(self, image: Any) -> tuple[torch.Tensor, dict[str, Any]]:
         from torchvision.transforms.v2 import functional as TF
+
         from autovision._data.file_helpers import open_image
 
         if isinstance(image, (str, pathlib.Path)):

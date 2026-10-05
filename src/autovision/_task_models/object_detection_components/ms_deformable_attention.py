@@ -37,7 +37,6 @@ class MSDeformableAttention(nn.Module):
         self.num_heads = num_heads
         self.num_levels = num_levels
         self.num_points = num_points
-        head_dim = embed_dim // num_heads
         self.sampling_offsets = nn.Linear(embed_dim, num_heads * num_levels * num_points * 2)
         self.attention_weights = nn.Linear(embed_dim, num_heads * num_levels * num_points)
         self.value_proj = nn.Linear(embed_dim, embed_dim)

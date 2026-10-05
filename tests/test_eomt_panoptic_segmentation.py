@@ -7,7 +7,8 @@ import numpy as np
 import pytest
 import torch
 
-from autovision import load_task_model as load_model, train_panoptic_segmentation
+from autovision import load_task_model as load_model
+from autovision import train_panoptic_segmentation
 from autovision._data.mask_panoptic_segmentation_dataset import (
     MaskPanopticSegmentationDataset,
     list_panoptic_pairs,
@@ -157,7 +158,7 @@ class TestPanopticQuality:
         pred[..., 1] = 0  # single merged stuff segment covering both
         metric = self.make_metric()
         metric.update(pred, target)
-        result = metric.compute()
+        metric.compute()
         # Each half IoU = 0.5 (not > 0.5), so nothing matches.
         state = metric.export_state()
         assert state["tp"][1] == 0.0

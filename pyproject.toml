@@ -51,7 +51,7 @@ rfdetr = ["transformers>=4.56"]
 # ONNX export pipeline (torch.export -> dynamo/legacy ONNX -> FP16 ->
 # onnxslim -> verification gates); also required by the deployment tests.
 export = ["onnx>=1.15", "onnxruntime>=1.17", "onnxslim>=0.1"]
-dev = ["pytest>=8.0", "pytest-mock>=3.14"]
+dev = ["pytest>=8.0", "pytest-mock>=3.14", "ruff>=0.8"]
 
 [tool.uv]
 # super-gradients upstream pins onnxruntime==1.15.0, which can never
@@ -70,3 +70,21 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+src = ["src", "tests"]
+extend-exclude = ["src/autovision.egg-info"]
+
+[tool.ruff.lint]
+# High-signal core: pycodestyle errors (E4/E7/E9), pyflakes (F), and
+# import sorting (I). Broader opinionated sets (UP/BLE/PLR/RUF) are a
+# deliberate follow-up — see docs/design/12-gap-implementation-status.md.
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# Package __init__ modules re-export the public surface.
+"**/__init__.py" = ["F401"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["autovision"]

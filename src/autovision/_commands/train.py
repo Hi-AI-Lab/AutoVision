@@ -12,7 +12,26 @@ from typing import Annotated, Any, Literal
 import torch
 from pydantic import BeforeValidator, ConfigDict
 
+from autovision._accelerator import accelerator_supports_bf16
+from autovision._checkpoint import CheckpointMetadata
+from autovision._commands import common_helpers, train_helpers
+from autovision._configs.base import PydanticConfig
+from autovision._configs.validate import no_auto, pydantic_model_validate
+from autovision._data import ImageDataset
+from autovision._data.file_helpers import list_image_filenames_from_dir
+from autovision._data.mmap_helpers import dataset_mmap_context
 from autovision._distributed import is_global_rank_zero
+from autovision._engine import Engine
+from autovision._license import LICENSE_INFO
+from autovision._logging import set_up_file_logging
+from autovision._methods.method_helpers import get_method_cls
+from autovision._models import EmbeddingModel, get_wrapped_model
+from autovision._system import get_system_information
+from autovision.types import PathLike
+
+__all__ = ["PretrainConfig", "PretrainResult", "pretrain", "train_from_config"]
+
+logger = logging.getLogger("autovision")
 
 
 def _is_rank_zero() -> bool:
@@ -26,28 +45,6 @@ def _coerce_path(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [Path(v) if isinstance(v, str) else v for v in value]
     return value
-
-from autovision._checkpoint import CheckpointMetadata
-from autovision._commands import common_helpers, train_helpers
-from autovision._accelerator import accelerator_supports_bf16
-from autovision._configs.base import PydanticConfig
-from autovision._configs.validate import no_auto, pydantic_model_validate
-from autovision._data import ImageDataset
-from autovision._data.file_helpers import list_image_filenames_from_dir
-from autovision._data.mmap_helpers import dataset_mmap_context
-from autovision._engine import Engine
-from autovision._license import LICENSE_INFO
-from autovision._loggers.jsonl import JSONLLogger
-from autovision._methods.method import Method
-from autovision._methods.method_helpers import get_method_cls
-from autovision._models import EmbeddingModel, get_wrapped_model
-from autovision._system import get_system_information
-from autovision.types import PathLike
-from autovision._logging import set_up_file_logging
-
-__all__ = ["PretrainConfig", "PretrainResult", "pretrain", "train_from_config"]
-
-logger = logging.getLogger("autovision")
 
 
 class PretrainConfig(PydanticConfig):
@@ -267,7 +264,11 @@ def train_from_config(config: PretrainConfig) -> PretrainResult:
         from autovision._events import track_training_started
         from autovision._loggers import (
             finalize_loggers as _finalize_loggers,
+        )
+        from autovision._loggers import (
             get_loggers as _get_loggers,
+        )
+        from autovision._loggers import (
             log_hyperparams_to_loggers as _log_hyperparams,
         )
 

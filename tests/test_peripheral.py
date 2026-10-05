@@ -2,7 +2,6 @@
 """Tests for peripheral subsystems: loggers, telemetry, debug, visualization,
 embed, video extraction, torch.compile, 8-bit optimizer, CLI."""
 
-import importlib
 import json
 import sys
 import types
@@ -10,8 +9,6 @@ import types
 import pytest
 import torch
 from torch import nn
-
-from tests.helpers_models import TinyWrapper
 
 # ── loggers ─────────────────────────────────────────────────────────────
 
@@ -117,10 +114,10 @@ class TestLoggers:
 
     def test_wired_into_pretrain(self, tmp_path):
         """pretrain(loggers=...) must honor the spec (JSONL only)."""
-        from tests.conftest import create_images
         from autovision import pretrain
+        from tests.conftest import create_images
 
-        images = create_images(tmp_path / "images", num_images=8, size=(64, 64))
+        create_images(tmp_path / "images", num_images=8, size=(64, 64))
         result = pretrain(
             out=tmp_path / "run", data=tmp_path / "images",
             model="torchvision/resnet18", epochs=1, batch_size=4,
@@ -136,6 +133,7 @@ class TestLoggers:
 class TestTelemetry:
     def test_disabled_by_default(self, monkeypatch):
         import urllib.request
+
         from autovision._events import track_event
 
         def _fail(*args, **kwargs):
@@ -191,7 +189,11 @@ class TestTelemetry:
 
 class TestDebug:
     def test_nan_capture_snapshot_and_replay(self, tmp_path):
-        from autovision._debug import NaNCaptureMonitor, NaNDetectedError, load_nan_capture
+        from autovision._debug import (
+            NaNCaptureMonitor,
+            NaNDetectedError,
+            load_nan_capture,
+        )
         from tests.test_methods_distillationv3 import make_method
 
         model = make_method()
@@ -277,7 +279,10 @@ class TestDebug:
         the monitor unit tests above)."""
         from autovision import train_object_detection
         from tests.test_train_object_detection import (
-            make_coco_dataset, data_config, model_args, transform_args,
+            data_config,
+            make_coco_dataset,
+            model_args,
+            transform_args,
         )
 
         train_json, val_json, images_dir = make_coco_dataset(tmp_path)
@@ -323,10 +328,10 @@ class TestVisualization:
 
 class TestEmbed:
     def test_full_cycle(self, tmp_path):
+        from autovision import embed, pretrain
         from tests.conftest import create_images
-        from autovision import pretrain, embed
 
-        images = create_images(tmp_path / "images", num_images=8, size=(64, 64))
+        create_images(tmp_path / "images", num_images=8, size=(64, 64))
         result = pretrain(
             out=tmp_path / "run", data=tmp_path / "images",
             model="torchvision/resnet18", epochs=1, batch_size=4, num_workers=0,
@@ -340,8 +345,8 @@ class TestEmbed:
         assert payload["embeddings"].shape[0] == 8
 
     def test_csv_format(self, tmp_path):
+        from autovision import embed, pretrain
         from tests.conftest import create_images
-        from autovision import pretrain, embed
 
         create_images(tmp_path / "images", num_images=8, size=(64, 64))
         result = pretrain(
@@ -421,7 +426,9 @@ class TestTorchCompile:
     def test_disabled_by_default(self):
         from autovision._torch_compile import TorchCompileArgs, try_compile
 
-        fn = lambda x: x + 1
+        def fn(x):
+            return x + 1
+
         assert try_compile(fn, "test", TorchCompileArgs()) is fn
 
     def test_extra_kwargs_forwarded(self):
@@ -457,8 +464,9 @@ class TestAdamW8bit:
 
 class TestCLI:
     def test_list_methods(self, capsys):
-        from autovision._cli import app
         from typer.testing import CliRunner
+
+        from autovision._cli import app
 
         runner = CliRunner()
         result = runner.invoke(app, ["list-methods"])
@@ -466,8 +474,9 @@ class TestCLI:
         assert "distillation" in result.output
 
     def test_list_models(self):
-        from autovision._cli import app
         from typer.testing import CliRunner
+
+        from autovision._cli import app
 
         runner = CliRunner()
         result = runner.invoke(app, ["list-models"])
@@ -475,8 +484,9 @@ class TestCLI:
         assert "torchvision/resnet18" in result.output
 
     def test_pretrain_smoke(self, tmp_path):
-        from autovision._cli import app
         from typer.testing import CliRunner
+
+        from autovision._cli import app
         from tests.conftest import create_images
 
         create_images(tmp_path / "images", num_images=8, size=(64, 64))
@@ -493,8 +503,9 @@ class TestCLI:
         assert (tmp_path / "run" / "checkpoints" / "last.ckpt").exists()
 
     def test_bad_kwargs_message(self):
-        from autovision._cli import app
         from typer.testing import CliRunner
+
+        from autovision._cli import app
 
         runner = CliRunner()
         result = runner.invoke(app, ["pretrain", "novalue"])

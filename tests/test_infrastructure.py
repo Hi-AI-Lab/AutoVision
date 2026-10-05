@@ -1,7 +1,6 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
 """Infrastructure checks: CI configs, Docker, docs, packaging metadata."""
 
-import pathlib
 from pathlib import Path
 
 import pytest

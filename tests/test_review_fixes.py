@@ -9,7 +9,7 @@ from autovision._data._serialize.memory_mapped_sequence import (
     MemoryMappedSequence,
     write_items_to_file,
 )
-from autovision._methods.distillationv3 import DistillationV3, DistillationV3Args
+from autovision._methods.distillationv3 import DistillationV3Args
 from tests.test_methods_distillationv3 import make_batch, make_method
 
 
@@ -63,7 +63,6 @@ class TestP1MmapRefcount:
         def items():
             return [{"filenames": f"i{i}"} for i in range(3)]
 
-        out = tmp_path / "run"
         seq1 = get_dataset_mmap_file(items, tmp_path / "pre.mmap")
         seq2 = get_dataset_mmap_file(items, tmp_path / "pre.mmap")
         ref_file = tmp_path / "pre.ref_count"

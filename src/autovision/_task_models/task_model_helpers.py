@@ -8,17 +8,17 @@ import logging
 import pickle
 import re
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import torch
 
-from autovision._env import Env  # noqa: F401  (cache dir contract)
-from autovision.errors import CheckpointError
 from autovision._accelerator import npu_available
+from autovision._env import Env  # noqa: F401  (cache dir contract)
 from autovision._task_models.task_model import TaskModel
+from autovision.errors import CheckpointError
 from autovision.types import PathLike
 
-__all__ = ["load_model"]
+__all__ = ["load_task_model"]
 
 logger = logging.getLogger("autovision")
 

@@ -139,7 +139,7 @@ class TestTrainingStep:
             optimizer.step()
             scheduler.step()
             losses.append(float(loss.detach()))
-        assert all(torch.isfinite(torch.tensor(l)) for l in losses)
+        assert all(torch.isfinite(torch.tensor(loss)) for loss in losses)
         # The queue swaps its random init for freshly encoded (hard) keys
         # over the first steps, so optimization is measured after warm-up.
         assert losses[-1] < losses[2]

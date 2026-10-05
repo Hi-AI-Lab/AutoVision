@@ -1,0 +1,37 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install ruff
+      - run: ruff check src tests
+
+  test:
+    runs-on: ubuntu-latest
+    env:
+      # Compliance: telemetry stays off in CI.
+      AUTOVISION_TELEMETRY: "0"
+      # Exercise the torchrun multi-process DDP suite (gloo, CPU-only).
+      AUTOVISION_DDP_TESTS: "1"
+      AUTOVISION_HF_TESTS: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install CPU torch
+        run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+      - name: Install package with dev and export extras
+        run: pip install -e ".[dev,export]"
+      - name: Run test suite
+        run: pytest tests -q

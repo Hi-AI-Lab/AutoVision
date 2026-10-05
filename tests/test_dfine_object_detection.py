@@ -3,11 +3,15 @@
 import pytest
 import torch
 
-from autovision import load_task_model as load_model, train_object_detection
+from autovision import load_task_model as load_model
+from autovision import train_object_detection
 from autovision._task_models.dfine_object_detection import (
     DFINEObjectDetection,
     DFINEObjectDetectionTrain,
     DFINEObjectDetectionTrainArgs,
+)
+from autovision._task_models.object_detection_components.dfine_criterion import (
+    DFINECriterionV2,
 )
 from autovision._task_models.object_detection_components.dfine_decoder import (
     DFINEv2Decoder,
@@ -17,12 +21,9 @@ from autovision._task_models.object_detection_components.dfine_utils import (
     ddf_loss,
     distance2bbox,
     fg_loss,
-    integration_weights,
     integrate_corners,
+    integration_weights,
     soft_bin_targets,
-)
-from autovision._task_models.object_detection_components.dfine_criterion import (
-    DFINECriterionV2,
 )
 from autovision._task_models.object_detection_components.matcher import (
     HungarianMatcher,
@@ -292,8 +293,6 @@ class TestDDF:
         indices = [
             (torch.tensor([0, 1]), torch.tensor([0, 1])) for _ in range(2)
         ]
-        targets = [{"boxes": boxes[b], "labels": torch.zeros(2, dtype=torch.long)}
-                   for b in range(2)]
         loss = ddf_loss(corners, corners.clone(), boxes, boxes.clone(),
                         indices, torch.tensor(6.0), REG_MAX)
         assert loss.item() == pytest.approx(0.0, abs=1e-6)

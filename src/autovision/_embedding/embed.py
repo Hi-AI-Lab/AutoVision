@@ -7,18 +7,16 @@ import enum
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import torch
 from torchvision.transforms import v2
 
-from autovision._commands.common_helpers import get_num_workers, resolve_data_paths
+from autovision._commands.common_helpers import resolve_data_paths
 from autovision._data.file_helpers import list_image_filenames_from_dir, open_image
-from autovision._models._model_helpers import load_state_dict_compat
-from autovision._distributed import is_global_rank_zero
-from autovision._models.package_helpers import get_wrapped_model
-from autovision._models.embedding_model import EmbeddingModel
 from autovision._engine.engine import resolve_device, seed_everything
+from autovision._models._model_helpers import load_state_dict_compat
+from autovision._models.embedding_model import EmbeddingModel
+from autovision._models.package_helpers import get_wrapped_model
 from autovision.types import PathLike
 
 __all__ = ["EmbeddingFormat", "embed"]
@@ -156,7 +154,6 @@ def embed(
         return path.name
 
     writer = _Writer(fmt, out_path)
-    num_workers_resolved = get_num_workers(num_workers, 1)
     chunk = max(batch_size, 1)
     for start in range(0, len(filenames), chunk):
         paths = filenames[start : start + chunk]

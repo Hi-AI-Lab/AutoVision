@@ -1,0 +1,37 @@
+# Autovision CI: lint + test (see tests/test_infrastructure.py, which
+# guards this file's contract).
+
+stages:
+  - lint
+  - test
+
+variables:
+  PIP_NO_CACHE_DIR: "1"
+
+ruff:
+  stage: lint
+  image: python:3.11-slim
+  script:
+    - pip install ruff
+    - ruff check src tests
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+
+test:
+  stage: test
+  # PyTorch runtime base so the suite's CPU-only training tests run as-is.
+  image: pytorch/pytorch:2.5.1-cuda11.8-cudnn9-runtime
+  variables:
+    # Compliance: telemetry must stay off in CI (guarded by
+    # tests/test_infrastructure.py::TestCI::test_telemetry_disabled_in_ci).
+    AUTOVISION_TELEMETRY: "0"
+    # Exercise the torchrun multi-process DDP suite (gloo, CPU-only).
+    AUTOVISION_DDP_TESTS: "1"
+    AUTOVISION_HF_TESTS: "0"
+  script:
+    - pip install -e ".[dev,export]"
+    - pytest tests -q
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH

@@ -143,7 +143,7 @@ class TestTrainingStep:
             optimizer.step()
             scheduler.step()
             losses.append(float(loss.detach()))
-        assert all(torch.isfinite(torch.tensor(l)) for l in losses)
+        assert all(torch.isfinite(torch.tensor(loss)) for loss in losses)
         assert losses[-1] < losses[0]
 
     def test_log_dict_has_mse(self):

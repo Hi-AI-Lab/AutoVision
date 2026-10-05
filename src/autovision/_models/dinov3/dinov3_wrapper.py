@@ -9,6 +9,8 @@ exposes the last stage feature map directly. Both operate on
 
 from __future__ import annotations
 
+from typing import Any
+
 import torch
 from torch import Tensor, nn
 

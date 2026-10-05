@@ -45,7 +45,7 @@ def adapt_conv_input_channels(weight: torch.Tensor, in_chans: int) -> torch.Tens
     ``num_input_channels`` (grayscale, multispectral, ...): extra pretrained
     channels are trimmed, missing channels are repeated from the full set.
     """
-    out_chans, pretrained_chans = weight.shape[0], weight.shape[1]
+    pretrained_chans = weight.shape[1]
     if pretrained_chans == in_chans:
         return weight
     if pretrained_chans > in_chans:
