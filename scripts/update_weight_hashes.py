@@ -3,7 +3,12 @@
 
 Fetches the LFS sha256 of every weight file for each manifest entry and
 rewrites ``src/autovision/_models/weight_hashes.py`` with the pinned tier
-enabled. Requires network access to the model registry.
+enabled. Requires network access to the model registry. Only registry
+metadata is fetched (LFS pointers), never the weights themselves.
+
+Each entry is pinned to the commit the default branch pointed at when
+this script ran (``revision=<sha>``), so verification stays reproducible
+even if the upstream repository moves.
 
 Usage::
 
@@ -29,12 +34,19 @@ from autovision._models.weight_verification import (  # noqa: E402
 
 
 def pin_all(repo_filter: str | None) -> dict:
+    from huggingface_hub import HfApi
+
     manifest = dict(weight_hashes.WEIGHT_MANIFEST)
     for repo_id, artifact in sorted(manifest.items()):
         if repo_filter and repo_id != repo_filter:
             continue
         print(f"Fetching LFS hashes for {repo_id} ...")
-        hashes = _lfs_sha256(repo_id, artifact.revision)
+        try:
+            revision = HfApi().model_info(repo_id).sha
+            hashes = _lfs_sha256(repo_id, revision)
+        except Exception as error:  # gated/private repos without a token, offline, ...
+            print(f"  WARNING: could not pin {repo_id}: {error}")
+            continue
         if not hashes:
             print(f"  WARNING: no LFS weight files found; leaving unpinned.")
             continue
@@ -42,7 +54,7 @@ def pin_all(repo_filter: str | None) -> dict:
             repo_id=artifact.repo_id,
             license=artifact.license,
             source=artifact.source,
-            revision=artifact.revision,
+            revision=revision,
             sha256=dict(hashes),
         )
     return manifest
