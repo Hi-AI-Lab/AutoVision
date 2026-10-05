@@ -228,6 +228,14 @@ class TestWithInjectedSupport:
         snapshot = tmp_path / "snap"
         snapshot.mkdir()
         (snapshot / "model.safetensors").write_bytes(b"weights")
+        # Force the lfs-metadata verification tier: an unpinned manifest
+        # entry, independent of what the real manifest has pinned.
+        from autovision._models.weight_verification import WeightArtifact
+
+        monkeypatch.setattr(
+            "autovision._models.weight_verification.get_weight_artifact",
+            lambda repo_id: WeightArtifact(repo_id=repo_id, license="apache-2.0"),
+        )
         monkeypatch.setattr(
             "autovision._models.weight_verification._download_snapshot",
             lambda repo_id, revision, *a, **k: downloaded.append(repo_id)

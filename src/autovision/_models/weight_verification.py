@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from autovision._env import Env
-from autovision.errors import AutovisionError
+from autovision.errors import AutovisionError, CheckpointError
 
 __all__ = [
     "WeightArtifact",
@@ -203,7 +203,7 @@ def load_pretrained_verified(
                 repo_id, revision, local_files_only=True
             )
         except LocalEntryNotFoundError as error:
-            raise RuntimeError(
+            raise CheckpointError(
                 f"AUTOVISION_OFFLINE=1 and no cached snapshot for '{repo_id}'. "
                 "Run once without AUTOVISION_OFFLINE to populate the cache, or "
                 "download the model manually and point model_args at it."

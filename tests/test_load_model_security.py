@@ -78,6 +78,42 @@ def test_safe_loader_blocks_pickle_execution(tmp_path):
     assert _CANARY_HITS == [], "pickle payload must never execute"
 
 
+def test_embedded_autovision_class_is_admitted(tmp_path):
+    # A verified autovision-internal class reference embedded in the
+    # payload is admitted to the safe loader (the upgrade path), while
+    # the untrusted class-path gate still fires afterwards.
+    from autovision._task_models.task_model import TaskModel
+
+    path = tmp_path / "exported.pt"
+    torch.save(
+        {
+            "model_class_path": "subprocess.Popen",
+            "anchor": TaskModel,  # pickled by reference to an autovision class
+        },
+        path,
+    )
+    with pytest.raises(CheckpointError, match="only autovision task-model"):
+        load_task_model(path)
+
+
+def test_embedded_autovision_function_is_rejected(tmp_path):
+    # Functions must never be admitted: the weights_only unpickler
+    # executes user-allowed callables via pickle REDUCE with attacker
+    # controlled arguments.
+    from autovision._task_models import task_model_helpers
+
+    path = tmp_path / "exported.pt"
+    torch.save(
+        {
+            "model_class_path": "subprocess.Popen",
+            "payload": task_model_helpers.load_task_model,
+        },
+        path,
+    )
+    with pytest.raises(CheckpointError):
+        load_task_model(path)
+
+
 def test_not_an_exported_model(tmp_path):
     path = tmp_path / "random.pt"
     torch.save({"unrelated": torch.zeros(1)}, path)

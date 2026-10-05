@@ -128,6 +128,9 @@ def load_nan_capture(
     wrote yourself — a snapshot is executable pickle input like any
     checkpoint.
     """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"NaN snapshot does not exist: '{path}'")
     try:
         return torch.load(path, map_location="cpu", weights_only=True)
     except Exception as error:

@@ -54,7 +54,14 @@ def _resolve_device(device: str | torch.device | None) -> torch.device:
 
 
 def _verify_autovision_global(qualname: str) -> Any | None:
-    """Return the object for ``qualname`` if it truly lives in autovision."""
+    """Return the object for ``qualname`` if it is an autovision class.
+
+    Classes only: the weights_only unpickler *calls* any user-allowed
+    callable it meets via pickle REDUCE (attacker-controlled arguments),
+    while classes go through NEWOBJ and never run ``__init__``. Admitting
+    autovision functions would hand a crafted file a gadget set of every
+    module-level helper in the package.
+    """
     if not qualname.startswith("autovision."):
         return None
     module_path, _, attr = qualname.rpartition(".")
@@ -67,6 +74,8 @@ def _verify_autovision_global(qualname: str) -> Any | None:
         return None
     if not str(getattr(obj, "__module__", "")).startswith("autovision."):
         return None
+    if not isinstance(obj, type):
+        return None
     return obj
 
 
@@ -74,11 +83,13 @@ def _safe_load_export(path: Path) -> Any:
     """weights_only load that self-upgrades its allowlist with verified
     autovision-internal globals the export legitimately embedded."""
     allowed: list[Any] = []
-    for _ in range(_MAX_ALLOWLIST_UPGRADES):
+    for attempt in range(_MAX_ALLOWLIST_UPGRADES + 1):
         try:
             with torch.serialization.safe_globals(allowed):
                 return torch.load(path, map_location="cpu", weights_only=True)
         except pickle.UnpicklingError as error:
+            if attempt == _MAX_ALLOWLIST_UPGRADES:
+                break
             match = _BLOCKED_GLOBAL_RE.search(str(error))
             if match is None:
                 raise

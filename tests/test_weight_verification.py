@@ -18,6 +18,7 @@ from autovision._models.weight_verification import (
     get_weight_artifact,
     load_pretrained_verified,
 )
+from autovision.errors import CheckpointError
 
 pytest.importorskip("huggingface_hub")
 
@@ -243,7 +244,7 @@ class TestOfflineAndMirror:
                 LocalEntryNotFoundError("not cached")
             ),
         )
-        with pytest.raises(RuntimeError, match="AUTOVISION_OFFLINE"):
+        with pytest.raises(CheckpointError, match="AUTOVISION_OFFLINE"):
             load_pretrained_verified(FakeModelCls, "org/model")
 
     def test_offline_unpinned_skips_verification(self, monkeypatch, tmp_path: Path):

@@ -799,4 +799,5 @@ class TaskEngine(Engine):
             collate_fn=loader.collate_fn,
             timeout=loader.timeout,
             pin_memory=loader.pin_memory,
+            persistent_workers=loader.persistent_workers,
         )

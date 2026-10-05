@@ -24,7 +24,7 @@ def isolate_cache_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def clean_framework_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Remove all AUTOVISION_* and rank variables so tests start from defaults."""
     for name in list(os.environ):
-        if name.startswith("AUTOVISION_"):
+        if name.startswith("AUTOVISION_") and not name.endswith("_TESTS"):
             monkeypatch.delenv(name, raising=False)
     for name in (
         "RANK",
