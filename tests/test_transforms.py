@@ -1,8 +1,7 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
+import pytest
 import torch
 from torch.utils.data import DataLoader
-
-import pytest
 
 from autovision._transforms import (
     GaussianBlurArgs,

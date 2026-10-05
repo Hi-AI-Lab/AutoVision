@@ -22,7 +22,7 @@ from typing import Any, ClassVar, Literal
 
 import torch
 import torch.nn.functional as F
-from torch import Tensor, nn
+from torch import Tensor
 
 from autovision._methods.method import Method, TrainingStepResult
 from autovision._methods.method_args import MethodArgs

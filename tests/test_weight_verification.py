@@ -57,7 +57,6 @@ def fake_download(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     ``contents`` items are dicts of filename -> bytes, or an Exception to
     raise instead.
     """
-    from huggingface_hub.errors import LocalEntryNotFoundError
 
     calls: list[list] = []
 

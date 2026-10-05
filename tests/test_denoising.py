@@ -10,12 +10,12 @@ from autovision._task_models.object_detection_components.denoising import (
     get_cdn_matched_indices,
     get_contrastive_denoising_training_group,
 )
+from autovision._task_models.object_detection_components.rtdetrv2_decoder import (
+    RTDETRv2Decoder,
+)
 from autovision._task_models.rtdetr_object_detection import (
     RTDETRObjectDetectionTrain,
     RTDETRObjectDetectionTrainArgs,
-)
-from autovision._task_models.object_detection_components.rtdetrv2_decoder import (
-    RTDETRv2Decoder,
 )
 
 pytestmark = pytest.mark.filterwarnings("ignore::UserWarning")

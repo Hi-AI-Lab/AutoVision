@@ -5,9 +5,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from autovision._task_models.dfine_object_detection.config import (
-    DFINEObjectDetectionTrainArgs,
-)
 from autovision._task_models.object_detection_components.dfine_decoder import (
     DFINEv2Decoder,
 )

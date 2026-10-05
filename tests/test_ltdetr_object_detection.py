@@ -7,7 +7,8 @@ import pytest
 import torch
 import transformers
 
-from autovision import load_task_model as load_model, train_object_detection
+from autovision import load_task_model as load_model
+from autovision import train_object_detection
 from autovision._models.dinov2.dinov2_wrapper import TransformersDinov2Wrapper
 from autovision._task_models.ltdetr_object_detection import (
     LTDETRObjectDetectionTrain,

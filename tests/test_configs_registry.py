@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
-from autovision._configs.registry import Registry
-
 import pytest
+
+from autovision._configs.registry import Registry
 
 
 @pytest.fixture

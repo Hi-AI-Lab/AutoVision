@@ -278,11 +278,11 @@ class TestCriterionLossBoxes:
         # loss must take the matched diagonal. Summing the full matrix
         # inflated loss_giou ~N× on dense datasets and destroyed box
         # learning (found via VisDrone convergence run).
-        from autovision._task_models.object_detection_components.rtdetrv2_criterion import (
-            RTDETRCriterionV2,
-        )
         from autovision._task_models.object_detection_components.matcher import (
             HungarianMatcher,
+        )
+        from autovision._task_models.object_detection_components.rtdetrv2_criterion import (
+            RTDETRCriterionV2,
         )
 
         torch.manual_seed(0)
@@ -307,9 +307,6 @@ class TestCriterionLossBoxes:
         # Reference: GIoU loss computed per aligned pair only.
         from autovision._task_models.object_detection_components.box_ops import (
             generalized_box_iou_loss,
-        )
-        from autovision._task_models.object_detection_components.rtdetrv2_criterion import (
-            _cxcywh_to_xyxy_unit,
         )
 
         def cxcywh_to_xyxy(b):

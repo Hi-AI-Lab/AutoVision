@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from autovision._env import Env
+from autovision.errors import AutovisionError
 
 __all__ = [
     "WeightArtifact",
@@ -48,7 +49,7 @@ _RETRY_MESSAGE = (
 )
 
 
-class WeightVerificationError(RuntimeError):
+class WeightVerificationError(AutovisionError):
     """A pretrained weight file failed sha256 verification after one retry."""
 
 

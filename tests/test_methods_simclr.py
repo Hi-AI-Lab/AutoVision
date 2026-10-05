@@ -3,7 +3,6 @@
 
 import pytest
 import torch
-from torch import nn
 
 from autovision._methods import get_method_cls, list_methods
 from autovision._methods.simclr import (

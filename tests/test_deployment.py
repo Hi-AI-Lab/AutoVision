@@ -7,8 +7,8 @@ import torch
 from autovision._export import benchmark_inference
 from autovision._task_models import (
     RTDETRObjectDetection,
-    RTDETRObjectDetectionTrainArgs,
     RTDETRObjectDetectionTrain,
+    RTDETRObjectDetectionTrainArgs,
 )
 from autovision._task_models.object_detection_components import (
     combine_object_detection_tiles,

@@ -32,7 +32,6 @@ Distance parameterization (self-implemented per the paper's mechanism):
 from __future__ import annotations
 
 import torch
-import torch.nn.functional as F
 
 from autovision._task_models.object_detection_components.denoising import (
     box_cxcywh_to_xyxy,

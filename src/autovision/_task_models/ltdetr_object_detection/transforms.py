@@ -22,7 +22,6 @@ from typing import Any
 
 from autovision._transforms.detection_transforms.args import (
     RTDETRDetectionTransformArgs,
-    ScaleJitterArgs,
 )
 from autovision.types import ImageSizeTuple
 

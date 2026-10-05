@@ -1,9 +1,13 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
-from autovision._checkpoint import CHECKPOINT_AUTOVISION_KEY, Checkpoint, CheckpointMetadata
-from autovision.errors import CheckpointError
-
 import pytest
 import torch
+
+from autovision._checkpoint import (
+    CHECKPOINT_AUTOVISION_KEY,
+    Checkpoint,
+    CheckpointMetadata,
+)
+from autovision.errors import CheckpointError
 
 
 class TestCheckpoint:

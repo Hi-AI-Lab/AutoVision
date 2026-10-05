@@ -32,17 +32,16 @@ from typing import Any
 import torch
 from torch import Tensor, nn
 
-from autovision._methods.dinov2.dinov2 import (
-    DINOv2,
-    DINOv2AdamWArgs,
-    DINOv2Args,
-)
 from autovision._methods.dino.dino import (
     DINOTransformArgs,
     _cosine_schedule,
     _update_momentum,
 )
-from autovision._methods.method import TrainingStepResult
+from autovision._methods.dinov2.dinov2 import (
+    DINOv2,
+    DINOv2AdamWArgs,
+    DINOv2Args,
+)
 from autovision._methods.dinov3.constrained_crop import (
     _GeometryViewTransform,
     render_augmented_local,
@@ -50,6 +49,7 @@ from autovision._methods.dinov3.constrained_crop import (
     sample_high_overlap_box,
 )
 from autovision._methods.dinov3.paika import _linear_cka_loss, _roi_resample_to_grid
+from autovision._methods.method import TrainingStepResult
 from autovision._optim import TrainableModules, get_weight_decay_parameters
 from autovision._scheduler import CosineWarmupScheduler
 from autovision._transforms.method_transform import MultiViewTransform

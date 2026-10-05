@@ -41,13 +41,13 @@ import torchvision.transforms.functional as TF
 from torch import Tensor, nn
 from torchvision.transforms import InterpolationMode
 
-from autovision._methods.dino.dino import _update_momentum
-from autovision._methods.method import Method, TrainingStepResult
-from autovision._methods.method_args import MethodArgs
 from autovision._methods.detcon.detcon_transform import (
     DetConBTransform,
     DetConSTransform,
 )
+from autovision._methods.dino.dino import _update_momentum
+from autovision._methods.method import Method, TrainingStepResult
+from autovision._methods.method_args import MethodArgs
 from autovision._methods.simclr.simclr import _SimCLRProjectionHead
 from autovision._optim import SGDArgs, TrainableModules
 

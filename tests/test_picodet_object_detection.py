@@ -3,7 +3,8 @@
 import pytest
 import torch
 
-from autovision import load_task_model as load_model, train_object_detection
+from autovision import load_task_model as load_model
+from autovision import train_object_detection
 from autovision._task_models.picodet_object_detection import (
     PicoDetObjectDetection,
     PicoDetObjectDetectionTrain,

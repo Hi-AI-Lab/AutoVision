@@ -13,20 +13,16 @@ resolves ``"auto"`` in place, and asserts the result is fully resolved.
 
 from __future__ import annotations
 
-import math
 from typing import Any, TypeVar
 
-import torch
 from torch.utils.data import DataLoader
 
 from autovision._configs.validate import (
     assert_config_resolved,
-    no_auto,
     pydantic_model_validate,
 )
 from autovision._methods.method import Method
 from autovision._scaling import (
-    IMAGENET_SIZE,
     ScalingInfo,
     epochs_from_steps,
 )

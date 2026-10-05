@@ -17,7 +17,6 @@ import time
 import urllib.request
 import uuid
 from collections import deque
-from pathlib import Path
 from typing import Any
 
 from autovision._accelerator import npu_available

@@ -8,8 +8,8 @@ that contract against regressions (a naive ``weights_only=False`` here
 is arbitrary code execution via crafted pickle).
 """
 
-import torch
 import pytest
+import torch
 
 from autovision import load_task_model
 from autovision.errors import CheckpointError

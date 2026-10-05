@@ -25,18 +25,35 @@ from autovision._models import get_wrapped_model
 from autovision._models.model_wrapper import ModelWrapper
 from autovision._models.rfdetr import RFDETR_PACKAGE, RFDETRModelWrapper
 
-# ── current environment: no transformers / transformers without RfDetr ──
+# ── gating: forced deterministically, not assumed from the environment ──
 
 
 class TestGating:
-    def test_no_support_lists_empty(self):
-        # The real installed transformers has no RfDetr classes (or no
-        # transformers at all).
+    @pytest.fixture
+    def no_support(self, monkeypatch):
+        from autovision._models.rfdetr import rfdetr_package
+
+        monkeypatch.setattr(
+            rfdetr_package, "_rfdetr_classes", lambda: None
+        )
+
+    def test_no_support_lists_empty(self, no_support):
         assert RFDETR_PACKAGE.list_model_names() == []
 
-    def test_no_support_raises_on_get_model(self):
+    def test_no_support_raises_on_get_model(self, no_support):
         with pytest.raises(ImportError, match="RfDetr"):
             RFDETR_PACKAGE.get_model("rf-detr-base", load_weights=False)
+
+    def test_support_lists_all_variants(self, monkeypatch):
+        from autovision._models.rfdetr import rfdetr_package
+
+        classes = {"config": object, "model": object, "backbone_config": object}
+        monkeypatch.setattr(rfdetr_package, "_rfdetr_classes", lambda: classes)
+        names = RFDETR_PACKAGE.list_model_names()
+        # Five sizes, each with a -notpretrained offline twin.
+        assert len(names) == 10
+        assert "rfdetr/rf-detr-base" in names
+        assert "rfdetr/rf-detr-base-notpretrained" in names
 
     def test_graceful_without_transformers(self, monkeypatch):
         import importlib
@@ -279,6 +296,14 @@ class TestWithInjectedSupport:
         snapshot = tmp_path / "snap"
         snapshot.mkdir()
         (snapshot / "model.safetensors").write_bytes(b"weights")
+        # Force the lfs-metadata verification tier: an unpinned manifest
+        # entry, independent of what the real manifest has pinned.
+        from autovision._models.weight_verification import WeightArtifact
+
+        monkeypatch.setattr(
+            "autovision._models.weight_verification.get_weight_artifact",
+            lambda repo_id: WeightArtifact(repo_id=repo_id, license="apache-2.0"),
+        )
         monkeypatch.setattr(
             "autovision._models.weight_verification._download_snapshot",
             lambda repo_id, revision, *a, **k: downloaded.append(repo_id)

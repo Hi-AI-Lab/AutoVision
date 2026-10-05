@@ -6,13 +6,13 @@ import numpy as np
 import pytest
 import torch
 
-from autovision import load_task_model as load_model, train_instance_segmentation
+from autovision import load_task_model as load_model
+from autovision import train_instance_segmentation
 from autovision._data.coco_instance_segmentation_dataset import (
     COCOInstanceSegmentationDataset,
 )
 from autovision._metrics.instance_segmentation import COCOMaskAPEvaluator
 from autovision._task_models.dinov2_eomt_instance_segmentation import (
-    Dinov2EomtInstanceSegmentation,
     Dinov2EomtInstanceSegmentationTrain,
     Dinov2EomtInstanceSegmentationTrainArgs,
 )

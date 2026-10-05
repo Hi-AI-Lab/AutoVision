@@ -19,9 +19,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Sequence
 
 import torch
+from pydantic import Field
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
-from pydantic import Field
 
 from autovision._configs.base import PydanticConfig
 from autovision._transforms.transform_args import MethodTransformArgs

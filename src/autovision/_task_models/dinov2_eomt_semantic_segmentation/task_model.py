@@ -7,7 +7,6 @@ import pathlib
 from typing import Any
 
 import torch
-from torch import nn
 
 from autovision._export import ONNXExportMixin
 from autovision._task_models.eomt.modeling import build_eomt_model

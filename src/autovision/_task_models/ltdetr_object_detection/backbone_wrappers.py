@@ -22,10 +22,18 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 from torch import Tensor
-from torch.nn import BatchNorm2d, Conv2d, GELU, MaxPool2d, Module, ModuleList, Sequential
+from torch.nn import (
+    GELU,
+    BatchNorm2d,
+    Conv2d,
+    MaxPool2d,
+    Module,
+    ModuleList,
+    Sequential,
+)
 
-from autovision._models.dinov3.dinov3_wrapper import TransformersDinov3ConvNextWrapper
 from autovision._models.dinov2.dinov2_wrapper import TransformersDinov2Wrapper
+from autovision._models.dinov3.dinov3_wrapper import TransformersDinov3ConvNextWrapper
 
 __all__ = [
     "ConvNeXtDetectionBackbone",

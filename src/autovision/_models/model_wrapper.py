@@ -11,11 +11,14 @@ as weight decay per architecture.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict
-from typing_extensions import runtime_checkable
 
-import torch
 from torch import Tensor, nn
-from typing_extensions import NotRequired, Required, get_protocol_members
+from typing_extensions import (
+    NotRequired,
+    Required,
+    get_protocol_members,
+    runtime_checkable,
+)
 
 if TYPE_CHECKING:
     pass

@@ -8,10 +8,8 @@ last — custom is the last resort.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
-import torch
 from torch import nn
 
 from autovision._models.model_wrapper import ModelWrapper, missing_model_wrapper_attrs

@@ -1,4 +1,7 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
+import pytest
+from pydantic import Field
+
 from autovision._configs.base import PydanticConfig
 from autovision._configs.validate import (
     assert_config_resolved,
@@ -7,10 +10,6 @@ from autovision._configs.validate import (
     suggest_key,
 )
 from autovision.errors import ConfigValidationError, UnresolvedAutoError
-
-import pytest
-from pydantic import Field
-
 from autovision.types import ImageSizeTuple
 
 

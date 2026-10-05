@@ -20,12 +20,12 @@ import torch
 from scipy.optimize import linear_sum_assignment
 from torch import nn
 
+from autovision._task_models.object_detection_components.matcher import (
+    HungarianMatcher,
+)
 from autovision._task_models.object_detection_components.obb import probiou_matrix
 from autovision._task_models.object_detection_components.rtdetrv2_criterion import (
     RTDETRCriterionV2,
-)
-from autovision._task_models.object_detection_components.matcher import (
-    HungarianMatcher,
 )
 
 __all__ = [

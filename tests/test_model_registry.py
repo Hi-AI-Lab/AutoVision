@@ -154,7 +154,6 @@ class TestDownloadable:
 
     def test_register_and_resolve_local_url(self, tmp_path):
         import hashlib
-        import urllib.request
 
         source = tmp_path / "hosted.pt"
         payload = b"hosted-checkpoint"

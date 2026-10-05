@@ -21,12 +21,12 @@ import torch
 from torch import nn
 
 from autovision._distributed import reduce_dict
+from autovision._task_models.object_detection_components.denoising import (
+    get_cdn_matched_indices,
+)
 from autovision._task_models.object_detection_components.dfine_utils import (
     ddf_loss,
     fg_loss,
-)
-from autovision._task_models.object_detection_components.denoising import (
-    get_cdn_matched_indices,
 )
 from autovision._task_models.object_detection_components.rtdetrv2_criterion import (
     loss_boxes,

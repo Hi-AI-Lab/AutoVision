@@ -1,5 +1,4 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
-import pytest
 
 from autovision import _distributed as dist
 

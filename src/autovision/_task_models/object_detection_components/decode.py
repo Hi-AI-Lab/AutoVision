@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 from autovision._task_models.object_detection_components.box_ops import (
     box_cxcywh_norm_to_xyxy,
 )

@@ -22,8 +22,8 @@ from typing import Any, Iterable, Literal
 import torch
 from torch import nn
 
-from autovision._version import __version__
 from autovision._license import LICENSE_INFO
+from autovision._version import __version__
 
 __all__ = ["ONNXExportMixin", "ONNXExportPrecisionPolicy"]
 
@@ -85,7 +85,6 @@ class ONNXExportMixin(nn.Module):
         format_args: dict[str, Any] | None = None,
     ) -> Path:
         """Export the model to ONNX with verification gates."""
-        import onnx
 
         out = Path(out)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -297,7 +296,10 @@ class ONNXExportMixin(nn.Module):
             self._verify_int8_parity(fp32_path, out, reader, parity_atol, parity_rtol)
 
         # 4. Quantization metadata.
-        from autovision._export.quantization import _int8_metadata_payload, Int8QuantizationConfig
+        from autovision._export.quantization import (
+            Int8QuantizationConfig,
+            _int8_metadata_payload,
+        )
 
         config = quantization_config or Int8QuantizationConfig()
         _write_onnx_metadata(

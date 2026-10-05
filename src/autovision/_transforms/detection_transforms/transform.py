@@ -23,9 +23,6 @@ from torchvision import tv_tensors
 from torchvision.transforms import v2
 from torchvision.transforms.v2 import functional as TF
 
-from autovision._transforms.transform_args import NormalizeArgs
-from autovision.types import ImageSizeTuple
-
 __all__ = ["RTDETRDetectionTransform", "StepScheduledCompose"]
 
 

@@ -16,7 +16,6 @@ from typing import Any
 import torch
 
 from autovision import errors
-from autovision._compat import install_graphmodule_deepcopy_fix
 from autovision._checkpoint import CHECKPOINT_AUTOVISION_KEY
 from autovision._commands import (
     PretrainConfig,
@@ -31,11 +30,12 @@ from autovision._commands import (
     train_semantic_segmentation,
 )
 from autovision._commands.extract_video_frames import extract_video_frames
+from autovision._compat import install_graphmodule_deepcopy_fix
 from autovision._embedding import embed
 from autovision._export import benchmark
 from autovision._methods import list_methods
-from autovision._task_models.task_model_helpers import load_task_model
 from autovision._models import list_models
+from autovision._task_models.task_model_helpers import load_task_model
 from autovision._version import __version__
 from autovision.errors import AutovisionError
 

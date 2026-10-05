@@ -8,8 +8,7 @@ training-only machinery. ``load_model`` rebuilds them from
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import torch
 from torch import nn

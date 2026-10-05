@@ -268,7 +268,6 @@ class TestAttachKnnEvalRunner:
 class TestPretrainKnnIntegration:
     def test_pretrain_logs_knn_metrics(self, tmp_path: Path):
         from autovision import pretrain
-
         from tests.conftest import create_images
 
         image_dir = tmp_path / "data"

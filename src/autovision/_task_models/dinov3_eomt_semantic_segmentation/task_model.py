@@ -6,8 +6,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import torch
-
 from autovision._task_models.dinov2_eomt_semantic_segmentation.task_model import (
     Dinov2EomtSemanticSegmentation,
 )

@@ -31,12 +31,12 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from autovision._models._model_helpers import adapt_conv_input_channels
-from autovision.errors import CheckpointError
 from autovision._models.model_wrapper import (
     ArchitectureInfo,
     ForwardFeaturesOutput,
     ForwardPoolOutput,
 )
+from autovision.errors import CheckpointError
 
 __all__ = ["ECVIT_PRESETS", "ECViTModelWrapper", "VisionTransformer"]
 

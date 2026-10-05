@@ -30,6 +30,9 @@ from autovision._task_models.ltdetr_object_detection.config import (
     LTDETRObjectDetectionTrainArgs,
     resolve_ltdetr_variant,
 )
+from autovision._task_models.ltdetr_object_detection.task_model import (
+    LTDETRObjectDetection,
+)
 from autovision._task_models.object_detection_components.dfine_criterion import (
     DFINECriterionV2,
 )
@@ -42,9 +45,6 @@ from autovision._task_models.object_detection_components.matcher import (
 )
 from autovision._task_models.object_detection_components.rtdetrv2_criterion import (
     RTDETRCriterionV2,
-)
-from autovision._task_models.ltdetr_object_detection.task_model import (
-    LTDETRObjectDetection,
 )
 from autovision._task_models.train_model import TaskStepResult, TrainModel
 

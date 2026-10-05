@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from autovision._models.weight_verification import compute_file_sha256
+from autovision.errors import AutovisionError
 
 __all__ = [
     "DOWNLOADABLE_MODEL_URL_AND_HASH",
@@ -26,7 +27,7 @@ __all__ = [
 logger = logging.getLogger("autovision")
 
 
-class DownloadableModelError(RuntimeError):
+class DownloadableModelError(AutovisionError):
     """Raised when a downloadable model is unknown or fails verification."""
 
 

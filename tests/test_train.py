@@ -1,13 +1,12 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
 """End-to-end smoke tests: pretrain -> artifacts -> resume -> export/load."""
 
-import json
 
 import pytest
 import torch
 
 from autovision import list_methods, list_models, pretrain
-from autovision._commands.train import PretrainConfig, train_from_config
+from autovision._commands.train import PretrainConfig
 
 pytestmark = pytest.mark.filterwarnings("ignore::UserWarning")
 

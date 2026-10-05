@@ -10,7 +10,6 @@ from torchvision import tv_tensors
 from autovision._data.coco_object_detection_dataset import (
     COCOObjectDetectionDataArgs,
 )
-from autovision._data.object_detection_dataset import ObjectDetectionDataset
 from autovision._data.yolo_object_detection_dataset import (
     YOLOObjectDetectionDataArgs,
     yolo_images_to_labels_path,

@@ -19,13 +19,14 @@ import torch
 from torch import nn
 
 from autovision._accelerator import npu_available
+from autovision.errors import AutovisionError
 
 __all__ = ["NaNCaptureMonitor", "NaNDetectedError", "load_nan_capture"]
 
 logger = logging.getLogger("autovision")
 
 
-class NaNDetectedError(RuntimeError):
+class NaNDetectedError(AutovisionError):
     """Raised after a NaN snapshot has been saved."""
 
 

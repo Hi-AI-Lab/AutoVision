@@ -216,9 +216,9 @@ class ONNXBackend:
         out_dir: Path,
         device: torch.device,
     ) -> None:
-        import onnxruntime as ort
-
         import copy
+
+        import onnxruntime as ort
 
         export_model = copy.deepcopy(model).to("cpu").float()
         export_args = dict(args.export_args or {})

@@ -15,7 +15,6 @@ import torch
 from torch import nn
 
 from autovision._models.model_wrapper import (
-    ModelWrapper,
     missing_model_wrapper_attrs,
 )
 from autovision._models.package import BasePackage

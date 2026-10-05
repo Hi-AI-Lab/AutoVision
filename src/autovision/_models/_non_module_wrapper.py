@@ -14,10 +14,9 @@ import inspect
 from typing import Any
 
 import torch
-from torch import Tensor, nn
+from torch import nn
 
 from autovision._models.model_wrapper import (
-    ArchitectureInfo,
     ForwardFeaturesOutput,
     ForwardPoolOutput,
 )

@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from autovision._models.weight_verification import compute_file_sha256
+from autovision.errors import AutovisionError
 
 __all__ = [
     "MODEL_STAGES",
@@ -44,7 +45,7 @@ RegistryStage = Literal["dev", "staging", "prod"]
 _MANIFEST_NAME = "manifest.json"
 
 
-class RegistryError(RuntimeError):
+class RegistryError(AutovisionError):
     """Raised for registry layout, immutability or promotion-gate violations."""
 
 

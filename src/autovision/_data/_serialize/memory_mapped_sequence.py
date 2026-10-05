@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterable, Iterator, Sequence
-from typing import Any, Generic, TypeVar, overload
+from typing import Any, TypeVar, overload
 
 import pyarrow as pa
 import pyarrow.ipc as ipc

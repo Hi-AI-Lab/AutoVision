@@ -3,7 +3,9 @@
 import pytest
 import torch
 
-from autovision import load_task_model as load_model, train_semantic_segmentation
+from autovision import load_task_model as load_model
+from autovision import train_semantic_segmentation
+from autovision._scheduler import CosineWarmupScheduler
 from autovision._task_models.dinov2_eomt_semantic_segmentation import (
     Dinov2EomtSemanticSegmentation,
     Dinov2EomtSemanticSegmentationTrain,
@@ -16,7 +18,6 @@ from autovision._task_models.eomt import (
     semantic_masks_to_instances,
     semantic_segmentation_decode,
 )
-from autovision._scheduler import CosineWarmupScheduler
 
 MODEL_KWARGS = {
     "image_size": 64,

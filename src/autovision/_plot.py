@@ -3,10 +3,8 @@
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 
-import torch
 from PIL import Image, ImageDraw
 
 __all__ = ["plot_example_augmentations"]

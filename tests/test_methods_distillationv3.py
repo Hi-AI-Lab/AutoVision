@@ -17,7 +17,6 @@ from autovision._methods.distillationv3 import (
     DistillationV3TransformArgs,
 )
 from autovision._models import EmbeddingModel
-from autovision._optim import AdamWArgs, LARSArgs, TrainableModules
 from autovision._scaling import ScalingInfo
 from tests.helpers_models import TinyWrapper
 

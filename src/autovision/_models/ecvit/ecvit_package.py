@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any
 
 import torch
-import torch.nn as nn
 
 from autovision._models.ecvit.ecvit import (
     ECVIT_PRESETS,

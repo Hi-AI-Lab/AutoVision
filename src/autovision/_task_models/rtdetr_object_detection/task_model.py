@@ -10,6 +10,7 @@ import torch
 from torch import nn
 from torchvision.models.feature_extraction import create_feature_extractor
 
+from autovision._export import ONNXExportMixin, ONNXExportPrecisionPolicy
 from autovision._models import get_wrapped_model
 from autovision._task_models.object_detection_components.decode import (
     decode_detection_outputs,
@@ -20,7 +21,6 @@ from autovision._task_models.object_detection_components.hybrid_encoder import (
 from autovision._task_models.object_detection_components.rtdetrv2_decoder import (
     RTDETRv2Decoder,
 )
-from autovision._export import ONNXExportMixin, ONNXExportPrecisionPolicy
 from autovision._task_models.task_model import TaskModel
 from autovision._task_models.task_model_io import BaseModelOutput
 from autovision._transforms.transform_args import NormalizeArgs
@@ -129,6 +129,7 @@ class RTDETRObjectDetection(ONNXExportMixin, TaskModel):
         self, image: Any
     ) -> tuple[torch.Tensor, dict[str, Any]]:
         from torchvision.transforms.v2 import functional as TF
+
         from autovision._data.file_helpers import open_image
 
         if isinstance(image, (str, pathlib.Path)):

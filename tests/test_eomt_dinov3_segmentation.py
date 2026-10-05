@@ -16,6 +16,8 @@ from transformers import (
 
 from autovision import (
     load_task_model as load_model,
+)
+from autovision import (
     train_instance_segmentation,
     train_panoptic_segmentation,
     train_semantic_segmentation,

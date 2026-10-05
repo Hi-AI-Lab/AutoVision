@@ -297,7 +297,7 @@ class TestExportFake:
     def test_legacy_fallback(self, monkeypatch, tmp_path):
         from tests.helpers_ultralytics import install_fake_ultralytics
 
-        fake = install_fake_ultralytics(monkeypatch, version="8.2.9")
+        install_fake_ultralytics(monkeypatch, version="8.2.9")
 
         def _raise(name, package=None):
             raise importlib.metadata.PackageNotFoundError()

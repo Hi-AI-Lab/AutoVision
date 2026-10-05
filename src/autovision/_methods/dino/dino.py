@@ -37,13 +37,13 @@ from autovision._optim import (
     TrainableModules,
     get_weight_decay_parameters,
 )
-from autovision._scheduler import CosineWarmupScheduler
 from autovision._scaling import (
     IMAGENET_SIZE,
     ScalingInfo,
     get_bucket_value,
     interpolate,
 )
+from autovision._scheduler import CosineWarmupScheduler
 from autovision._transforms.method_transform import MultiViewTransform
 from autovision._transforms.transform_args import (
     ColorJitterArgs,

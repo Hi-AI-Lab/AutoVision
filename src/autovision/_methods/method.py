@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -20,7 +20,6 @@ from torch import Tensor, nn
 from autovision._optim import TrainableModules, get_optimizer
 from autovision._scheduler import CosineWarmupScheduler
 from autovision._transforms.method_transform import MethodTransform
-from autovision._transforms.transform_args import MethodTransformArgs
 
 __all__ = ["Method", "TrainingStepResult"]
 

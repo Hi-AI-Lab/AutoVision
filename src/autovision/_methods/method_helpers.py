@@ -9,10 +9,10 @@ import torch
 
 from autovision._configs.registry import Registry
 from autovision._methods.densecl import DenseCL
+from autovision._methods.detcon import DetConB, DetConS
 from autovision._methods.dino import DINO
 from autovision._methods.dinov2 import DINOv2
 from autovision._methods.dinov3 import DINOv3
-from autovision._methods.detcon import DetConB, DetConS
 from autovision._methods.distillationv2 import DistillationV2
 from autovision._methods.distillationv3 import DistillationV3
 from autovision._methods.method import Method

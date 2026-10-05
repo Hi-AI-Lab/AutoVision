@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import nullcontext
-from typing import Any, Iterator
+from typing import Any
 
 from autovision._env import Env
 

@@ -16,8 +16,6 @@ from autovision._export import (
 )
 from autovision._task_models import (
     RTDETRObjectDetection,
-    RTDETRObjectDetectionTrain,
-    RTDETRObjectDetectionTrainArgs,
 )
 
 onnxruntime = pytest.importorskip("onnxruntime", reason="onnxruntime not installed")

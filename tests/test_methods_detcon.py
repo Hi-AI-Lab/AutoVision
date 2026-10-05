@@ -567,7 +567,10 @@ class TestTransforms:
         # ops and normalization disabled, interior pixels of the transformed
         # image must decode to the transformed mask values.
         from autovision._methods.detcon.detcon_transform import _MaskedViewTransform
-        from autovision._transforms.transform_args import RandomFlipArgs, RandomResizeArgs
+        from autovision._transforms.transform_args import (
+            RandomFlipArgs,
+            RandomResizeArgs,
+        )
 
         torch.manual_seed(0)
         view = _MaskedViewTransform(

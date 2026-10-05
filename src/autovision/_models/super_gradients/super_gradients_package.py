@@ -17,8 +17,8 @@ from typing import Any
 import torch
 from torch import Tensor, nn
 
-from autovision._models.package import Package
 from autovision._models.model_wrapper import ArchitectureInfo
+from autovision._models.package import Package
 from autovision.errors import UnknownModelError
 
 __all__ = ["SUPER_GRADIENTS_PACKAGE", "SuperGradientsPackage"]

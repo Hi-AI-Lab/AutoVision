@@ -82,11 +82,13 @@ def train_panoptic_segmentation(
     out_dir = common_helpers.get_out_dir(out, resume_interrupted, overwrite)
     set_up_file_logging(out_dir / "train.log")
 
-    payload = (
-        dict(data)
-        if isinstance(data, dict)
-        else yaml.safe_load(open(data)) if Path(data).is_file() else {}
-    )
+    if isinstance(data, dict):
+        payload = dict(data)
+    elif Path(data).is_file():
+        with open(data) as handle:
+            payload = yaml.safe_load(handle) or {}
+    else:
+        payload = {}
     if not isinstance(payload, dict) or "train" not in payload:
         raise ValueError(
             "The panoptic segmentation data spec must provide a 'train' entry "

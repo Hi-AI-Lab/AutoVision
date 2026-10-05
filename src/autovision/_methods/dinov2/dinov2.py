@@ -32,7 +32,7 @@ from typing import Any, ClassVar
 
 import torch
 import torch.nn.functional as F
-from torch import Tensor, nn
+from torch import Tensor
 
 from autovision._methods.dino.dino import (
     DINOProjectionHead,
@@ -43,8 +43,8 @@ from autovision._methods.dino.dino import (
 from autovision._methods.method import Method, TrainingStepResult
 from autovision._methods.method_args import MethodArgs
 from autovision._optim import AdamWArgs, TrainableModules, get_weight_decay_parameters
-from autovision._scheduler import CosineWarmupScheduler
 from autovision._scaling import ScalingInfo
+from autovision._scheduler import CosineWarmupScheduler
 
 __all__ = ["DINOv2", "DINOv2Args"]
 
