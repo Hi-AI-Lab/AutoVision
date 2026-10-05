@@ -30,6 +30,7 @@ from autovision._accelerator import (
 )
 from autovision._checkpoint import Checkpoint, CheckpointMetadata
 from autovision._distributed import get_local_rank
+from autovision._env import Env
 from autovision._observability.otel import end_span, otel_span, start_span
 
 __all__ = ["Engine", "FitResult"]
@@ -140,7 +141,8 @@ class Engine:
                 # this, DDP aborts with "expected to have finished reduction
                 # in the prior iteration". Baseline uses
                 # ddp_find_unused_parameters_true for the same reason.
-                find_unused_parameters=True,
+                # Opt out (stable step shapes) via AUTOVISION_DDP_FIND_UNUSED=0.
+                find_unused_parameters=Env.DDP_FIND_UNUSED.value,
             )
             sampler = torch.utils.data.distributed.DistributedSampler(
                 dataloader.dataset, shuffle=True, drop_last=True
@@ -210,6 +212,7 @@ class Engine:
                             drop_last=True,
                             collate_fn=dataloader.collate_fn,
                             timeout=dataloader.timeout,
+                            pin_memory=dataloader.pin_memory,
                         )
                         if sampler is not None
                         else dataloader
@@ -494,7 +497,8 @@ class TaskEngine(Engine):
                 # then aborts with "expected to have finished reduction in
                 # the prior iteration". Baseline matches with
                 # ddp_find_unused_parameters_true.
-                find_unused_parameters=True,
+                # Opt out (stable step shapes) via AUTOVISION_DDP_FIND_UNUSED=0.
+                find_unused_parameters=Env.DDP_FIND_UNUSED.value,
             )
             train_sampler = torch.utils.data.distributed.DistributedSampler(
                 train_dataloader.dataset, shuffle=True, drop_last=True
@@ -794,4 +798,5 @@ class TaskEngine(Engine):
             drop_last=loader.drop_last,
             collate_fn=loader.collate_fn,
             timeout=loader.timeout,
+            pin_memory=loader.pin_memory,
         )

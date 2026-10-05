@@ -9,6 +9,8 @@ import shutil
 from collections.abc import Sequence
 from pathlib import Path
 
+import torch
+
 from autovision._distributed import is_global_rank_zero
 from autovision._env import Env
 from autovision.types import PathLike
@@ -115,4 +117,6 @@ def build_task_dataloader(dataset, batch_size: int, num_workers: int, train: boo
         drop_last=train,
         num_workers=num_workers,
         timeout=Env.DATALOADER_TIMEOUT_SEC.value if num_workers > 0 else 0.0,
+        pin_memory=torch.cuda.is_available(),
+        persistent_workers=num_workers > 0,
     )

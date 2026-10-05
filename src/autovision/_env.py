@@ -115,6 +115,12 @@ class Env:
     # Optional OpenTelemetry span emission (see _observability.otel); the
     # opentelemetry-api package itself is supplied by the host application.
     OTEL = EnvVar[bool]("AUTOVISION_OTEL", _default=False, _type=_parse_bool)
+    # DDP static-graph tuning: find_unused_parameters costs a full graph
+    # traversal per step; queue/EMA-free methods with stable step shapes
+    # can set AUTOVISION_DDP_FIND_UNUSED=0 to shed that tax.
+    DDP_FIND_UNUSED = EnvVar[bool](
+        "AUTOVISION_DDP_FIND_UNUSED", _default=True, _type=_parse_bool
+    )
     # Reserved for the per-step watchdog (design §7) — declared so the
     # config surface is discoverable, not yet consumed by the engine.
     STEP_TIMEOUT_SEC = EnvVar[float](
