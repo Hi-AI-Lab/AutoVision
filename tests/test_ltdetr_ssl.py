@@ -171,14 +171,14 @@ def test_infonce_single_instance_raises():
         simcse_infonce_loss(torch.randn(1, 4), torch.randn(1, 4))
 
 
-def test_infonce_valid_mask_excludes_pad_rows_and_columns():
+def test_infonce_valid_masks_exclude_pad_rows_and_columns():
     generator = torch.Generator().manual_seed(1)
     z1 = torch.randn(4, 6, generator=generator)
     z2 = torch.randn(4, 6, generator=generator)
     # Row/col 3 is a pad slot: anchors come from valid rows only and pad
     # columns leave the softmax denominator.
     valid = torch.tensor([True, True, True, False])
-    loss = simcse_infonce_loss(z1, z2, temp=0.05, valid_mask=valid)
+    loss = simcse_infonce_loss(z1, z2, temp=0.05, valid_rows=valid, valid_cols=valid)
     logits = cosine_logits(z1, z2, 0.05)
     logits[:, 3] = float("-inf")
     expected = torch.nn.functional.cross_entropy(logits[[0, 1, 2]], torch.tensor([0, 1, 2]))
@@ -241,7 +241,7 @@ def test_supcon_pad_columns_never_positives_for_real_class_zero():
     labels2 = torch.tensor([0, 1, 0])
     valid = torch.tensor([True, True, False])
     loss = supervised_contrastive_loss(
-        z1, z2, labels1, labels2, temp=0.05, valid_mask=valid
+        z1, z2, labels1, labels2, temp=0.05, valid_rows=valid, valid_cols=valid
     )
     assert torch.isfinite(loss)
     # Manual: anchors {0, 1}; row 0 positives = valid columns with label 0
@@ -1229,3 +1229,110 @@ def test_two_crop_flip_recovery_in_loss():
     )
     assert stats_off["paired_size"] == 0.0  # identity-only pairing drops them
     assert loss_off.item() == 0.0
+
+
+# ── D14: unpaired instances as extra candidate columns ──────────────────
+def test_infonce_rectangular_extra_negatives_hand_computed():
+    """z2 may carry extras beyond the paired columns: target arange(N) still
+    points at the paired diagonal, extras only join the softmax denominator."""
+    generator = torch.Generator().manual_seed(5)
+    z1 = torch.randn(2, 8, generator=generator)
+    z2_paired = torch.randn(2, 8, generator=generator)
+    extra = torch.randn(1, 8, generator=generator)
+    z2_all = torch.cat([z2_paired, extra])
+    loss = simcse_infonce_loss(z1, z2_all, temp=0.05)
+    logits = cosine_logits(z1, z2_all, 0.05)  # (2, 3)
+    assert logits.shape == (2, 3)
+    expected = torch.nn.functional.cross_entropy(logits, torch.tensor([0, 1]))
+    torch.testing.assert_close(loss, expected)
+
+
+def test_supcon_rectangular_same_label_extra_becomes_positive():
+    generator = torch.Generator().manual_seed(6)
+    z1 = torch.randn(2, 8, generator=generator)
+    z2 = torch.cat([torch.randn(2, 8, generator=generator),
+                    torch.randn(1, 8, generator=generator)])
+    labels1 = torch.tensor([0, 1])
+    labels2 = torch.tensor([0, 1, 0])  # the extra candidate shares anchor 0's label
+    loss = supervised_contrastive_loss(z1, z2, labels1, labels2, temp=0.05)
+    logits = cosine_logits(z1, z2, 0.05)
+    log_probs = logits - torch.logsumexp(logits, dim=1, keepdim=True)
+    # anchor 0 positives: cols {0 (pair), 2 (same-label extra)}; anchor 1: {1}.
+    expected = (-log_probs[0][[0, 2]].sum() / 2 - log_probs[1][[1]].sum() / 1) / 2
+    torch.testing.assert_close(loss, expected)
+
+
+def test_two_crop_unpaired_instances_reclaimed_as_candidates():
+    """Image 0: A pairs, B unpaired; image 1: C pairs, D unpaired. With D14
+    the unpaired B/D join as extra candidates; candidate_size = 4 > 2."""
+    box_a = torch.tensor([[0.2, 0.5, 0.1, 0.2]])
+    box_b = torch.tensor([[0.7, 0.3, 0.1, 0.1]])
+    box_b_lost = torch.tensor([[0.08, 0.08, 0.04, 0.04]])  # B's counterpart vanished
+    targets = [
+        {"boxes": torch.cat([box_a, box_b]), "labels": torch.tensor([0, 1])},
+        {"boxes": box_a.clone(), "labels": torch.tensor([0])},
+        {"boxes": torch.cat([box_a.clone(), box_b_lost]), "labels": torch.tensor([0, 1])},
+        {"boxes": box_a.clone(), "labels": torch.tensor([0])},
+    ]
+    indices = [
+        (torch.tensor([1, 3]), torch.tensor([0, 1])),
+        (torch.tensor([0]), torch.tensor([0])),
+        (torch.tensor([1, 3]), torch.tensor([0, 1])),
+        (torch.tensor([0]), torch.tensor([0])),
+    ]
+    z1 = torch.randn(4, 6, 16, requires_grad=True)
+    z2 = torch.randn(4, 6, 16, requires_grad=True)
+    outputs = {"pred_logits": torch.zeros(4, 6, 3)}
+    stats_on: dict[str, float] = {}
+    loss_on = ssl_contrastive_loss(
+        z1, z2, outputs, targets, indices,
+        SSLParams(mode="unsup", view="two_crop"), stats_sink=stats_on,
+    )
+    assert stats_on["paired_size"] == 2.0
+    assert stats_on["candidate_size"] == 4.0  # 2 paired + 2 unpaired extras
+    assert torch.isfinite(loss_on)
+    loss_on.backward()
+    # Disabling D14 restores the strict paired pool.
+    stats_off: dict[str, float] = {}
+    ssl_contrastive_loss(
+        z1, z2, outputs, targets, indices,
+        SSLParams(mode="unsup", view="two_crop", use_unpaired_as_negatives=False),
+        stats_sink=stats_off,
+    )
+    assert stats_off["candidate_size"] == 2.0
+
+
+def test_two_crop_unpaired_negatives_keep_ratio_semantics():
+    """Asymmetric fixture: image 0 loses object B in view 2, image 1 gains an
+    unmatched object D in view 2 — both rejoin as extras; paired_ratio keeps
+    its paired/(pool/2) semantics."""
+    box_a = torch.tensor([[0.2, 0.5, 0.1, 0.2]])   # image 0 object (both views)
+    box_b = torch.tensor([[0.7, 0.3, 0.1, 0.1]])   # image 0 object, view-2 counterpart gone
+    box_c = torch.tensor([[0.25, 0.7, 0.1, 0.1]])  # image 1 object (both views)
+    box_d = torch.tensor([[0.6, 0.6, 0.08, 0.08]]) # image 1 object, view-2 only
+    # View-major rows: image 0 = rows (0, 2), image 1 = rows (1, 3).
+    targets = [
+        {"boxes": torch.cat([box_a, box_b]), "labels": torch.tensor([0, 1])},
+        {"boxes": box_c, "labels": torch.tensor([0])},
+        {"boxes": box_a.clone(), "labels": torch.tensor([0])},
+        {"boxes": torch.cat([box_c.clone(), box_d]), "labels": torch.tensor([0, 1])},
+    ]
+    indices = [
+        (torch.tensor([1, 3]), torch.tensor([0, 1])),
+        (torch.tensor([0]), torch.tensor([0])),
+        (torch.tensor([1]), torch.tensor([0])),
+        (torch.tensor([1, 3]), torch.tensor([0, 1])),
+    ]
+    z1 = torch.randn(4, 6, 16, requires_grad=True)
+    z2 = torch.randn(4, 6, 16, requires_grad=True)
+    stats: dict[str, float] = {}
+    loss = ssl_contrastive_loss(
+        z1, z2, {"pred_logits": torch.zeros(4, 6, 3)}, targets, indices,
+        SSLParams(mode="unsup", view="two_crop"), stats_sink=stats,
+    )
+    assert stats["pool_size"] == 6.0
+    assert stats["paired_size"] == 2.0  # anchors: A and C
+    assert stats["candidate_size"] == 4.0  # A', C' paired + B, D unpaired extras
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert z1.grad is not None

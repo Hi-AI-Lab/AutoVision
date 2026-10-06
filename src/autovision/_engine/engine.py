@@ -10,9 +10,11 @@ single-process runs need no setup.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import random
+import time
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -54,6 +56,113 @@ def seed_everything(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+
+
+class _TrainWindow:
+    """On-device running sums of the training ``log_dict`` between log points.
+
+    Sums stay as 0-dim tensors on the source device: ``float()`` would sync
+    the GPU once per loss component per step, which is exactly what the
+    deferred logging in the training wrapper is designed to avoid. One sync
+    per component per LOG, not per step.
+    """
+
+    def __init__(self) -> None:
+        self.sums: dict[str, torch.Tensor] = {}
+        self.count = 0
+        self.t0 = time.perf_counter()
+
+    def update(self, log_dict: dict) -> None:
+        for key, value in log_dict.items():
+            if not torch.is_tensor(value):
+                continue  # non-tensor stats are logged as-is at log time
+            current = self.sums.get(key)
+            self.sums[key] = value.detach() + current if current is not None else value.detach()
+        self.count += 1
+
+    def means(self) -> dict[str, float]:
+        divisor = max(self.count, 1)
+        return {key: float(value) / divisor for key, value in self.sums.items()}
+
+    def seconds_per_step(self) -> float:
+        return (time.perf_counter() - self.t0) / max(self.count, 1)
+
+    def reset(self) -> None:
+        self.sums = {}
+        self.count = 0
+        self.t0 = time.perf_counter()
+
+
+def _log_fit_banner(
+    train_model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: Any,
+    steps: int,
+    gradient_accumulation_steps: int,
+    train_dataloader: DataLoader,
+    val_dataloader: DataLoader | None,
+    precision: str,
+    world_size: int,
+) -> None:
+    """Startup summary in the reference detection-log style: model size,
+    optimizer groups, LR windows, EMA, and data counts — everything needed
+    to sanity-check a run without reading the config."""
+    parameters = list(train_model.parameters())
+    total = sum(p.numel() for p in parameters)
+    trainable = sum(p.numel() for p in parameters if p.requires_grad)
+    logger.info(
+        "Model: %s params (%s trainable, %s frozen)",
+        f"{total:,}", f"{trainable:,}", f"{total - trainable:,}",
+    )
+    group_summary = " | ".join(
+        f"{group.get('name', f'group{index}')} lr {group['lr']:.2e}"
+        for index, group in enumerate(optimizer.param_groups)
+    )
+    logger.info("Optimizer: %s", group_summary)
+    warmup = getattr(scheduler, "warmup_steps", None)
+    flat = getattr(scheduler, "flat_steps", None)
+    no_aug = getattr(scheduler, "no_aug_steps", None)
+    total_steps = getattr(scheduler, "total_steps", None)
+    milestones = getattr(scheduler, "milestones", None)
+    if None not in (warmup, flat, no_aug, total_steps):
+        logger.info(
+            "LR schedule: warmup %d → flat until %d → cosine until %d → "
+            "tail to %d at peak LR (steps %d)",
+            warmup, warmup + flat, total_steps - no_aug, total_steps, total_steps,
+        )
+    elif None not in (warmup, total_steps, milestones):
+        logger.info(
+            "LR schedule: warmup %d → constant with ×%s drops at steps %s "
+            "(total %d)",
+            warmup,
+            getattr(scheduler, "gamma", "?"),
+            list(milestones),
+            total_steps,
+        )
+    ema_model = getattr(train_model, "ema_model", None)
+    if ema_model is not None:
+        logger.info(
+            "EMA: decay %s, warmup %s steps (validation uses EMA weights)",
+            getattr(ema_model, "decay", "?"),
+            getattr(ema_model, "warmup_steps", "?"),
+        )
+    max_dets = getattr(train_model, "_max_dets", None)
+    if max_dets is not None:
+        logger.info("Eval: COCO bbox mAP at maxDets=%d", max_dets)
+    logger.info(
+        "Data: train %s samples (%d batches × accum %d)%s | "
+        "precision %s | world_size %d | steps %d",
+        f"{len(train_dataloader.dataset):,}",
+        len(train_dataloader),
+        gradient_accumulation_steps,
+        (
+            f", val {len(val_dataloader.dataset):,} samples"
+            if val_dataloader is not None else ""
+        ),
+        precision,
+        world_size,
+        steps,
+    )
 
 
 def resolve_device(devices: int | str = "auto") -> torch.device:
@@ -530,8 +639,15 @@ class TaskEngine(Engine):
             train_num_batches=len(train_dataloader),
             gradient_accumulation_steps=gradient_accumulation_steps,
         )
+        if world_size == 1 or _is_rank_zero_internal():
+            _log_fit_banner(
+                train_model, optimizer, scheduler, steps,
+                gradient_accumulation_steps, train_dataloader,
+                val_dataloader, precision, world_size,
+            )
 
         start_step = 0
+        restored_best_metric: float | None = None
         if resume_interrupted:
             last_path = out_dir / "checkpoints" / "last.ckpt"
             if last_path.exists():
@@ -543,6 +659,28 @@ class TaskEngine(Engine):
                 if "scheduler" in engine_state:
                     scheduler.load_state_dict(engine_state["scheduler"])
                 start_step = engine_state.get("step", -1) + 1
+                # Restore the best-metric baseline: without it the first
+                # post-resume validation resets tracking and a WORSE metric
+                # overwrites best.ckpt (seen in the pilot2 resume — a
+                # 0.1033 best was replaced by a 0.0978 dip). Old checkpoints
+                # without the key fall back to fresh tracking. The
+                # last.ckpt value lags its own validation (the final save
+                # precedes it), so the sidecar written at every best
+                # improvement takes precedence.
+                restored_best_metric = engine_state.get("best_metric")
+                sidecar = out_dir / "checkpoints" / "best_metric.json"
+                if sidecar.exists():
+                    try:
+                        sidecar_value = float(
+                            json.loads(sidecar.read_text())["best_metric"]
+                        )
+                    except (OSError, ValueError, KeyError, TypeError):
+                        sidecar_value = None
+                    if sidecar_value is not None and (
+                        restored_best_metric is None
+                        or sidecar_value > restored_best_metric
+                    ):
+                        restored_best_metric = sidecar_value
                 if hasattr(train_model, "on_load_checkpoint"):
                     train_model.on_load_checkpoint(
                         {"ema": engine_state.get("ema")}
@@ -561,7 +699,8 @@ class TaskEngine(Engine):
 
         step_hooks = step_hooks or []
         infinite_loader = _InfiniteCycleIterator(train_dataloader, sampler=train_sampler)
-        best_metric: float | None = None
+        train_window = _TrainWindow()
+        best_metric: float | None = restored_best_metric
         best_metrics: dict[str, float] = {}
         watch_key = getattr(train_model, "watch_metric", None) or "val_metric/map"
         result = TaskFitResult(out_dir=out_dir, steps_run=0)
@@ -575,6 +714,9 @@ class TaskEngine(Engine):
                     "optimizer": optimizer.state_dict(),
                     "scheduler": scheduler.state_dict(),
                     "step": step,
+                    # Closure read at call time: the best baseline rides in
+                    # every checkpoint so a resume can restore it.
+                    "best_metric": best_metric,
                 }
                 if "ema" in checkpoint_dict:
                     engine_state["ema"] = checkpoint_dict["ema"]
@@ -697,20 +839,44 @@ class TaskEngine(Engine):
                 train_model.on_train_batch_end()
 
                 is_rank_zero = world_size == 1 or _is_rank_zero_internal()
+                train_window.update(step_result.log_dict)
                 if (
                     logger_fn is not None
                     and is_rank_zero
                     and (step + 1) % log_every_n_steps == 0
                 ):
-                    metrics = {
-                        "train_loss": float(accumulated_loss)
-                        / gradient_accumulation_steps
-                    }
+                    # Windowed means over [previous log, this one]: a single
+                    # batch's loss swings by whole units at detection scale,
+                    # so a spot sample every log_every_n_steps reads as
+                    # noise (and the criterion components even more so).
+                    means = train_window.means()
+                    metrics = {"train_loss": means.get("loss", 0.0)}
                     metrics.update({
-                        key: float(value) if torch.is_tensor(value) else value
+                        key: means[key] if key in means else value
                         for key, value in step_result.log_dict.items()
                     })
+                    metrics["lr"] = max(
+                        group["lr"] for group in optimizer.param_groups
+                    )
+                    backbone_lrs = [
+                        group["lr"] for group in optimizer.param_groups
+                        if str(group.get("name", "")).startswith("backbone")
+                    ]
+                    if backbone_lrs:
+                        metrics["lr_backbone"] = backbone_lrs[0]
+                    seconds_per_step = round(train_window.seconds_per_step(), 3)
+                    metrics["seconds_per_step"] = seconds_per_step
                     logger_fn(metrics, step + 1)
+                    logger.info(
+                        "Step %d/%d | train_loss %.4f | lr %.2e%s | %.2f s/step",
+                        step + 1, steps, metrics["train_loss"], metrics["lr"],
+                        (
+                            f" (backbone {metrics['lr_backbone']:.2e})"
+                            if "lr_backbone" in metrics else ""
+                        ),
+                        seconds_per_step,
+                    )
+                    train_window.reset()
 
                 is_last_step = step == steps - 1
                 is_save_step = (
@@ -774,11 +940,30 @@ class TaskEngine(Engine):
                     if logger_fn is not None and is_rank_zero:
                         logger_fn(val_metrics, step + 1)
                     if is_rank_zero:
-                        watched = {k: v for k, v in val_metrics.items() if "loss" not in k}
-                        logger.info(
-                            "Validation at step %d: %s", step + 1,
-                            {k: round(v, 4) for k, v in watched.items()},
-                        )
+                        report = None
+                        report_fn = getattr(train_model, "validation_report", None)
+                        if callable(report_fn):
+                            # The report is cosmetic — a renderer failure
+                            # must never kill a training run.
+                            try:
+                                report = report_fn(val_metrics)
+                            except Exception:
+                                logger.debug(
+                                    "validation_report failed", exc_info=True
+                                )
+                        if report:
+                            logger.info(
+                                "Validation at step %d:\n%s", step + 1, report
+                            )
+                        else:
+                            watched = {
+                                k: v for k, v in val_metrics.items()
+                                if "loss" not in k
+                            }
+                            logger.info(
+                                "Validation at step %d: %s", step + 1,
+                                {k: round(v, 4) for k, v in watched.items()},
+                            )
                     watch_value = val_metrics.get(watch_key, -val_metrics["val_loss"])
                     if best_metric is None or watch_value > best_metric:
                         best_metric = watch_value
@@ -787,6 +972,22 @@ class TaskEngine(Engine):
                             save_checkpoint(step, "best")
                             result.best_checkpoint_path = out_dir / "checkpoints" / "best.ckpt"
                             result.best_exported_model_path = export_model(step, "best")
+                        if is_rank_zero:
+                            logger.info(
+                                "Best %s improved to %.4f (step %d)",
+                                watch_key, watch_value, step + 1,
+                            )
+                            # Sidecar for the resume path: the last.ckpt
+                            # engine_state lags its own validation (the
+                            # final save precedes it), so the freshest
+                            # baseline lives here, written at each improve.
+                            sidecar = out_dir / "checkpoints" / "best_metric.json"
+                            sidecar.parent.mkdir(parents=True, exist_ok=True)
+                            sidecar.write_text(
+                                json.dumps(
+                                    {"best_metric": watch_value, "step": step + 1}
+                                )
+                            )
                     train_model.train()
 
         finally:

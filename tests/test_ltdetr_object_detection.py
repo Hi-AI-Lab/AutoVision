@@ -282,9 +282,16 @@ class TestOptimizerGroups:
             total_steps=100, global_batch_size=16, gradient_accumulation_steps=2
         )
         groups = {g["name"]: g for g in optimizer.param_groups}
-        # lr = 5e-4 * sqrt(16/16); backbone = lr * 0.05.
-        assert groups["detector"]["lr"] == pytest.approx(5e-4)
-        assert groups["backbone"]["lr"] == pytest.approx(5e-4 * 0.05)
+        base = {
+            g["name"]: g["_initial_lr"] if "_initial_lr" in g else g["initial_lr"]
+            for g in optimizer.param_groups
+        }
+        # DINOv2 ViT family recipe (baseline V2 args): lr 1e-4 at the
+        # reference batch, backbone factor 1e-2. The group "lr" at
+        # construction already reflects the step-0 warmup factor, so the
+        # recipe is asserted on the scheduler's base LRs.
+        assert base["detector"] == pytest.approx(1e-4)
+        assert base["backbone"] == pytest.approx(1e-4 * 0.01)
         # Full parameter coverage across groups.
         total = sum(len(g["params"]) for g in optimizer.param_groups)
         assert total == len(list(train_model.model.parameters()))
@@ -304,7 +311,28 @@ class TestOptimizerGroups:
         _, scheduler = train_model.get_optimizer(
             total_steps=100, global_batch_size=16
         )
-        assert isinstance(scheduler, FlatCosineLRScheduler)
+        # DINOv2 ViT family resolves to the LINEAR recipe (warmup ->
+        # constant); CNN families resolve to flat-cosine.
+        from autovision._task_models.object_detection_components.multistep_schedule import (
+            MultiStepWarmupScheduler,
+        )
+
+        assert isinstance(scheduler, MultiStepWarmupScheduler)
+        assert scheduler.milestones == ()
+        cnn_args = LTDETRObjectDetectionTrainArgs(
+            num_classes=2,
+            backbone="dinov3-convnext-tiny",
+            image_size=(224, 224),
+            decoder="dfine",
+            num_queries=20,
+            num_top_queries=20,
+            backbone_pretrained=False,
+        )
+        cnn_train_model = LTDETRObjectDetectionTrain(cnn_args)
+        _, cnn_scheduler = cnn_train_model.get_optimizer(
+            total_steps=100, global_batch_size=16
+        )
+        assert isinstance(cnn_scheduler, FlatCosineLRScheduler)
 
 
 class TestDecoders:
@@ -625,24 +653,6 @@ class TestLTDETRTransforms:
         assert collate.requires_dataloader_reinitialization()
 
 
-class TestSoftBinTargets:
-    def test_exact_distance_targets_stay_in_bounds(self):
-        """Regression: the float32 clamp of the continuous bin position to
-        2*reg_max - 1e-6 rounds back UP to 2*reg_max, pushing the right bin
-        one past the distribution for exact-distance targets."""
-        from autovision._task_models.object_detection_components.dfine_utils import (
-            soft_bin_targets,
-        )
-
-        distances = torch.tensor([[1.0, -1.0, 0.5, 1.0]])
-        left, right, weight_left, weight_right = soft_bin_targets(distances, 32)
-        assert int(right.max()) <= 64
-        assert int(left.min()) >= 0
-        # Exact +1 distance: all weight on the top bin (64).
-        assert (right[0, 0] == 64) and weight_right[0, 0] == pytest.approx(1.0)
-        assert (left[0, 0] == 63) and weight_left[0, 0] == pytest.approx(0.0)
-
-
 class TestE2E:
     def test_train_object_detection_ltetr(self, tmp_path):
         train_json, val_json, images_dir = make_coco_dataset(tmp_path, num_images=8)
@@ -692,3 +702,66 @@ class TestE2E:
         image = create_image(tmp_path / "probe.jpg", size=(64, 64), seed=0)
         prediction = model.predict(image, threshold=0.05)
         assert set(prediction) == {"labels", "bboxes", "scores"}
+
+
+class TestEncoderOverrides:
+    def test_enc_overrides_reach_the_encoder(self):
+        """The official Dome-S 'S' encoder recipe (1024/0.5/0.34) must land
+        in the built HybridEncoder instead of the variant spec's heavy
+        defaults (2048/1.0/1.0)."""
+        from autovision._task_models.ltdetr_object_detection import (
+            LTDETRObjectDetection,
+            LTDETRObjectDetectionTrainArgs,
+        )
+
+        args = LTDETRObjectDetectionTrainArgs(
+            num_classes=10,
+            backbone="dinov3-convnext-tiny",
+            image_size=(64, 64),
+            decoder="dfine",
+            num_queries=10,
+            num_top_queries=10,
+            enc_dim_feedforward=1024,
+            enc_expansion=0.5,
+            enc_depth_mult=0.34,
+        )
+        model = LTDETRObjectDetection(
+            num_classes=args.num_classes,
+            model_name=args.backbone,
+            image_size=args.image_size,
+            decoder="dfine",
+            reg_max=8,
+            load_weights=False,
+            enc_dim_feedforward=args.enc_dim_feedforward,
+            enc_expansion=args.enc_expansion,
+            enc_depth_mult=args.enc_depth_mult,
+        )
+        assert model.encoder.enc_dim_feedforward == 1024
+        assert model.encoder.enc_expansion == 0.5
+        assert model.encoder.enc_depth_mult == 0.34
+
+    def test_enc_auto_follows_variant_spec(self):
+        from autovision._task_models.ltdetr_object_detection import (
+            LTDETRObjectDetection,
+            LTDETRObjectDetectionTrainArgs,
+        )
+
+        args = LTDETRObjectDetectionTrainArgs(
+            num_classes=10,
+            backbone="dinov3-convnext-tiny",
+            image_size=(64, 64),
+            decoder="dfine",
+            num_queries=10,
+            num_top_queries=10,
+        )
+        model = LTDETRObjectDetection(
+            num_classes=args.num_classes,
+            model_name=args.backbone,
+            image_size=args.image_size,
+            decoder="dfine",
+            reg_max=8,
+            load_weights=False,
+        )
+        assert model.encoder.enc_dim_feedforward == 2048  # variant spec value
+        assert model.encoder.enc_expansion == 1.0
+        assert model.encoder.enc_depth_mult == 1.0

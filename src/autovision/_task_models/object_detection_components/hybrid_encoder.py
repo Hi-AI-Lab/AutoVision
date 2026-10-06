@@ -214,6 +214,11 @@ class HybridEncoder(nn.Module):
         self.use_encoder_idx = use_encoder_idx
         self.num_encoder_layers = num_encoder_layers
         self.pe_temperature = pe_temperature
+        # Kept for introspection/tests: the width knobs that align the
+        # encoder with the official Dome-S "S" recipe (1024/0.5/0.34).
+        self.enc_dim_feedforward = dim_feedforward
+        self.enc_expansion = expansion
+        self.enc_depth_mult = depth_mult
         self.out_channels = [hidden_dim for _ in range(len(in_channels))]
         self.out_strides = feat_strides
 

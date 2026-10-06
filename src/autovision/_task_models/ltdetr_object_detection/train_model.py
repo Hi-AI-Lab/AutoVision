@@ -43,6 +43,9 @@ from autovision._task_models.object_detection_components.flat_cosine import (
 from autovision._task_models.object_detection_components.matcher import (
     HungarianMatcher,
 )
+from autovision._task_models.object_detection_components.multistep_schedule import (
+    MultiStepWarmupScheduler,
+)
 from autovision._task_models.object_detection_components.rtdetrv2_criterion import (
     RTDETRCriterionV2,
 )
@@ -64,6 +67,10 @@ class LTDETRObjectDetectionTrain(TrainModel):
             image_size=model_args.image_size,
             decoder=model_args.decoder,
             reg_max=model_args.reg_max,
+            reg_scale=model_args.reg_scale,
+            enc_dim_feedforward=model_args.enc_dim_feedforward,
+            enc_expansion=model_args.enc_expansion,
+            enc_depth_mult=model_args.enc_depth_mult,
             hidden_dim=model_args.hidden_dim
             if model_args.hidden_dim != "auto"
             else None,
@@ -111,6 +118,8 @@ class LTDETRObjectDetectionTrain(TrainModel):
             self.criterion: RTDETRCriterionV2 | DFINECriterionV2 = DFINECriterionV2(
                 self.matcher,
                 reg_max=model_args.reg_max,
+                reg_scale=model_args.reg_scale,
+                dn_fgl_loss_weight=model_args.dn_fgl_loss_weight,
                 defe_density_map_weight=(
                     density.density_map_weight if density else 1.0
                 ),
@@ -181,12 +190,16 @@ class LTDETRObjectDetectionTrain(TrainModel):
                 world_size=1,
                 dn_outputs=out.get("dn_aux_outputs", []),
                 dn_meta=out.get("dn_meta"),
+                dn_pre_outputs=out.get("dn_pre_outputs"),
                 corners_list=out.get("pred_corners_list"),
                 ref_boxes_list=out.get("ref_boxes_list"),
                 dn_corners_list=out.get("dn_pred_corners_list"),
                 dn_ref_boxes_list=out.get("dn_ref_boxes_list"),
                 query_mask=query_mask,
                 defe_info=defe_info,
+                pre_outputs=out.get("pre_outputs"),
+                enc_aux_outputs=out.get("enc_aux_outputs"),
+                enc_meta=out.get("enc_meta"),
                 ssl_z1=out.get("ssl_z1"),
                 ssl_z2=out.get("ssl_z2"),
             )
@@ -198,6 +211,8 @@ class LTDETRObjectDetectionTrain(TrainModel):
                 dn_outputs=out.get("dn_aux_outputs", []),
                 dn_meta=out.get("dn_meta"),
                 query_mask=query_mask,
+                enc_aux_outputs=out.get("enc_aux_outputs"),
+                enc_meta=out.get("enc_meta"),
             )
         # Detached GPU tensors: the engine floats them only when logging
         # (every log_every_n_steps); per-item float() here would sync the
@@ -216,6 +231,9 @@ class LTDETRObjectDetectionTrain(TrainModel):
             denominator = max(pool / 2.0 if ssl_view == "two_crop" else pool, 1.0)
             log_dict["ssl_pool_size"] = pool
             log_dict["ssl_paired_ratio"] = paired / denominator
+            if "candidate_size" in ssl_stats:
+                # D14: paired + unpaired-reclaimed candidate columns.
+                log_dict["ssl_candidate_size"] = float(ssl_stats["candidate_size"])
         return TaskStepResult(loss=loss_dict["loss"], log_dict=log_dict)
 
     @torch.no_grad()
@@ -251,7 +269,11 @@ class LTDETRObjectDetectionTrain(TrainModel):
         decoded = model.postprocess(
             outputs,
             [{"orig_w": w, "orig_h": h} for w, h in batch["original_size"]],
-            threshold=0.05,
+            # Baseline/COCO protocol: NO score gate before the mAP eval —
+            # pycocotools ranks everything up to maxDets. A 0.05 gate drops
+            # the low-confidence detections that early-epoch recall lives
+            # on and understates mAP.
+            threshold=0.0,
         )
         evaluator = self._evaluators.setdefault(
             "val", COCOMAPEvaluator(self.categories, max_dets=self._max_dets)
@@ -307,6 +329,42 @@ class LTDETRObjectDetectionTrain(TrainModel):
 
     def set_categories(self, categories: dict[int, str]) -> None:
         self.categories = dict(categories)
+
+    def validation_report(self, metrics: dict[str, float]) -> str | None:
+        """Box tables (overall + per-class) for the engine's val log line.
+
+        ``metrics`` is the prefixed ``val_metric/*`` dict the engine just
+        computed; the per-class rows come from the evaluator's last
+        ``compute()``. Returning ``None`` is never expected here, but the
+        engine treats any exception as "no report" and falls back to the
+        one-line summary.
+        """
+        from autovision._metrics.report import format_detection_validation_report
+
+        scalars = {
+            key.split("/", 1)[1]: value
+            for key, value in metrics.items()
+            if key.startswith("val_metric/")
+        }
+        evaluator = self._evaluators.get("val")
+        per_class = getattr(evaluator, "last_per_class", []) if evaluator else []
+        footer = None
+        if isinstance(self.criterion, DFINECriterionV2):
+            # Mirrors the note on validation_step: the val loss skips the
+            # train-time distributional terms, so the two totals in the
+            # metrics file are different scopes by construction.
+            footer = (
+                "note: val_loss covers VFL/bbox/GIoU only (FGL/DDF and the "
+                "denoising/aux branches are train-time) — not comparable "
+                "to train_loss"
+            )
+        return format_detection_validation_report(
+            "Validation (EMA weights)" if self.ema_model is not None else "Validation",
+            scalars,
+            per_class,
+            self._max_dets,
+            footer=footer,
+        )
 
     def compute_metrics(self, split: str) -> dict[str, float]:
         evaluator = self._evaluators.get(split)
@@ -372,6 +430,7 @@ class LTDETRObjectDetectionTrain(TrainModel):
             args.lr_warmup_steps == "auto"
             or args.scheduler_flat_steps == "auto"
             or args.scheduler_no_aug_steps == "auto"
+            or args.lr_milestones == "auto"
             or args.backbone_lr_factor == "auto"
             or args.hidden_dim == "auto"
             or args.dec_layers == "auto"
@@ -464,13 +523,31 @@ class LTDETRObjectDetectionTrain(TrainModel):
         optimizer = torch.optim.AdamW(
             param_groups, lr=lr, betas=args.optimizer_betas, weight_decay=args.weight_decay
         )
-        scheduler = FlatCosineLRScheduler(
-            optimizer,
-            total_steps=total_steps,
-            warmup_steps=int(args.lr_warmup_steps),
-            flat_steps=int(args.scheduler_flat_steps),
-            no_aug_steps=int(args.scheduler_no_aug_steps),
-        )
+        if args.lr_scheduler == "linear":
+            # Baseline DINOv2 recipe: warmup then constant.
+            scheduler = MultiStepWarmupScheduler(
+                optimizer,
+                total_steps=total_steps,
+                warmup_steps=int(args.lr_warmup_steps),
+                milestones=(),
+                gamma=args.lr_gamma,
+            )
+        elif args.lr_scheduler == "multistep":
+            scheduler = MultiStepWarmupScheduler(
+                optimizer,
+                total_steps=total_steps,
+                warmup_steps=int(args.lr_warmup_steps),
+                milestones=tuple(int(f * total_steps) for f in args.lr_milestones),
+                gamma=args.lr_gamma,
+            )
+        else:
+            scheduler = FlatCosineLRScheduler(
+                optimizer,
+                total_steps=total_steps,
+                warmup_steps=int(args.lr_warmup_steps),
+                flat_steps=int(args.scheduler_flat_steps),
+                no_aug_steps=int(args.scheduler_no_aug_steps),
+            )
         return optimizer, scheduler
 
     def clip_gradients(self, optimizer) -> float | None:

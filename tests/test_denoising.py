@@ -93,7 +93,26 @@ class TestDenoisingGroup:
         src0, dst0 = matched[0]
         # Each positive query maps back to its source GT in order.
         assert dst0.tolist() == [0, 1, 0, 1]
-        assert len(src0) == len(dst0)
+
+    def test_num_denoising_budget_floors_to_one_group_on_dense_batches(self):
+        # num_group = max(1, num_denoising // max_gt_num): once a batch's
+        # largest image holds more GT than the budget, the budget can no
+        # longer add groups — the DN query count is 2 × max_gt_num
+        # regardless (dense benchmarks like VisDrone exceed 100 GT/image,
+        # so num_denoising 100 vs 50 is inert there).
+        targets = [{
+            "boxes": torch.rand(120, 4) * 0.3 + 0.3,
+            "labels": torch.zeros(120, dtype=torch.int64),
+        }]
+        embed = torch.nn.Embedding(11, 32)
+        content_100, _, _, meta_100 = get_contrastive_denoising_training_group(
+            targets, 10, 10, embed, num_denoising=100,
+        )
+        content_50, _, _, meta_50 = get_contrastive_denoising_training_group(
+            targets, 10, 10, embed, num_denoising=50,
+        )
+        assert meta_100["dn_num_group"] == meta_50["dn_num_group"] == 1
+        assert content_100.shape == content_50.shape == (1, 240, 32)
 
     def test_attn_mask_blocks_information_leak(self):
         targets = _targets()

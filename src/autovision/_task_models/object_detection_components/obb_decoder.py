@@ -218,7 +218,7 @@ class OrientedRTDETRDecoder(RTDETRv2Decoder):
                 None, None, None, None,
             )
 
-        init_ref_contents, init_ref_points_unact = self._get_decoder_input(
+        init_ref_contents, init_ref_points_unact, _, _ = self._get_decoder_input(
             memory, spatial_shapes, denoising_logits, denoising_bbox_unact
         )
 

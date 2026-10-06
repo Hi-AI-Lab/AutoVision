@@ -35,6 +35,18 @@ flat-cosine(平坦 50% 后余弦衰减到 1% 尾部);Dome 的 EMA restart-on-aug
 注意:与 ``visdrone_ltdetr_800.py`` 基线脚本相比,本脚本同时改了优化器
 与调度(Dome 配方)。若做 density 开/关消融,基线必须用同一套优化器参数
 重跑,只有 ``density`` 是唯一变量。
+
+10-epoch pilot 配方 v3(两个 twin 脚本对称;对齐官方 Dome-S-VisDrone 实跑):
+- 分布 bin 空间对齐官方 D-FINE v2:每边 33 个非均匀 bin(reg_max+1),
+  加权函数 W 曲率 reg_scale=4.0——旧线性 ±1w/65-bin 移植在 VisDrone
+  小目标上 FGL 目标被钳死(fgl_dn 钉在 ~8 不收敛);
+- LR 调度 multistep(官方 Dome:×0.8@epochs 80/120 of 160 → 本 pilot
+  ×0.8@50%/75%;LR 终点保持峰值 64%)。深度 cosine+重启尾段实测有害
+  (pilot2:峰值 0.1033 → 终点 0.0842,online 仅 0.0535);
+- gradient_accumulation_steps=1(官方 batch 8 → 809 步/epoch;
+  batch 16 × accum 4 只有 404 步);
+- hidden_dim=256(官方 Dome-S encoder/decoder 宽度);
+- EMA pilot 保持 0.995(160-epoch 全量跑回官方 0.9999/warmup 1000)。
 Launch:
 
     cd /home/hdjs/Research/Project/AutoVision && \
@@ -46,9 +58,6 @@ import time
 from pathlib import Path
 
 from autovision import train_object_detection
-from autovision._task_models.ltdetr_object_detection.transforms import (
-    ltdetr_scale_jitter_sizes,
-)
 
 VISDRONE = Path("/home/hdjs/Research/Project/Dino-Dome-Research/dataset/visdrone")
 # COCO-detection-finetuned ConvNeXt-tiny backbone, loaded directly from
@@ -63,11 +72,20 @@ BACKBONE_WEIGHTS = Path(
 # same number of sample presentations is 6471*160/16 optimizer steps.
 EPOCHS = 10  # 10-epoch pilot (full Dome recipe: 160)
 TRAIN_IMAGES = 6471
-GLOBAL_BATCH = 16
-STEPS = (TRAIN_IMAGES * EPOCHS) // GLOBAL_BATCH  # 4,044 @ 10 epochs
+# Pilot v4 trains at the OFFICIAL Dome-S global batch (8 = 809 optimizer
+# steps/epoch); bf16 + hidden 256 fits batch 8 at 800px on the 24GB card.
+GLOBAL_BATCH = 8
+STEPS = (TRAIN_IMAGES * EPOCHS) // GLOBAL_BATCH  # 8,088 @ 10 epochs
 # Dome stops photometric/zoom-out/IoU-crop and multiscale at epoch 108/160.
 AUG_STOP_FRACTION = 108 / 160
 AUG_STOP_STEP = round(STEPS * AUG_STOP_FRACTION)  # 43,679
+
+# Official Dome-S LR recipe scaled to the pilot: ×0.8 at 50 %/75 % of the
+# run (Dome's epochs 80/120 of 160). The LR never drops below 64 % of
+# peak — deep cosine annealing plus the flat-cosine restart tail
+# measurably damaged end-of-run mAP in the pilots.
+LR_MILESTONES = (0.5, 0.75)
+LR_GAMMA = 0.8
 
 # Module-level so the twin-consistency test can diff the two scripts
 # programmatically (vs visdrone_ltdetr_800.py: identical except density).
@@ -83,18 +101,49 @@ MODEL_ARGS = {
     "num_top_queries": 500,
     "reg_max": 32,
     "num_denoising": 100,
+    # Official D-FINE v2 weighting-function curvature (33 non-uniform bins
+    # per side in w/4 units — aligned decode + FGL target spaces).
+    "reg_scale": 4.0,
+    # Official Dome-S encoder/decoder width.
+    "hidden_dim": 256,
+    # Official Dome-S HybridEncoder "S" recipe (the ConvNeXt variant spec
+    # defaults are 2048/1.0/1.0 — a 4-6x heavier RANDOM-initialized
+    # encoder that slows early convergence).
+    "enc_dim_feedforward": 1024,
+    "enc_expansion": 0.5,
+    "enc_depth_mult": 0.34,
+    # NOTE: num_denoising is inert on dense batches — num_group floors to
+    # 1 once max_gt_num > num_denoising, so the DN query count is
+    # 2 × max_gt_num regardless (VisDrone regularly exceeds 100 GT/image).
     "label_noise_ratio": 0.5,
+    # Pilot: halved CDN noise. Noise scales with box size, and the
+    # negative queries land 0.5-1 box-size away — their FGL residuals
+    # saturate the reg_max bins on VisDrone's tiny boxes (fgl_dn ~7 and
+    # flat across the whole pilot).
+    # Official CDN noise (restored: the W-space FGL targets no longer
+    # saturate, so the old pilot overrides are obsolete).
     "box_noise_scale": 1.0,
     # --- Density branch (Dome-S-VisDrone: min 250 / max 500 / win 10) ---
     "density": {"max_num_select": 500},
     # --- Dome optimizer recipe (include/optimizer.yml + S overrides) ---
-    "lr": 2e-4,
+    # LR halved from the official 2e-4 equivalent: pilot4's peak-LR phase
+    # (1.98e-4) was measurably unstable (mAP dipped 0.0723 -> 0.0439 at
+    # epochs 2.5-3.7 and only recovered once the schedule decayed to
+    # 1.58e-4). 1.4e-4 sqrt-scales to 9.9e-5 — the stable regime.
+    "lr": 1.4e-4,
     "backbone_lr_factor": 0.1,     # Dome backbone lr 2e-5 / 2e-4
     "weight_decay": 6.5e-5,
     "gradient_clip_val": 0.1,
     "lr_warmup_steps": 500,        # Dome LinearWarmup warmup_duration 500
+    # Official Dome-S MultiStepLR (×0.8 at 80/120 of 160 epochs).
+    "lr_scheduler": "multistep",
+    "lr_milestones": LR_MILESTONES,
+    "lr_gamma": LR_GAMMA,
     # Dome ModelEMA decay 0.9999, warmups 1000 (include/optimizer.yml)
-    "ema_momentum": 0.999,
+    # Pilot: 0.995 — 0.999's ~1k-step EMA window averages in early
+    # weights, a measured +9.5% mAP drag at 4k steps. Restore 0.9999
+    # (official) for the 160-epoch run.
+    "ema_momentum": 0.995,
     "ema_warmup_steps": 200,
     # VisDrone official eval protocol (Dome maxDets=500).
     "eval_max_dets": 500,
@@ -102,7 +151,8 @@ MODEL_ARGS = {
 # Dome-S-VisDrone effective augmentations: photometric 0.5 / zoom-out
 # 0.5 / IoU-crop 0.8 / hflip 0.5 (family defaults already match), NO
 # mosaic / NO mixup (the include/dataloader.yml overrides drop them),
-# multiscale on base 800, all heavy augs stop at epoch 108/160.
+# scale locked at the val resolution (pilot), all heavy augs stop at
+# epoch 108/160.
 TRANSFORM_ARGS = {
     "mosaic_prob": None,
     "mixup_prob": None,
@@ -110,9 +160,12 @@ TRANSFORM_ARGS = {
     "zoom_out_step_stop": AUG_STOP_STEP,
     "iou_crop_step_stop": AUG_STOP_STEP,
     "scale_jitter": {
-        # Capped at 960: the 4-level pyramid's 1024px ladder tail peaks
-        # ~20GB and brushes the allocator limit on the 24GB card.
-        "sizes": [s for s in ltdetr_scale_jitter_sizes((800, 800), 32) if s <= 960],
+        # Pilot: locked at 800 — the 576-960 ladder sends ~43% of batches
+        # below the val resolution and undersamples VisDrone's small
+        # objects. Restore the ladder (cap 960: the 4-level pyramid's
+        # 1024px tail peaks ~20GB on the 24GB card) for the 160-epoch run:
+        # [s for s in ltdetr_scale_jitter_sizes((800, 800), 32) if s <= 960]
+        "sizes": [800],
         "step_stop": AUG_STOP_STEP,
     },
 }
@@ -131,8 +184,8 @@ def main() -> None:
         },
         model="ltdetr/dinov3-convnext-tiny",
         steps=STEPS,
-        batch_size=4,
-        gradient_accumulation_steps=4,
+        batch_size=8,
+        gradient_accumulation_steps=1,
         num_workers=8,
         model_args=MODEL_ARGS,
         transform_args=TRANSFORM_ARGS,

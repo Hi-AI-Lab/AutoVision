@@ -1,11 +1,13 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
 """Tests for the task model layer: bases, RT-DETR family, mAP evaluator."""
 
+import json
+
 import pytest
 import torch
 from torch import nn
 
-from autovision._metrics.map_evaluator import COCOMAPEvaluator
+from autovision._metrics.map_evaluator import COCOMAPEvaluator, predictions_to_coco
 from autovision._task_models import (
     RTDETRObjectDetection,
     RTDETRObjectDetectionTrain,
@@ -204,6 +206,125 @@ class TestCOCOMAPEvaluator:
             [{"boxes": torch.tensor([[10.0, 10.0, 50.0, 50.0]]), "labels": torch.tensor([0])}]
         )
         assert evaluator.compute()["map"] == 0.0
+
+    def test_extended_headline_metrics_present(self):
+        evaluator = COCOMAPEvaluator({0: "cat", 1: "dog"}, max_dets=100)
+        # Normalized cxcywh on a 200x200 frame; boxes map to
+        # [10,10,50,50] and [30,40,90,110] in pixels.
+        boxes = torch.tensor([[0.15, 0.15, 0.2, 0.2], [0.3, 0.375, 0.3, 0.35]])
+        for _ in range(3):
+            evaluator.update_targets(
+                [{"boxes": boxes, "labels": torch.tensor([0, 1])}],
+                original_sizes=[(200, 200)],
+            )
+            evaluator.update(
+                [{"boxes": torch.tensor([[10.0, 10.0, 50.0, 50.0],
+                                         [30.0, 40.0, 90.0, 110.0]]),
+                  "labels": torch.tensor([0, 1]),
+                  "scores": torch.tensor([0.9, 0.8])}]
+            )
+        metrics = evaluator.compute()
+        for key in ("map", "map_50", "map_75", "mar", "f1", "precision", "recall"):
+            assert key in metrics, key
+        # Near-perfect detections: AP/AR at the ceiling across thresholds.
+        assert metrics["map_50"] == pytest.approx(1.0, abs=1e-6)
+        assert metrics["map"] > 0.9
+        assert metrics["mar"] > 0.9
+        assert metrics["f1"] == pytest.approx(1.0, abs=1e-6)
+        assert metrics["precision"] == pytest.approx(1.0, abs=1e-6)
+        assert metrics["recall"] == pytest.approx(1.0, abs=1e-6)
+        names = [row["name"] for row in evaluator.last_per_class]
+        assert names == ["cat", "dog"]
+        for row in evaluator.last_per_class:
+            for key in ("name", "ap", "ar", "f1", "precision", "recall"):
+                assert key in row, key
+
+    def test_classes_without_ground_truth_are_skipped(self):
+        evaluator = COCOMAPEvaluator({0: "cat", 1: "dog", 2: "bird"}, max_dets=100)
+        boxes = torch.tensor([[10.0, 10.0, 50.0, 50.0]])
+        evaluator.update_targets(
+            [{"boxes": boxes, "labels": torch.tensor([0])}],
+            original_sizes=[(200, 200)],
+        )
+        evaluator.update(
+            [{"boxes": boxes, "labels": torch.tensor([0]), "scores": torch.tensor([0.9])}]
+        )
+        evaluator.compute()
+        assert [row["name"] for row in evaluator.last_per_class] == ["cat"]
+
+    def test_map_matches_pycocotools_at_cap_100(self):
+        """The array-computed headline must equal the official stats at the
+        default ladder (the summarize() path it replaces)."""
+        torch.manual_seed(7)
+        evaluator = COCOMAPEvaluator({0: "cat", 1: "dog"}, max_dets=100)
+        predictions, targets = [], []
+        for _ in range(4):
+            boxes = torch.rand(3, 4) * 40 + torch.tensor([10.0, 10.0, 60.0, 60.0])
+            labels = torch.tensor([0, 1, 0])
+            x1, y1, x2, y2 = boxes.unbind(-1)
+            normalized = torch.stack(
+                [(x1 + x2) / 400.0, (y1 + y2) / 400.0,
+                 (x2 - x1) / 200.0, (y2 - y1) / 200.0], dim=-1
+            )
+            targets.append({"boxes": normalized, "labels": labels})
+            noisy = (boxes + torch.randn(3, 4) * 2.0).clamp(min=0)
+            predictions.append(
+                {"boxes": noisy, "labels": labels, "scores": torch.rand(3)}
+            )
+        for target in targets:
+            evaluator.update_targets([target], original_sizes=[(200, 200)])
+        evaluator.update(predictions)
+        metrics = evaluator.compute()
+
+        from pycocotools.cocoeval import COCOeval
+
+        _, dt_list = predictions_to_coco(
+            predictions, {0: "cat", 1: "dog"}, [(200, 200)] * len(targets)
+        )
+        gt_dict = {
+            "images": [
+                {"id": i, "width": 200, "height": 200}
+                for i in range(len(targets))
+            ],
+            "annotations": [],
+            # Same user-id mapping predictions_to_coco uses for dt rows
+            # (internal ids sorted): GT and detections must share it.
+            "categories": [{"id": 0, "name": "cat"}, {"id": 1, "name": "dog"}],
+        }
+        annotations = []
+        for index, target in enumerate(targets):
+            cx, cy, w, h = target["boxes"].unbind(-1)
+            x1, y1 = (cx - w / 2) * 200.0, (cy - h / 2) * 200.0
+            x2, y2 = (cx + w / 2) * 200.0, (cy + h / 2) * 200.0
+            for box_x1, box_y1, box_x2, box_y2, label in zip(
+                x1.tolist(), y1.tolist(), x2.tolist(), y2.tolist(),
+                target["labels"].tolist(),
+            ):
+                annotations.append(
+                    {"id": len(annotations) + 1, "image_id": index,
+                     "category_id": int(label),
+                     "bbox": [box_x1, box_y1, box_x2 - box_x1, box_y2 - box_y1],
+                     "area": max((box_x2 - box_x1) * (box_y2 - box_y1), 1.0),
+                     "iscrowd": 0}
+                )
+        gt_dict["annotations"] = annotations
+        import tempfile
+        from pathlib import Path as _Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            gt_file = _Path(tmp) / "gt.json"
+            gt_file.write_text(json.dumps(gt_dict))
+            from pycocotools.coco import COCO
+
+            coco_gt = COCO(str(gt_file))
+        coco_dt = coco_gt.loadRes(dt_list)
+        official = COCOeval(coco_gt, coco_dt, "bbox")
+        official.evaluate()
+        official.accumulate()
+        official.summarize()
+        assert metrics["map"] == pytest.approx(float(official.stats[0]), abs=1e-10)
+        assert metrics["map_50"] == pytest.approx(float(official.stats[1]), abs=1e-10)
+        assert metrics["map"] > 0.5  # ±2px noise on ~60px boxes: high AP
 
 
 class TestModelInputSpec:

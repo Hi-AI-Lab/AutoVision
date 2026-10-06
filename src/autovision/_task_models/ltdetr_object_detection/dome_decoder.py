@@ -125,6 +125,12 @@ class DomeDFINEv2Decoder(DFINEv2Decoder):
             )
 
         mem_k = _gather(output_memory)
+        # Undetached full-logit view for the encoder-proposal supervision
+        # head: without it the enc_output/enc_score/enc_bbox heads receive
+        # no gradient at all (every decoder input below is detached) and
+        # proposal quality freezes at random init — the baseline dome
+        # criterion supervises these via ``enc_aux_outputs``.
+        logits_k = _gather(enc_logits)
         # The NMS only reads per-candidate max score + class id — gather
         # those 1-D views instead of the full (B, K, C) logit matrix.
         scores_k = enc_scores.gather(1, topk_ind)
@@ -149,6 +155,7 @@ class DomeDFINEv2Decoder(DFINEv2Decoder):
         pooled_h, pooled_w = pooled.shape[-2:]
         kept_memory: list[torch.Tensor] = []
         kept_coords: list[torch.Tensor] = []
+        kept_logits: list[torch.Tensor] = []
         queries_num: list[int] = []
         for b in range(mem_k.shape[0]):
             rest = gate[b, min_num:]
@@ -161,6 +168,9 @@ class DomeDFINEv2Decoder(DFINEv2Decoder):
             )
             coords_i = torch.cat(
                 [coords_k[b, :min_num], coords_k[b, min_num:][rest]], dim=0
+            )
+            logits_i = torch.cat(
+                [logits_k[b, :min_num], logits_k[b, min_num:][rest]], dim=0
             )
 
             # Density-modulated per-class NMS over the combined candidates;
@@ -190,9 +200,11 @@ class DomeDFINEv2Decoder(DFINEv2Decoder):
                 )
                 mem_i = mem_i[keep]
                 coords_i = coords_i[keep]
+                logits_i = logits_i[keep]
 
             kept_memory.append(mem_i)
             kept_coords.append(coords_i)
+            kept_logits.append(logits_i)
             queries_num.append(int(mem_i.shape[0]))
 
         padded_queries = max(queries_num)
@@ -200,6 +212,13 @@ class DomeDFINEv2Decoder(DFINEv2Decoder):
             (mem_k.shape[0], padded_queries, mem_k.shape[-1])
         )
         ref_boxes_unact = coords_k.new_zeros((mem_k.shape[0], padded_queries, 4))
+        # Padded proposal rows are buried at the source: the matcher's
+        # focal cost keeps them far from every GT, and the supervision
+        # losses only touch matched rows.
+        enc_topk_logits = logits_k.new_full(
+            (mem_k.shape[0], padded_queries, logits_k.shape[-1]), _PADDED_LOGIT
+        )
+        enc_topk_bboxes = coords_k.new_zeros((mem_k.shape[0], padded_queries, 4))
         query_valid_mask = torch.zeros(
             (mem_k.shape[0], padded_queries),
             dtype=torch.bool,
@@ -209,6 +228,8 @@ class DomeDFINEv2Decoder(DFINEv2Decoder):
             n_b = queries_num[b]
             content[b, :n_b] = kept_memory[b]
             ref_boxes_unact[b, :n_b] = kept_coords[b]
+            enc_topk_logits[b, :n_b] = kept_logits[b]
+            enc_topk_bboxes[b, :n_b] = kept_coords[b].sigmoid()
             query_valid_mask[b, :n_b] = True
 
         return (
@@ -216,6 +237,8 @@ class DomeDFINEv2Decoder(DFINEv2Decoder):
             ref_boxes_unact.detach(),
             queries_num,
             query_valid_mask,
+            enc_topk_logits,
+            enc_topk_bboxes,
         )
 
     def _padding_attention_mask(
@@ -255,6 +278,8 @@ class DomeDFINEv2Decoder(DFINEv2Decoder):
             init_ref_points_unact,
             batch_queries_num,
             query_valid_mask,
+            enc_topk_logits,
+            enc_topk_bboxes,
         ) = self._get_decoder_input_dynamic(memory, spatial_shapes, defe_info)
         padded_queries = max(batch_queries_num)
 
@@ -298,6 +323,10 @@ class DomeDFINEv2Decoder(DFINEv2Decoder):
             dn_corners_list,
             dn_refs_list,
             matched_hidden,
+            pre_bboxes,
+            pre_scores,
+            dn_pre_bboxes,
+            dn_pre_scores,
         ) = self._refine_layers(
             init_ref_contents,
             init_ref_points_unact,
@@ -323,6 +352,17 @@ class DomeDFINEv2Decoder(DFINEv2Decoder):
             )
             out["pred_corners_list"] = corners_list
             out["ref_boxes_list"] = refs_list
+            out["pre_outputs"] = {
+                "pred_logits": pre_scores,
+                "pred_boxes": pre_bboxes,
+            }
+            # Encoder-proposal supervision: the dynamic selection detaches
+            # everything it hands the decoder, so the enc heads are trained
+            # exclusively through this branch (baseline dome criterion).
+            out["enc_aux_outputs"] = self._set_aux_loss(
+                [enc_topk_logits], [enc_topk_bboxes]
+            )
+            out["enc_meta"] = {"class_agnostic": self.query_select_method == "agnostic"}
             # Final-layer hidden states over the padded query set — the
             # per-object SSL head consumes them (design doc 14); padded
             # rows are filtered by the criterion (matcher + query mask).
@@ -331,6 +371,10 @@ class DomeDFINEv2Decoder(DFINEv2Decoder):
                 out["dn_aux_outputs"] = self._set_aux_loss(
                     dn_out_logits, dn_out_bboxes
                 )
+                out["dn_pre_outputs"] = {
+                    "pred_logits": dn_pre_scores,
+                    "pred_boxes": dn_pre_bboxes,
+                }
                 out["dn_meta"] = dn_meta
                 out["dn_pred_corners_list"] = dn_corners_list
                 out["dn_ref_boxes_list"] = dn_refs_list

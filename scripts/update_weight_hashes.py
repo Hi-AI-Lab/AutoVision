@@ -48,7 +48,7 @@ def pin_all(repo_filter: str | None) -> dict:
             print(f"  WARNING: could not pin {repo_id}: {error}")
             continue
         if not hashes:
-            print(f"  WARNING: no LFS weight files found; leaving unpinned.")
+            print("  WARNING: no LFS weight files found; leaving unpinned.")
             continue
         manifest[repo_id] = type(artifact)(
             repo_id=artifact.repo_id,

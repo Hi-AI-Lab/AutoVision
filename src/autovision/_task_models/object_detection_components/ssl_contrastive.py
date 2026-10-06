@@ -172,7 +172,7 @@ def gather_distributed_padded(tensor: Tensor) -> PaddedGather:
 
     Pad embeddings are zero vectors and pad labels are 0 — callers must
     exclude pad rows/columns from the losses via :attr:`PaddedGather.valid`
-    (the losses accept a ``valid_mask`` for exactly this).
+    (the losses accept ``valid_rows``/``valid_cols`` for exactly this).
     """
     device = tensor.device
     if not (dist.is_available() and dist.is_initialized()):
@@ -517,12 +517,13 @@ def _ssl_candidates_loss(
         gathered1 = gather_distributed_padded(view1)
         gathered2 = gather_distributed_padded(view2)
         view1, view2 = gathered1.tensor, gathered2.tensor
-        valid_mask: Tensor | None = gathered1.valid
+        valid_rows: Tensor | None = gathered1.valid
+        valid_cols: Tensor | None = gathered2.valid
     else:
-        valid_mask = None
+        valid_rows = valid_cols = None
     if view1.shape[0] < 2:
         return _connected_zero(z1)
-    return simcse_infonce_loss(view1, view2, params.temp, valid_mask=valid_mask)
+    return simcse_infonce_loss(view1, view2, params.temp, valid_rows=valid_rows, valid_cols=valid_cols)
 
 
 def _pair_two_crop(
@@ -650,8 +651,9 @@ def ssl_contrastive_loss(
             queries — padded queries of dynamic-query decoders are filtered
             defensively (their logits are already prohibitive at the source).
         stats_sink: Optional dict receiving ``pool_size`` (matched instances
-            on this rank) and ``paired_size`` (instances entering the
-            contrastive pool) for the paired-ratio diagnostic.
+            on this rank), ``paired_size`` (anchors with a validated
+            cross-view positive) and ``candidate_size`` (paired + D14
+            unpaired extras entering the contrastive pool).
 
     Returns:
         Scalar loss. Degenerate paths return a zero loss connected to the
@@ -772,18 +774,12 @@ def ssl_contrastive_loss(
         image_ids1 = batch_sel[rows1] + offset
         image_ids2 = batch_sel[rows2] - images_per_view + offset
         if extras_is_view2 is not None:
-            extras_ids = (
-                torch.where(
-                    extras_is_view2,
-                    batch_sel[torch.nonzero(extras_is_view2).squeeze(1)] if False else batch_sel[unpaired],
-                    batch_sel[unpaired],
-                )
-            )
-            # fold view-2 rows back to the source image, keep view-1 rows
+            # Same fold-back for the extras, in candidate order.
+            extras_rows = batch_sel[unpaired]
             extras_ids = torch.where(
                 extras_is_view2,
-                extras_ids - images_per_view,
-                extras_ids,
+                extras_rows - images_per_view,
+                extras_rows,
             ) + offset
             image_ids2 = torch.cat([image_ids2, extras_ids])
 

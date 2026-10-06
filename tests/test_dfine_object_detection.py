@@ -22,8 +22,8 @@ from autovision._task_models.object_detection_components.dfine_utils import (
     distance2bbox,
     fg_loss,
     integrate_corners,
-    integration_weights,
-    soft_bin_targets,
+    translate_gt,
+    weighting_function,
 )
 from autovision._task_models.object_detection_components.matcher import (
     HungarianMatcher,
@@ -96,48 +96,72 @@ def make_batch(size: int = 64, images: int = 2):
 
 
 class TestDFineUtils:
-    def test_integration_weights_span_unit_range(self):
-        weights = integration_weights(REG_MAX)
-        assert weights.shape == (2 * REG_MAX + 1,)
-        assert weights[0].item() == pytest.approx(-1.0)
-        assert weights[-1].item() == pytest.approx(1.0)
-        assert weights[REG_MAX].item() == pytest.approx(0.0)
+    def test_weighting_function_geometry(self):
+        """Official W: reg_max+1 values, zero-centered, monotone, symmetric,
+        reach ±2·up·reg_scale = ±4 (up=0.5, reg_scale=4)."""
+        weights = weighting_function(REG_MAX, up=0.5, reg_scale=4.0)
+        assert weights.shape == (REG_MAX + 1,)
+        assert weights[REG_MAX // 2].item() == pytest.approx(0.0, abs=1e-7)
+        assert weights[0].item() == pytest.approx(-4.0)
+        assert weights[-1].item() == pytest.approx(4.0)
+        assert (weights[1:] >= weights[:-1]).all()  # monotone non-decreasing
+        assert (weights[: REG_MAX // 2] <= 0).all()
+        assert (weights[REG_MAX // 2 :] >= 0).all()
+        assert torch.allclose(weights[: REG_MAX // 2], -weights[REG_MAX // 2 + 1 :].flip(0))
 
     def test_distance_bbox_roundtrip(self):
+        """Continuous roundtrip in the official parameterization: distance
+        units are w/reg_scale with a 0.5·reg_scale offset; zero distance
+        reproduces the reference exactly."""
         ref = torch.tensor([[0.5, 0.5, 0.2, 0.4], [0.3, 0.7, 0.1, 0.1]])
-        gt_xyxy = torch.tensor([[0.4, 0.3, 0.6, 0.6], [0.25, 0.6, 0.35, 0.8]])
-        distances = bbox2distance(ref, gt_xyxy)
-        assert distances.max() <= 1.0 and distances.min() >= -1.0
-        rebuilt = distance2bbox(ref, distances)
+        distances = torch.tensor([[0.0, -1.0, 2.0, 0.5], [0.3, 0.0, -0.2, 1.0]])
+        rebuilt = distance2bbox(ref, distances, reg_scale=4.0)
         cx, cy, w, h = rebuilt.unbind(-1)
-        rebuilt_xyxy = torch.stack([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], -1)
-        torch.testing.assert_close(rebuilt_xyxy, gt_xyxy, atol=1e-5, rtol=1e-4)
+        # x1 = cx - (0.5·rs + d_l)·(w/rs): check the left edge explicitly.
+        expected_x1 = ref[:, 0] - (0.5 * 4.0 + distances[:, 0]) * (ref[:, 2] / 4.0)
+        torch.testing.assert_close(cx - w / 2, expected_x1)
+        # Zero distance must reproduce the reference box.
+        zero = distance2bbox(ref, torch.zeros_like(distances), reg_scale=4.0)
+        torch.testing.assert_close(zero, ref)
 
     def test_uniform_distribution_decodes_to_reference(self):
         # Uniform logits → uniform distribution → distance 0 on every side →
         # the decoded box IS the reference box.
         ref = torch.rand(5, 4) * 0.4 + 0.2
         ref[:, 2:] = ref[:, 2:].clamp(min=0.05)
-        corners = torch.zeros(5, 4 * (2 * REG_MAX + 1))
-        weights = integration_weights(REG_MAX)
-        decoded = distance2bbox(ref, integrate_corners(corners, weights))
+        corners = torch.zeros(5, 4 * (REG_MAX + 1))
+        weights = weighting_function(REG_MAX, up=0.5, reg_scale=4.0)
+        decoded = distance2bbox(ref, integrate_corners(corners, weights), reg_scale=4.0)
         torch.testing.assert_close(decoded, ref)
 
-    def test_soft_bin_targets_interpolates_between_bins(self):
-        # distance 0.5 (in ref units of 1/REG_MAX per bin → bin 0.5×...):
-        # distance = 0.5 / REG_MAX maps exactly between bin REG_MAX and +1.
-        distances = torch.full((1, 4), 0.5 / REG_MAX)
-        left, right, wl, wr = soft_bin_targets(distances, REG_MAX)
-        assert (left == REG_MAX).all() and (right == REG_MAX + 1).all()
+    def test_translate_gt_interpolates_between_bins(self):
+        weights = weighting_function(REG_MAX, up=0.5, reg_scale=4.0)
+        # A target exactly midway between W[10] and W[11] splits the mass
+        # evenly across the two bins.
+        k = REG_MAX // 2
+        gt = torch.full((1, 4), (weights[k] + weights[k + 1]) / 2)
+        label, wr, wl = translate_gt(gt, REG_MAX, reg_scale=4.0, up=0.5)
+        assert (label == k).all()
         torch.testing.assert_close(wl, torch.full_like(wl, 0.5))
         torch.testing.assert_close(wr, torch.full_like(wr, 0.5))
+        # The two-bin interpolation reproduces the value exactly.
+        assert torch.allclose(wl * weights[label.long()] + wr * weights[label.long() + 1], gt)
 
-    def test_soft_bin_targets_clamps_out_of_range(self):
-        distances = torch.full((1, 4), -3.0)
-        left, right, wl, wr = soft_bin_targets(distances, REG_MAX)
-        assert (left == 0).all() and (right == 1).all()
-        torch.testing.assert_close(wl, torch.ones_like(wl))
-        torch.testing.assert_close(wr, torch.zeros_like(wr))
+    def test_translate_gt_clamps_out_of_range(self):
+        gt = torch.tensor([-100.0, 0.0, 100.0])
+        label, wr, wl = translate_gt(gt, REG_MAX, reg_scale=4.0, up=0.5)
+        # Far below W[0]: all mass on bin 0; far above W[-1]: all mass on
+        # the last bin.
+        assert label[0].item() == 0.0 and wl[0].item() == 1.0 and wr[0].item() == 0.0
+        assert label[2].item() == pytest.approx(REG_MAX - 0.1)
+        assert wr[2].item() == 1.0 and wl[2].item() == 0.0
+        # Center value lands on the zero axis with its exact interpolation.
+        weights = weighting_function(REG_MAX, up=0.5, reg_scale=4.0)
+        assert label[1].item() == pytest.approx(REG_MAX // 2)
+        assert torch.allclose(
+            wl[1] * weights[label[1].long()] + wr[1] * weights[label[1].long() + 1],
+            torch.tensor(0.0),
+        )
 
 
 class TestDFineDecoder:
@@ -149,7 +173,7 @@ class TestDFineDecoder:
         assert out["pred_boxes"].shape == (2, 20, 4)
         assert len(out["aux_outputs"]) == 2
         assert len(out["pred_corners_list"]) == 3
-        assert out["pred_corners_list"][0].shape == (2, 20, 4 * (2 * REG_MAX + 1))
+        assert out["pred_corners_list"][0].shape == (2, 20, 4 * (REG_MAX + 1))
         assert len(out["ref_boxes_list"]) == 3
         assert out["ref_boxes_list"][0].shape == (2, 20, 4)
         # dn segment split off
@@ -226,54 +250,83 @@ class TestFGL:
             gt_cxcywh[0, 0] + gt_cxcywh[0, 2] / 2,
             gt_cxcywh[0, 1] + gt_cxcywh[0, 3] / 2,
         ]).unsqueeze(0)
-        distances = bbox2distance(ref[0], gt_xyxy)
-        left, right, wl, wr = soft_bin_targets(distances, REG_MAX)
-        probs = torch.full((1, 1, 4, 2 * REG_MAX + 1), 1e-12)
+        label, wr, wl = bbox2distance(ref[0], gt_xyxy, REG_MAX, reg_scale=4.0)
+        probs = torch.full((1, 1, 4, REG_MAX + 1), 1e-12)
         for side in range(4):
-            probs[0, 0, side, left[0, side]] += wl[0, side]
-            probs[0, 0, side, right[0, side]] += wr[0, side]
-        return probs.log().reshape(1, 1, 4 * (2 * REG_MAX + 1))
+            probs[0, 0, side, label[0, side].long()] += wl[0, side]
+            probs[0, 0, side, label[0, side].long() + 1] += wr[0, side]
+        return probs.log().reshape(1, 1, 4 * (REG_MAX + 1))
 
     def test_perfect_distribution_near_zero(self):
         ref, gt, indices, targets = self._layer_inputs(quality=1.0)
         corners = self._corners_for(ref, gt)
         loss = fg_loss(
             corners, ref, gt.view(1, 1, 4), targets, indices,
-            torch.tensor(1.0), REG_MAX,
+            torch.tensor(1.0), REG_MAX, reg_scale=4.0,
         )
-        assert loss.item() < 1e-3
+        # The two-bin CE against its own target distribution leaves only
+        # the target entropy (~≤0.7 per side at worst) — well below the
+        # uniform-distribution baseline.
+        assert loss.item() < 1.0
 
     def test_wrong_distribution_positive(self):
         ref, gt, indices, targets = self._layer_inputs(quality=1.0)
-        corners = torch.zeros(1, 1, 4 * (2 * REG_MAX + 1))
+        corners = torch.zeros(1, 1, 4 * (REG_MAX + 1))
         loss = fg_loss(
             corners, ref, gt.view(1, 1, 4), targets, indices,
-            torch.tensor(1.0), REG_MAX,
+            torch.tensor(1.0), REG_MAX, reg_scale=4.0,
         )
         assert loss.item() > 0.1
+
+    def test_exact_bin_target_is_exactly_zero(self):
+        """A GT landing exactly ON a weighting-function value has all target
+        mass on one bin — the matched one-hot distribution scores 0."""
+        ref = torch.tensor([[[0.5, 0.5, 0.4, 0.4]]])  # (B=1, Q=1, 4)
+        weights = weighting_function(REG_MAX, up=0.5, reg_scale=4.0)
+        d = weights[REG_MAX // 2 + 2].item()  # a small positive distance
+        # Move every edge outward by d·(w or h)/reg_scale ⇒ all sides at d.
+        gt_cxcywh = torch.tensor([[
+            ref[0, 0, 0], ref[0, 0, 1],
+            ref[0, 0, 2] + 2 * d * ref[0, 0, 2] / 4.0,
+            ref[0, 0, 3] + 2 * d * ref[0, 0, 3] / 4.0,
+        ]])
+        indices = [(torch.tensor([0]), torch.tensor([0]))]
+        targets = [{"boxes": gt_cxcywh, "labels": torch.tensor([0])}]
+        corners = torch.zeros(1, 1, 4 * (REG_MAX + 1))
+        for side in range(4):
+            corners[0, 0, side * (REG_MAX + 1) + REG_MAX // 2 + 2] = 12.0
+        loss = fg_loss(
+            corners, ref, gt_cxcywh.view(1, 1, 4), targets, indices,
+            torch.tensor(1.0), REG_MAX, reg_scale=4.0,
+        )
+        # Analytically zero (target lands exactly on bin 6 → wr=0, matched
+        # one-hot scores 0); the 1e-4 residual is float32 quantization of
+        # the expanded GT drifting the label to the neighbouring bin with
+        # ~4e-7 of left mass, plus the one-hot's finite softmax sharpness.
+        assert loss.item() < 1e-3
 
     def test_iou_weight_scales_loss(self):
         # Same distribution, lower-quality target (smaller GT → smaller IoU)
         # must produce a smaller weighted loss.
         ref, gt_hi, indices, targets_hi = self._layer_inputs(quality=1.0)
         _, gt_lo, _, targets_lo = self._layer_inputs(quality=0.5)
-        corners = torch.zeros(1, 1, 4 * (2 * REG_MAX + 1))
+        corners = torch.zeros(1, 1, 4 * (REG_MAX + 1))
         pred_boxes = torch.zeros(1, 1, 4)  # placeholder, IoU uses pred vs gt
         pred_boxes[0, 0] = gt_hi[0]
         loss_hi = fg_loss(corners, ref, pred_boxes, targets_hi, indices,
-                          torch.tensor(1.0), REG_MAX)
+                          torch.tensor(1.0), REG_MAX, reg_scale=4.0)
         loss_lo = fg_loss(corners, ref, pred_boxes, targets_lo, indices,
-                          torch.tensor(1.0), REG_MAX)
+                          torch.tensor(1.0), REG_MAX, reg_scale=4.0)
         assert loss_lo.item() < loss_hi.item()
 
     def test_empty_indices_zero_with_graph(self):
-        corners = torch.zeros(1, 1, 4 * (2 * REG_MAX + 1), requires_grad=True)
+        corners = torch.zeros(1, 1, 4 * (REG_MAX + 1), requires_grad=True)
         ref = torch.zeros(1, 4)
         loss = fg_loss(
             corners, ref, corners.new_zeros(1, 1, 4),
             [{"boxes": torch.zeros(0, 4), "labels": torch.zeros(0, dtype=torch.long)}],
             [(torch.zeros(0, dtype=torch.long), torch.zeros(0, dtype=torch.long))],
-            torch.tensor(1.0), REG_MAX,
+            torch.tensor(1.0), REG_MAX, reg_scale=4.0,
         )
         loss.backward()
         assert loss.item() == 0.0
@@ -284,37 +337,40 @@ class TestDDF:
     def _stacked(self, corners_bq_side_bin):
         return corners_bq_side_bin.reshape(
             corners_bq_side_bin.shape[0], corners_bq_side_bin.shape[1],
-            4 * (2 * REG_MAX + 1),
+            4 * (REG_MAX + 1),
         )
 
     def test_identical_distributions_self_extinguish(self):
-        corners = self._stacked(torch.randn(2, 3, 4, 2 * REG_MAX + 1))
+        corners = self._stacked(torch.randn(2, 3, 4, REG_MAX + 1))
         boxes = torch.rand(2, 3, 4) * 0.3 + 0.3
         indices = [
             (torch.tensor([0, 1]), torch.tensor([0, 1])) for _ in range(2)
         ]
-        loss = ddf_loss(corners, corners.clone(), boxes, boxes.clone(),
-                        indices, torch.tensor(6.0), REG_MAX)
+        logits = torch.rand(2, 3, 2)
+        loss, _, _ = ddf_loss(corners, corners.clone(), logits, logits.clone(),
+                              boxes, boxes.clone(), indices, REG_MAX)
         assert loss.item() == pytest.approx(0.0, abs=1e-6)
 
     def test_divergent_distributions_positive(self):
         torch.manual_seed(3)
-        student = self._stacked(torch.randn(2, 3, 4, 2 * REG_MAX + 1) * 4)
-        teacher = self._stacked(torch.randn(2, 3, 4, 2 * REG_MAX + 1) * 4)
+        student = self._stacked(torch.randn(2, 3, 4, REG_MAX + 1) * 4)
+        teacher = self._stacked(torch.randn(2, 3, 4, REG_MAX + 1) * 4)
         boxes = torch.rand(2, 3, 4) * 0.3 + 0.3
         indices = [(torch.tensor([0, 1]), torch.tensor([0, 1])) for _ in range(2)]
-        loss = ddf_loss(student, teacher, boxes, boxes, indices,
-                        torch.tensor(6.0), REG_MAX)
+        logits = torch.rand(2, 3, 2)
+        loss, _, _ = ddf_loss(student, teacher, logits, logits, boxes, boxes,
+                              indices, REG_MAX)
         assert loss.item() > 0.0
 
     def test_teacher_is_detached(self):
-        student = self._stacked(torch.randn(1, 2, 4, 2 * REG_MAX + 1))
-        teacher = self._stacked(torch.randn(1, 2, 4, 2 * REG_MAX + 1))
+        student = self._stacked(torch.randn(1, 2, 4, REG_MAX + 1))
+        teacher = self._stacked(torch.randn(1, 2, 4, REG_MAX + 1))
         student.requires_grad_(True)
         boxes = torch.rand(1, 2, 4) * 0.3 + 0.3
         indices = [(torch.tensor([0]), torch.tensor([0]))]
-        loss = ddf_loss(student, teacher, boxes, boxes, indices,
-                        torch.tensor(2.0), REG_MAX)
+        logits = torch.rand(1, 2, 2)
+        loss, _, _ = ddf_loss(student, teacher, logits, logits, boxes, boxes,
+                              indices, REG_MAX)
         loss.backward()
         assert teacher.grad is None
         assert student.grad is not None
@@ -340,6 +396,7 @@ class TestDFineCriterion:
             make_targets(),
             dn_outputs=out["dn_aux_outputs"],
             dn_meta=out["dn_meta"],
+            dn_pre_outputs=out["dn_pre_outputs"],
             corners_list=out["pred_corners_list"],
             ref_boxes_list=out["ref_boxes_list"],
             dn_corners_list=out["dn_pred_corners_list"],
@@ -352,6 +409,99 @@ class TestDFineCriterion:
         ):
             assert key in losses, key
         assert torch.isfinite(losses["loss"]).item()
+
+    def test_dn_pre_outputs_supervised(self):
+        # The denoising segment of the pre-output head is supervised like
+        # the matched one (baseline dn_pre_outputs contract): VFL + L1/GIoU
+        # over the CDN assignment, weighted like the base losses.
+        torch.manual_seed(0)
+        model = make_decoder(num_layers=2)
+        model.train()
+        targets = make_targets()
+        out = model(make_feats(), targets=targets)
+        outputs_list = list(out["aux_outputs"]) + [
+            {"pred_logits": out["pred_logits"], "pred_boxes": out["pred_boxes"]}
+        ]
+        kwargs = dict(
+            dn_outputs=out["dn_aux_outputs"],
+            dn_meta=out["dn_meta"],
+            corners_list=out["pred_corners_list"],
+            ref_boxes_list=out["ref_boxes_list"],
+            dn_corners_list=out["dn_pred_corners_list"],
+            dn_ref_boxes_list=out["dn_ref_boxes_list"],
+        )
+        without = self.make_criterion()(outputs_list, targets, **kwargs)
+        with_pre = self.make_criterion()(
+            outputs_list, targets, dn_pre_outputs=out["dn_pre_outputs"], **kwargs
+        )
+        for key in ("loss_vfl_dn_pre", "loss_bbox_dn_pre", "loss_giou_dn_pre"):
+            assert key in with_pre, key
+            assert key not in without, key
+            assert torch.isfinite(with_pre[key]).item()
+        assert "loss" in with_pre and torch.isfinite(with_pre["loss"]).item()
+
+    def test_dn_fgl_weight_override_reweights_only_dn(self):
+        # The dense-batch knob: dn_fgl_loss_weight replaces the main FGL
+        # weight on _dn_* keys and touches nothing else.
+        torch.manual_seed(0)
+        model = make_decoder(num_layers=2)
+        model.train()
+        targets = make_targets()
+        feats = make_feats()
+        out = model(feats, targets=targets)
+        outputs_list = list(out["aux_outputs"]) + [
+            {"pred_logits": out["pred_logits"], "pred_boxes": out["pred_boxes"]}
+        ]
+        kwargs = dict(
+            dn_outputs=out["dn_aux_outputs"],
+            dn_meta=out["dn_meta"],
+            corners_list=out["pred_corners_list"],
+            ref_boxes_list=out["ref_boxes_list"],
+            dn_corners_list=out["dn_pred_corners_list"],
+            dn_ref_boxes_list=out["dn_ref_boxes_list"],
+        )
+        baseline = self.make_criterion()(outputs_list, targets, **kwargs)
+        overridden = DFINECriterionV2(
+            HungarianMatcher(), reg_max=REG_MAX,
+            fgl_loss_weight=0.15, dn_fgl_loss_weight=0.05, ddf_loss_weight=1.5,
+        )(outputs_list, targets, **kwargs)
+
+        dn_fgl_keys = [key for key in baseline if key.startswith("loss_fgl_dn")]
+        assert dn_fgl_keys, "expected denoising FGL terms in the loss set"
+        expected = float(baseline["loss"]) + sum(
+            (0.05 - 0.15) * float(baseline[key]) for key in dn_fgl_keys
+        )
+        assert float(overridden["loss"]) == pytest.approx(expected, rel=1e-6)
+        # Non-dn losses are bit-identical: same inputs, same weights.
+        for key in ("loss_vfl", "loss_fgl", "loss_vfl_dn_0"):
+            assert baseline[key].item() == overridden[key].item()
+
+    def test_dn_fgl_weight_default_follows_main_weight(self):
+        # Default None keeps baseline parity: the dn weight equals the
+        # main FGL weight, so the total is unchanged vs make_criterion().
+        torch.manual_seed(0)
+        model = make_decoder(num_layers=2)
+        model.train()
+        targets = make_targets()
+        feats = make_feats()
+        out = model(feats, targets=targets)
+        outputs_list = list(out["aux_outputs"]) + [
+            {"pred_logits": out["pred_logits"], "pred_boxes": out["pred_boxes"]}
+        ]
+        kwargs = dict(
+            dn_outputs=out["dn_aux_outputs"],
+            dn_meta=out["dn_meta"],
+            corners_list=out["pred_corners_list"],
+            ref_boxes_list=out["ref_boxes_list"],
+            dn_corners_list=out["dn_pred_corners_list"],
+            dn_ref_boxes_list=out["dn_ref_boxes_list"],
+        )
+        baseline = self.make_criterion()(outputs_list, targets, **kwargs)
+        explicit = DFINECriterionV2(
+            HungarianMatcher(), reg_max=REG_MAX,
+            fgl_loss_weight=0.15, dn_fgl_loss_weight=None, ddf_loss_weight=1.5,
+        )(outputs_list, targets, **kwargs)
+        assert baseline["loss"].item() == explicit["loss"].item()
 
     def test_matches_baseline_when_corners_absent(self):
         # Without distributional outputs the criterion must degrade to the
@@ -531,3 +681,27 @@ class TestE2E:
         image = create_image(tmp_path / "probe.jpg", size=(64, 64), seed=0)
         prediction = model.predict(image, threshold=0.05)
         assert set(prediction) == {"labels", "bboxes", "scores"}
+
+
+class TestLQE:
+    def test_zero_init_is_identity_on_scores(self):
+        """At init the LQE's last layer is zeroed — the quality scalar is 0,
+        so the module must return the scores unchanged (official no-op)."""
+        from autovision._task_models.object_detection_components.dfine_utils import LQE
+
+        torch.manual_seed(0)
+        lqe = LQE(k=4, hidden_dim=64, num_layers=2, reg_max=REG_MAX)
+        scores = torch.randn(2, 20, 2)
+        corners = torch.randn(2, 20, 4 * (REG_MAX + 1))
+        torch.testing.assert_close(lqe(scores, corners), scores)
+
+    def test_trained_offset_shifts_scores(self):
+        from autovision._task_models.object_detection_components.dfine_utils import LQE
+
+        lqe = LQE(k=4, hidden_dim=64, num_layers=2, reg_max=REG_MAX)
+        with torch.no_grad():
+            lqe.reg_conf.layers[-1].bias.fill_(0.5)
+        scores = torch.zeros(2, 20, 2)
+        corners = torch.randn(2, 20, 4 * (REG_MAX + 1))
+        shifted = lqe(scores, corners)
+        torch.testing.assert_close(shifted, torch.full_like(scores, 0.5))

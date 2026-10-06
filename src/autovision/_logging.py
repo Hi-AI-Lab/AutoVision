@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -14,19 +15,28 @@ __all__ = ["set_up_console_logging", "set_up_file_logging"]
 
 _FORMAT_FILE = "[%(asctime)s][%(levelname)s] %(message)s"
 
-_LOGGER_NAMES = ("autovision", "torch", "py.warnings")
 
+def set_up_console_logging(names: Sequence[str] = ("autovision",)) -> None:
+    """Attach a bare-format stream handler to the given loggers.
 
-def set_up_console_logging() -> None:
+    Defaults to ``autovision`` only: mirroring the torch/py.warnings trio
+    here would flip those loggers to DEBUG and flood the console with
+    framework chatter. Additive and idempotent — existing handlers
+    (including a previously attached RotatingFileHandler) are left alone,
+    so call order vs :func:`set_up_file_logging` does not matter.
+    """
     level = getattr(logging, Env.LOG_LEVEL.value.upper(), logging.INFO)
     console = logging.StreamHandler()
     console.setLevel(level)
     console.setFormatter(logging.Formatter("%(message)s"))
-    for name in _LOGGER_NAMES:
+    for name in names:
         logger = logging.getLogger(name)
         logger.setLevel(logging.DEBUG)
-        logger.handlers = [h for h in logger.handlers if not isinstance(h, RotatingFileHandler)]
-        if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, RotatingFileHandler) for h in logger.handlers):
+        if not any(
+            isinstance(h, logging.StreamHandler)
+            and type(h) is logging.StreamHandler
+            for h in logger.handlers
+        ):
             logger.addHandler(console)
 
 

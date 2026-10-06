@@ -33,8 +33,10 @@ def forward_match(
     """
     batch_logits = outputs["pred_logits"]
     batch_boxes = outputs["pred_boxes"]
-    num_queries = batch_logits.shape[1]
-
+    # Baseline guard: NaN/inf → 0 and clamp to the unit box before costs.
+    batch_boxes = torch.nan_to_num(batch_boxes, nan=0.0, posinf=1.0, neginf=0.0).clamp(
+        min=0.0, max=1.0
+    )
     indices = []
     for batch_index in range(batch_logits.shape[0]):
         target = targets[batch_index]
@@ -51,15 +53,22 @@ def forward_match(
         pred_logits = batch_logits[batch_index]  # (Q, C)
         pred_boxes = batch_boxes[batch_index]  # (Q, 4)
 
-        # Focal-style classification cost (baseline alpha/gamma).
+        # Focal-style classification cost (baseline formula: the alpha/gamma
+        # powers each scale a -log term — dropping the logs, as an earlier
+        # revision did, changes the Hungarian assignment).
         pred_scores = pred_logits.sigmoid()
-        negative_cost = (1 - matcher.alpha) * pred_scores.pow(matcher.gamma)
-        positive_cost = matcher.alpha * (1 - pred_scores).pow(matcher.gamma)
-        class_cost = torch.gather(
-            positive_cost - negative_cost,
-            1,
-            target_labels[None].repeat(num_queries, 1),
-        )  # (Q, n)
+        tgt_scores = pred_scores[:, target_labels]  # (Q, n)
+        neg_cost = (
+            (1 - matcher.alpha)
+            * tgt_scores.pow(matcher.gamma)
+            * (-(1 - tgt_scores + 1e-8).log())
+        )
+        pos_cost = (
+            matcher.alpha
+            * (1 - tgt_scores).pow(matcher.gamma)
+            * (-(tgt_scores + 1e-8).log())
+        )
+        class_cost = pos_cost - neg_cost  # (Q, n)
 
         l1_cost = torch.cdist(pred_boxes, target_boxes, p=1)  # (Q, n)
         giou_cost = generalized_box_iou_loss(

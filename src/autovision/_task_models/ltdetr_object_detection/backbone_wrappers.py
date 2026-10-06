@@ -24,12 +24,12 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch.nn import (
     GELU,
-    BatchNorm2d,
     Conv2d,
     MaxPool2d,
     Module,
     ModuleList,
     Sequential,
+    SyncBatchNorm,
 )
 
 from autovision._models.dinov2.dinov2_wrapper import TransformersDinov2Wrapper
@@ -64,7 +64,7 @@ class SpatialPriorModule(Module):
         self.stem = Sequential(
             *[
                 Conv2d(3, inplanes, kernel_size=3, stride=2, padding=1, bias=False),
-                BatchNorm2d(inplanes),
+                SyncBatchNorm(inplanes),
                 GELU(),
                 MaxPool2d(kernel_size=3, stride=2, padding=1),
             ]
@@ -75,7 +75,7 @@ class SpatialPriorModule(Module):
                 Conv2d(
                     inplanes, 2 * inplanes, kernel_size=3, stride=2, padding=1, bias=False
                 ),
-                BatchNorm2d(2 * inplanes),
+                SyncBatchNorm(2 * inplanes),
             ]
         )
         # 1/16
@@ -90,7 +90,7 @@ class SpatialPriorModule(Module):
                     padding=1,
                     bias=False,
                 ),
-                BatchNorm2d(4 * inplanes),
+                SyncBatchNorm(4 * inplanes),
             ]
         )
         # 1/32
@@ -105,7 +105,7 @@ class SpatialPriorModule(Module):
                     padding=1,
                     bias=False,
                 ),
-                BatchNorm2d(4 * inplanes),
+                SyncBatchNorm(4 * inplanes),
             ]
         )
 
@@ -175,7 +175,7 @@ class ViTDetectionBackbone(Module):
             ]
         )
         self.norms = ModuleList(
-            [BatchNorm2d(hidden_dim), BatchNorm2d(hidden_dim), BatchNorm2d(hidden_dim)]
+            [SyncBatchNorm(hidden_dim), SyncBatchNorm(hidden_dim), SyncBatchNorm(hidden_dim)]
         )
 
     @property

@@ -28,7 +28,7 @@ from autovision._data.yolo_object_detection_dataset import (
     YOLOObjectDetectionDataArgs,
 )
 from autovision._engine import TaskEngine
-from autovision._logging import set_up_file_logging
+from autovision._logging import set_up_console_logging, set_up_file_logging
 from autovision._task_models.rtdetr_object_detection import (
     RTDETRObjectDetectionTrain,
     RTDETRObjectDetectionTrainArgs,
@@ -93,6 +93,10 @@ def train_object_detection(
     """
     out_dir = common_helpers.get_out_dir(out, resume_interrupted, overwrite)
     set_up_file_logging(out_dir / "train.log")
+    # Mirror the progress lines (step summary, validation tables, best-
+    # checkpoint notices) to the console, reference-log style — the run dir
+    # keeps the timestamped copy in train.log.
+    set_up_console_logging()
 
     # 1. data
     data_config_cls = _DATA_FORMATS[_load_data_config(data)["format"]]

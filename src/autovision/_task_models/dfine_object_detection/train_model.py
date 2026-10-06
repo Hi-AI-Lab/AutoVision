@@ -90,10 +90,14 @@ class DFINEObjectDetectionTrain(RTDETRObjectDetectionTrain):
             world_size=1,
             dn_outputs=out.get("dn_aux_outputs", []),
             dn_meta=out.get("dn_meta"),
+            dn_pre_outputs=out.get("dn_pre_outputs"),
             corners_list=out.get("pred_corners_list"),
             ref_boxes_list=out.get("ref_boxes_list"),
             dn_corners_list=out.get("dn_pred_corners_list"),
             dn_ref_boxes_list=out.get("dn_ref_boxes_list"),
+            pre_outputs=out.get("pre_outputs"),
+            enc_aux_outputs=out.get("enc_aux_outputs"),
+            enc_meta=out.get("enc_meta"),
         )
         log_dict = {key: float(value.detach()) for key, value in loss_dict.items()}
         return TaskStepResult(loss=loss_dict["loss"], log_dict=log_dict)

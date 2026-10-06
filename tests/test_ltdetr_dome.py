@@ -20,6 +20,7 @@ from autovision._task_models.ltdetr_object_detection import (
     LTDETRObjectDetectionTrainArgs,
 )
 from autovision._task_models.ltdetr_object_detection.dome_decoder import (
+    _PADDED_LOGIT,
     DomeDFINEv2Decoder,
 )
 from autovision._task_models.ltdetr_object_detection.dome_encoder import (
@@ -748,14 +749,50 @@ class TestDomeDecoderUnit:
         total_cells = sum(h * w for h, w in spatial_shapes)
         memory = torch.randn(1, total_cells, 64)
         info = self._defe_info(batch=1)
-        content, coords, queries, valid = decoder._get_decoder_input_dynamic(
-            memory, spatial_shapes, info
-        )
+        (
+            content,
+            coords,
+            queries,
+            valid,
+            enc_logits,
+            enc_boxes,
+        ) = decoder._get_decoder_input_dynamic(memory, spatial_shapes, info)
         expected = min(30, total_cells)
         assert queries == [expected]
         assert content.shape == (1, expected, 64)
         assert coords.shape == (1, expected, 4)
         assert valid.all()
+        # Encoder-proposal supervision payload: valid rows carry the real
+        # logits/boxes; there are no padded rows in this single-image batch.
+        assert enc_logits.shape == (1, expected, decoder.num_classes)
+        assert enc_boxes.shape == (1, expected, 4)
+        assert (enc_boxes <= 1.0).all() and (enc_boxes >= 0.0).all()
+        assert torch.isfinite(enc_logits).all()
+
+    def test_enc_supervision_rows_masked_when_padded(self):
+        # Batch with unequal query counts: the padded rows of the enc
+        # supervision payload must be buried at _PADDED_LOGIT and their
+        # boxes zeroed, so the matcher never assigns them.
+        decoder = self._decoder()
+        spatial_shapes = [(5, 8), (4, 8), (2, 8)]
+        total_cells = sum(h * w for h, w in spatial_shapes)
+        memory = torch.randn(2, total_cells, 64)
+        info = self._defe_info(batch=2)
+        (
+            content,
+            coords,
+            queries,
+            valid,
+            enc_logits,
+            enc_boxes,
+        ) = decoder._get_decoder_input_dynamic(memory, spatial_shapes, info)
+        padded = max(queries)
+        assert len(queries) == 2 and padded >= max(queries)
+        for b, n_b in enumerate(queries):
+            assert torch.isfinite(enc_logits[b, :n_b]).all()
+            assert (enc_logits[b, n_b:] == _PADDED_LOGIT).all()
+            assert (enc_boxes[b, n_b:] == 0).all()
+        assert valid.sum() == sum(queries)
 
     def test_deploy_falls_back_to_baseline_forward(self):
         decoder = self._decoder()

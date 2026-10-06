@@ -3,14 +3,24 @@
 
 Per framework policy (see the DINOv2/DINOv3 packages), RF-DETR is provided
 through HuggingFace ``transformers`` (``RfDetrModel``) instead of the
-Roboflow ``rfdetr`` package. The HF model is a plain ``nn.Module`` — no
-non-module bridging — and its DINOv2 backbone exposes multi-scale feature
-maps (``BackboneOutput.feature_maps``, one per ``out_features`` stage).
+Roboflow ``rfdetr`` package. Like lightly-train's RF-DETR integration, the
+wrapper exposes only the distilled DINOv2 encoder: in ``RfDetrModel`` the
+ViT lives one level down (``model.backbone`` is the conv encoder
+``RfDetrConvEncoder``, whose ``.backbone`` is the ``RfDetrDinov2Backbone``
+returning one 4D feature map per ``out_features`` stage). The rest of the
+detector (projector, decoder, heads) stays in the module tree so state
+dicts and exports remain full-model, but receives no gradients from
+feature extraction (the engine's ``find_unused_parameters=True`` covers
+DDP).
 
 Pretraining features come from the backbone only: the last feature map is
-the spatial feature. The encoder/decoder stay in the module tree so state
-dicts and exports remain full-model, but receive no gradients from feature
-extraction (the engine's ``find_unused_parameters=True`` covers DDP).
+the spatial feature — mirroring lightly-train's "last output of the
+DINOv2 encoder stages" contract. The wrapper does not support
+masked-token forwards (the HF backbone drops ``bool_masked_pos``), so
+DINOv2-style masked methods fail fast with an informative error.
+
+transformers gained RF-DETR support in 5.9.0 (2026-05), which the package
+gates on at runtime (see ``rfdetr_package``).
 """
 
 from __future__ import annotations
@@ -30,17 +40,32 @@ from autovision._models.model_wrapper import (
 __all__ = ["RFDETRModelWrapper"]
 
 
+def _dinov2_backbone(model: nn.Module) -> nn.Module:
+    """Return the ``RfDetrDinov2Backbone`` nested inside an RF-DETR model.
+
+    ``RfDetrModel.backbone`` is the detection conv encoder; the ViT is its
+    ``.backbone`` child. Reaching past the encoder matters: the encoder's
+    ``forward(pixel_values, pixel_mask)`` returns a plain
+    ``(features, mask)`` tuple, while the ViT returns
+    ``BackboneOutput.feature_maps`` (one 4D map per stage).
+    """
+    conv_encoder = getattr(model, "backbone", None)
+    vit_backbone = getattr(conv_encoder, "backbone", None)
+    if vit_backbone is None:
+        raise ValueError(
+            f"RFDETRModelWrapper requires a transformers RF-DETR model with "
+            f"a '.backbone.backbone' (RfDetrConvEncoder -> RfDetrDinov2Backbone) "
+            f"attribute chain, got '{type(model).__name__}'."
+        )
+    return vit_backbone
+
+
 class RFDETRModelWrapper(nn.Module, PatchSize):
     """Adapts a ``transformers`` RF-DETR model to the ``ModelWrapper`` protocol."""
 
     def __init__(self, model: nn.Module) -> None:
         super().__init__()
-        backbone = getattr(model, "backbone", None)
-        if backbone is None:
-            raise ValueError(
-                f"RFDETRModelWrapper requires a transformers RF-DETR model "
-                f"with a '.backbone' attribute, got '{type(model).__name__}'."
-            )
+        _dinov2_backbone(model)  # fail fast on unsupported model shapes.
         self._model = model  # transformers models are nn.Modules: register.
 
     @property
@@ -56,10 +81,18 @@ class RFDETRModelWrapper(nn.Module, PatchSize):
 
     @property
     def backbone(self) -> nn.Module:
-        return self._model.backbone
+        """The nested ``RfDetrDinov2Backbone`` (not the conv encoder)."""
+        return _dinov2_backbone(self._model)
 
     # ── ModelWrapper protocol ───────────────────────────────────────────
-    def forward_features(self, x: Tensor) -> ForwardFeaturesOutput:
+    def forward_features(self, x: Tensor, **kwargs: Any) -> ForwardFeaturesOutput:
+        if kwargs.get("bool_masked_pos") is not None:
+            raise ValueError(
+                "RF-DETR models do not support masked-token forwards: the "
+                "transformers backbone ignores 'bool_masked_pos'. Masked "
+                "image modeling (DINOv2/DINOv3 methods) requires a "
+                "dinov2/* or dinov3/* backbone."
+            )
         outputs = self.backbone(pixel_values=x)
         features = outputs.feature_maps[-1]
         if features.dim() != 4:

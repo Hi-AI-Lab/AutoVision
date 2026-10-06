@@ -21,7 +21,7 @@ from autovision._optim import TrainableModules, get_optimizer
 from autovision._scheduler import CosineWarmupScheduler
 from autovision._transforms.method_transform import MethodTransform
 
-__all__ = ["Method", "TrainingStepResult"]
+__all__ = ["Method", "TrainingStepResult", "prepare_teacher"]
 
 
 @dataclass
@@ -34,6 +34,26 @@ class TrainingStepResult:
 
     loss: Tensor
     log_dict: Mapping[str, float] | None = None
+
+
+def prepare_teacher(module: nn.Module) -> nn.Module:
+    """Freeze an EMA teacher: eval mode, no gradients, no stochastic dropout.
+
+    Mirrors lightly-train's teacher preparation. ``make_teacher`` (when the
+    backbone wrapper provides it) zeroes dropout/drop-path in place:
+    ``eval()`` alone only keeps them dormant, and any later ``train()`` call
+    would silently re-enable them. Works on ``EmbeddingModel`` instances
+    (delegates to ``wrapped_model``), bare backbone wrappers, and plain
+    heads (no-op for the dropout part).
+    """
+    module.eval()
+    owner = getattr(module, "wrapped_model", module)
+    make_teacher = getattr(owner, "make_teacher", None)
+    if make_teacher is not None:
+        make_teacher()
+    for parameter in module.parameters():
+        parameter.requires_grad_(False)
+    return module
 
 
 class Method(nn.Module):

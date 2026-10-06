@@ -16,8 +16,18 @@ from torch.optim.lr_scheduler import LRScheduler
 __all__ = ["FlatCosineLRScheduler"]
 
 
+#: Baseline tail LR as a fraction of peak (the cosine floors here and the
+#: tail HOLDS it — no restart; an earlier revision jumped back to 1.0 after
+#: dipping to 0.01, a sawtooth that damaged end-of-run mAP).
+DEFAULT_MIN_FACTOR = 0.5
+
+
 class FlatCosineLRScheduler(LRScheduler):
-    """Linear warmup -> flat plateau -> cosine decay -> constant tail."""
+    """Quadratic warmup -> flat plateau -> cosine decay -> tail at min LR.
+
+    Baseline semantics: the cosine floors at ``min_factor × peak`` and the
+    tail holds that value; warmup is quadratic (``progress²``).
+    """
 
     def __init__(
         self,
@@ -26,7 +36,7 @@ class FlatCosineLRScheduler(LRScheduler):
         warmup_steps: int = 1000,
         flat_steps: int = 0,
         no_aug_steps: int = 0,
-        min_factor: float = 0.01,
+        min_factor: float = DEFAULT_MIN_FACTOR,
         last_epoch: int = -1,
     ) -> None:
         if total_steps <= 0:
@@ -40,19 +50,22 @@ class FlatCosineLRScheduler(LRScheduler):
 
     def get_lr(self):  # type: ignore[override]
         step = self.last_epoch
-        cosine_start = self.total_steps - self.no_aug_steps
-        if step < self.warmup_steps:
-            factor = (step + 1) / max(1, self.warmup_steps)
-        elif step < self.warmup_steps + self.flat_steps or step >= cosine_start:
+        cosine_start = self.warmup_steps + self.flat_steps
+        cosine_end = self.total_steps - self.no_aug_steps
+        if self.warmup_steps > 0 and step <= self.warmup_steps:
+            factor = (step / float(self.warmup_steps)) ** 2
+        elif step < cosine_start:
             factor = 1.0
+        elif step >= cosine_end:
+            factor = self.min_factor
         else:
-            decay_steps = max(1, cosine_start - (self.warmup_steps + self.flat_steps))
-            progress = min(
-                (step - self.warmup_steps - self.flat_steps) / decay_steps, 1.0
+            decay = 0.5 * (
+                1.0
+                + math.cos(
+                    math.pi * (step - cosine_start) / (cosine_end - cosine_start)
+                )
             )
-            factor = self.min_factor + (1.0 - self.min_factor) * 0.5 * (
-                1.0 + math.cos(math.pi * progress)
-            )
+            factor = self.min_factor + (1.0 - self.min_factor) * decay
         return [base_lr * factor for base_lr in self.base_lrs]
 
 

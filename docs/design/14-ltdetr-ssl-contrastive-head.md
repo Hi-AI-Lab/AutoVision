@@ -2,8 +2,8 @@
 
 | 文档属性 | 内容 |
 |---|---|
-| 版本 | v1.2（已实施，含 Route B SSL-only 预训练；实施记录与审查修复见 §6） |
-| 状态 | 已实现并通过 `tests/test_ltdetr_ssl.py`（64 例）与全部受影响回归 |
+| 版本 | v1.3（已实施，含 Route B、D14 未配对负例、评测探针；实施记录与审查修复见 §6） |
+| 状态 | 已实现并通过 `tests/test_ltdetr_ssl.py`（70 例）+ `tests/test_ssl_probes.py`（6 例）+ `tests/test_ltdetr_ssl_command.py`（3 例）与全部受影响回归 |
 | 上游方法 | RF-DETR 分类头 SSL v2.1：逐物体、与 box 匹配对齐的 SimCSE 式对比学习（`L = L_det + λ·L_ssl`） |
 | 参考实现 | `/home/hdjs/Research/Software/rf-detr-ssl`（RF-DETR v1.9.4 + SSL 扩展；权威设计文档 `docs/learn/train/ssl-per-object-classification-head.md` v2.1，M1–M5 已实施并带 VisDrone-mini 消融） |
 | 受影响模块 | `_task_models/object_detection_components/`、`_task_models/ltdetr_object_detection/`、`_data/`、`_transforms/detection_transforms/`、`_commands/train_task/object_detection.py`、`tests/`、`scripts/` |
@@ -469,12 +469,14 @@ model_args = {
 | D11 | 无 λ 预热 / 梯度比诊断 | 均为上游设计-only（§6.5 D1、`ssl_warmup_epochs` 未实现） | 不移植；λ 起点直接用上游 M4 实测推荐 0.1 | 上游未实现且 M4 已给出实测稳健区间，预热价值待证 |
 | D12 | 步数制门控 | epoch 制 + `ssl_step=batch_idx` | `ssl_step=step`（引擎步号），语义相同 | 引擎契约 |
 | D13 | **翻转感知跨视图配对**（默认开） | 配对只用恒等对齐的归一化 IoU | 候选对在恒等**与水平镜像**两种对齐下取最大 IoU 再做匈牙利 + 双重校验；配对自身的对齐 IoU 传递给正对 logit 偏置（替换对角线上的原始 IoU） | 两视图独立翻转（各 p=0.5）：偏心物体镜像后归一化坐标几乎不重叠 → 恒等 IoU≈0，恒等配对的理论产率被压到 ~50%；`flip_invariant_pairing=false` 可退回上游严格语义。命令层冒烟实证：tiny COCO 上产率 0.17 → 显著改善 |
+| D14 | **未配对实例作额外候选列**（默认开） | 配对校验失败的实例两视图都整条丢弃 | 损失推广到矩形 logits（N 锚 × N+M 候选，前 N 列为已配对正对）：未配对实例按自身视图的嵌入加入候选列——unsup 下恒为负例，sup 下同标签 extras 自动升级为软正对；padded gather/共识/DDP 语义不变；`use_unpaired_as_negatives=false` 退回上游严格语义 | 回收难例（R9），对比学习更多负例通常有益；sup 模式额外获得跨实例类别结构 |
 
 ---
 
 ## 6. 实施计划（三个 PR，每个独立可合入）
 
 > **实施记录（v1.1）**：三个阶段已合并实现（单分支交付）。验收：`tests/test_ltdetr_ssl.py` 57 例全绿（含 2-rank gloo 池不均衡共识/padded gather 测试、EMA 往返、checkpoint 容错加载）；受影响回归全绿（test_ltdetr_dome 43 + test_ltdetr_object_detection 42 + dfine/组件/checkpoint 90）。独立代码审查（对照上游实现 + 2-rank gloo 行为探针）结论：无 P0；已修复——P1① `ssl_paired_ratio` 分母改为 pool/2（原定义上限 0.5，无法达到 §6 验收阈值）；P1② criterion 训练态 ssl_params 置但特征缺失改为**响亮 raise**（对齐上游与 §7 测试计划，消除静默整跑无 SSL 的浪费）；P2③ D9 改为保留导出键（严格加载器要求）；P2④ rtdetrv2 边界收紧为 `ssl is not None`（含 mode="off"）；P2⑤ 步门控 miss 步重置统计；P2⑥ 组件层防御校验 `same_image_positive_only`×dropout；P2⑦ IoU NaN→0 守卫（零面积框）；P2⑧ 逐比特断言改 `torch.equal`；P2⑨ 补 EMA/gloo 测试。
+> **实施记录（v1.3，遗留项清偿）**：①**D14 未配对负例**——两个对比损失推广到矩形 logits（valid_rows/valid_cols 拆分），`_pair_two_crop` 返回未配对实例，extras 按自身视图嵌入加入候选列（sup 下同标签 extras 自动升级软正对），config `use_unpaired_as_negatives`（默认开），日志新增 `ssl_candidate_size`；②**探针移植**——`_metrics/ssl_probes.py` 5 项纯函数 + 6 例 hermetic 测试；③**R8 了结**——段式分组 + CPU 化，块对角 batched 指派经渐近分析否决（O((Σn)³) vs ΣO(n³)）。测试 70+6+3 例全绿，全量回归 260 例，ruff 干净。
 > **实施记录（v1.2，Route B 追加）**：`instance_source="encoder_candidates"` SSL-only 预训练已实现——decoder 候选特征 stash（`rtdetrv2_decoder.py` 惰性属性，基线零影响）、`DFINEv2Decoder.ssl_candidate_features` 发射开关（train+eval）、criterion SSL-only 分支（跳过匹配与全部检测损失）、`watch_metric` 动态切换（经引擎 `-val_loss` 兜底）、stage-2 加载容忍（丢弃 stage-1 的 `ssl_head.*` 键）。测试 64 例全绿（新增 Route B 组：组件池/拒绝矩阵/损失集纯度/编码器-检测头梯度隔离/验证路径/watch 切换/stage-2 加载/密度互斥）；回归 243 例全绿；ruff 干净。
 
 ### PR-1：数学组件 + dropout 视图全链路（零数据改动）
@@ -566,6 +568,8 @@ model_args = {
 
 记录：mAP@[.5:.95]、APs、`train/loss_ssl` 首→末、`ssl_paired_ratio`、步时延。验收：c − b ≥ +0.5 AP 且 c − b ≥ −0.2 AP 底线。
 
+**探针用法**（`autovision._metrics.ssl_probes`，纯 torch CPU 库函数，未接入训练循环）：在短程插桩运行中收集匹配实例的 `query_features`/投影嵌入后离线调用——`position_leakage_r2`（R²>0.6 判位置泄漏，R10）、`cross_view_nn_accuracy`（纯最近邻恢复跨视图对应，two_crop 嵌入质量直接度量）、`linear_probe_accuracy`/`retrieval_map_at_k`/`alignment_uniformity`（类可分性/检索/塌缩守卫）。
+
 **配对产率运维判据**：`ssl_paired_ratio` < 0.3 → 先查增广交互（RandomIoUCrop/ZoomOut 整框删除、mosaic 组成差异），必要时 two_crop 运行下调 `random_iou_crop_prob`；翻转导致的配对损失已由 D13 翻转感知配对消除（默认开，`flip_invariant_pairing=false` 退回上游语义）。
 
 ---
@@ -581,9 +585,9 @@ model_args = {
 | R5 | DOME 极小 batch + 动态查询 → 整批无有效对频率升高 | connected zero 兜底（全 rank 共识）；`ssl_paired_ratio` 观察 |
 | R6 | SSL 梯度与 DOME 密度头/检测损失三方竞争 | 上游证据：λ=0.1 量级下无干扰；g 组消融直接度量；λ 扫描复用 f 组 |
 | R7 | RT-DETRv2/OBB 家族后续接入时 `_refine_layers` 签名已变（8→9 元组） | 组件内私有 API，PR-1 同步更新全部调用点；§7 金标回归兜底 |
-| R8 | `_pair_two_crop` 逐图 Python 循环 + scipy CPU 指派，每步多次 GPU→CPU 同步（目标批量 2×8 对约 35–40 次/步） | 与上游同profile（非回归）；smoke 实测步时延，若显著再向量化（块对角 batched box_iou + 单次指派） |
-| R9 | **未配对实例完全退出 SSL 池**：跨视图 IoU 不足（遮挡/截断/大形变）的物体两视图嵌入都被丢弃——SSL 课程系统性偏向"易例"，难例恰是检测最需要表示质量的输入 | **D13 翻转感知配对已消除最大根源**（翻转占几何发散的一半）；`iou_match` 扫参（0.45–0.65）+ `ssl_paired_ratio` 监控；剩余未配对（裁剪/遮挡）后续可保留为**仅负例**（无正对锚，不参与 InfoNCE 分子；需要把损失推广到矩形 logits (N, N+M)，已设计未实施） |
-| R10 | **位置信息张力**：two_crop 的增广（缩放/裁剪/翻转）使绝对位置跨视图变化，对比目标隐式鼓励位置不变特征；而 `dec_bbox_head` 依赖位置信息回归框——两个目标在共享表示上方向相反 | λ 小（0.1）+ 检测损失主导（锚定作用）；上游 `position_leakage_r2` 探针未移植——若怀疑此效应，先移植探针量化（R²>0.6 判泄漏）再调 λ |
+| R8 | ~~`_pair_two_crop` 逐图 Python 循环 + scipy CPU 指派~~ **已了结**：整池一次性下 CPU（每步 1 次同步）+ 段式分组（O(pool) 替代 O(图数×池) 掩码扫描）；**块对角 batched 指派经评估否决**——scipy 指派 O(n³)，合并为 O((Σn)³) 渐近更差，逐图 scipy 即最优 | 已实施；如步时延仍不达标再议 GPU 线性指派松弛（如 Sinkhorn） |
+| R9 | **未配对实例完全退出 SSL 池**：跨视图 IoU 不足（遮挡/截断/大形变）的物体两视图嵌入都被丢弃——SSL 课程系统性偏向"易例"，难例恰是检测最需要表示质量的输入 | **D13 翻转感知配对已消除最大根源**（翻转占几何发散的一半）；`iou_match` 扫参（0.45–0.65）+ `ssl_paired_ratio` 监控；剩余未配对（裁剪/遮挡）已由 **D14 未配对负例**回收（`use_unpaired_as_negatives`，默认开） |
+| R10 | **位置信息张力**：two_crop 的增广（缩放/裁剪/翻转）使绝对位置跨视图变化，对比目标隐式鼓励位置不变特征；而 `dec_bbox_head` 依赖位置信息回归框——两个目标在共享表示上方向相反 | λ 小（0.1）+ 检测损失主导（锚定作用）；探针已移植（`_metrics/ssl_probes.py`，`position_leakage_r2` 等 5 项，§8）——怀疑此效应时直接量化（R²>0.6 判泄漏）再调 λ |
 | R11 | **`both` 模式两项共享偏置 logits，同类对上方向相反**：SupCon 把同标签对拉近（软正对），InfoNCE 把它们当负例推远；且偏置在低 IoU 同类对上进一步压低其 logit——两项在同类对上"拉锯" | 上游同款语义（共享一份 biased logits 是有意设计）；消融 f 组（unsup vs sup vs both）直接度量；实践中 unsup 或 sup 单模式已足够 |
 | R12 | **mixup 混合图像上的对比信号**：mixup 行的像素是两图混合，配对仍由 targets 恢复（D5），但实例特征来自混合内容——对比一致性被"污染" | `ssl_paired_ratio` + 消融 h 组（关 mixup）量化；显著则 two_crop 窗口内禁用 mixup |
 

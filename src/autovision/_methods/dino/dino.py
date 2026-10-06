@@ -29,7 +29,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.nn import init
 
-from autovision._methods.method import Method, TrainingStepResult
+from autovision._methods.method import Method, TrainingStepResult, prepare_teacher
 from autovision._methods.method_args import MethodArgs
 from autovision._optim import (
     AdamWArgs,
@@ -419,9 +419,9 @@ class DINO(Method):
             self.teacher_embedding_model,
             self.teacher_projection_head,
         ):
-            teacher_module.eval()
-            for parameter in teacher_module.parameters():
-                parameter.requires_grad_(False)
+            # eval + no grads + zeroed dropout/drop-path (via make_teacher),
+            # so the EMA teacher stays deterministic in every phase.
+            prepare_teacher(teacher_module)
         self.criterion = DINOLoss(
             output_dim=method_args.output_dim,
             teacher_temp=method_args.teacher_temp,

@@ -119,6 +119,8 @@ class RTDETRObjectDetectionTrain(TrainModel):
             outputs_list, targets, world_size=1,
             dn_outputs=out.get("dn_aux_outputs", []),
             dn_meta=out.get("dn_meta"),
+            enc_aux_outputs=out.get("enc_aux_outputs"),
+            enc_meta=out.get("enc_meta"),
         )
         log_dict = {key: float(value.detach()) for key, value in loss_dict.items()}
         return TaskStepResult(loss=loss_dict["loss"], log_dict=log_dict)

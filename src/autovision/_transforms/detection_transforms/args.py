@@ -61,6 +61,15 @@ class RTDETRDetectionTransformArgs(TaskTransformArgs):
         )
     )
     mixup_prob: float | None = 0.5
+    #: Copy-paste blending (baseline LT-DETR CopyBlend, XOR with mixup in
+    #: the collate): paste up to ``num_objects`` object crops sampled from
+    #: the batch pool into each image, beta-blended. Default off; the
+    #: VisDrone/official recipes disable both mixup and copyblend.
+    copyblend_prob: float | None = None
+    copyblend_area_threshold: int = 100
+    copyblend_num_objects: int = 3
+    copyblend_expand_ratios: tuple[float, float] = (0.1, 0.25)
+    copyblend_step_stop: int | None | str = "auto"
     mixup_step_start: int | str = "auto"
     mixup_step_stop: int | None | str = "auto"
     #: Mosaic (4-tile sample-level paste; off by default — the LT-DETR

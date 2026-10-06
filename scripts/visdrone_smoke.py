@@ -7,7 +7,6 @@ with EMA -> COCO mAP validation -> best/last checkpoints + exports.
 """
 
 import json
-import sys
 import time
 from pathlib import Path
 
@@ -71,7 +70,6 @@ print(f"best metrics:   {json.dumps(result.best_metrics, indent=2)}")
 print(f"wall time:      {elapsed:.1f}s")
 
 # Post-training: load the exported model and predict on a real VisDrone image.
-import torch
 
 from autovision import load_task_model
 

@@ -72,6 +72,9 @@ class COCOMAPEvaluator:
         self.max_dets = max_dets
         self._predictions: list[dict] = []
         self._ground_truth: list[dict] = []  # {"boxes","labels","size"} per image
+        #: Per-class rows from the last :meth:`compute` (name, ap, ar, f1,
+        #: precision, recall) — consumed by the validation report renderer.
+        self.last_per_class: list[dict[str, float]] = []
 
     def set_ground_truth(self, targets: Sequence[dict]) -> None:
         self._ground_truth = [
@@ -137,8 +140,17 @@ class COCOMAPEvaluator:
     def compute(self) -> dict[str, float]:
         from pycocotools.cocoeval import COCOeval
 
+        self.last_per_class = []
         if not self._ground_truth or not self._predictions:
-            return {"map": 0.0, "map_50": 0.0}
+            return {
+                "map": 0.0,
+                "map_50": 0.0,
+                "map_75": 0.0,
+                "mar": 0.0,
+                "f1": 0.0,
+                "precision": 0.0,
+                "recall": 0.0,
+            }
         # True original sizes when recorded by update_targets; the fallback
         # derives a lower bound from the GT extent (set_ground_truth does not
         # carry image sizes).
@@ -187,7 +199,15 @@ class COCOMAPEvaluator:
 
             coco_gt = COCO(str(gt_file))
         if not dt_list:
-            return {"map": 0.0, "map_50": 0.0}
+            return {
+                "map": 0.0,
+                "map_50": 0.0,
+                "map_75": 0.0,
+                "mar": 0.0,
+                "f1": 0.0,
+                "precision": 0.0,
+                "recall": 0.0,
+            }
         coco_dt = coco_gt.loadRes(dt_list)
         evaluator = COCOeval(coco_gt, coco_dt, "bbox")
         # Three-element ladder per pycocotools convention; [1, 10, 100]
@@ -196,32 +216,99 @@ class COCOMAPEvaluator:
         evaluator.params.maxDets = [1, 10, self.max_dets]
         evaluator.evaluate()
         evaluator.accumulate()
-        if self.max_dets == 100:
-            # Official path: stats[0]/stats[1] are AP/AP50 at maxDets=100.
-            evaluator.summarize()
-            return {
-                "map": float(evaluator.stats[0]),
-                "map_50": float(evaluator.stats[1]),
-            }
-        # For other caps, summarize() is unusable as-is: its headline
-        # stats[0] is pinned to maxDets=100 in pycocotools (the bare
-        # ``_summarize(1)`` call), returning -1 under any other ladder.
-        # Compute AP/AP50 at the configured cap directly from the precision
-        # array — numerically identical to the official stats when the cap
+        # summarize() is deliberately skipped: its headline stats[0]/stats[1]
+        # are pinned to maxDets=100 in pycocotools (the bare ``_summarize(1)``
+        # call), returning -1 under any other ladder — and printing a table
+        # of the wrong cap next to the right one invites misreading. Every
+        # headline number is computed directly from the precision/recall
+        # arrays, numerically identical to the official stats when the cap
         # is 100.
         import numpy as np
 
         params = evaluator.params
         tind = int(np.where(params.iouThrs == 0.5)[0][0])
+        tind75 = int(np.where(params.iouThrs == 0.75)[0][0])
         aind = params.areaRngLbl.index("all")
         mind = len(params.maxDets) - 1
         precision = evaluator.eval["precision"]  # [T, R, K, A, M]
+        recall = evaluator.eval["recall"]  # [T, K, A, M] — no score axis
 
         def _mean(values) -> float:
             valid = values[values > -1]
             return float(valid.mean()) if valid.size else -1.0
 
-        return {
+        metrics = {
             "map": _mean(precision[tind:, :, :, aind, mind]),
             "map_50": _mean(precision[tind, :, :, aind, mind]),
+            "map_75": _mean(precision[tind75, :, :, aind, mind]),
+            "mar": _mean(recall[:, :, aind, mind]),
         }
+
+        # F1 sweep at IoU 0.5 across pycocotools' operating-point axis: the
+        # precision array varies along it, recall does not (it is fixed by
+        # the maxDets cutoff), so each point pairs precision@point with the
+        # single recall value — the standard PR curve. Headline
+        # precision/recall/F1 are macro-averaged over classes with ground
+        # truth at the F1-optimal point.
+        p50 = precision[tind, :, :, aind, mind]  # [R, K]
+        r50 = recall[tind, :, aind, mind]  # [K]
+        valid_class = (p50 > -1).any(axis=0)
+        r_values = r50[valid_class]
+        r_values = r_values[r_values > -1]
+        r_scalar = float(r_values.mean()) if r_values.size else -1.0
+        p_curve = np.array(
+            [
+                (
+                    p50[t][valid_class][p50[t][valid_class] > -1].mean()
+                    if (p50[t][valid_class] > -1).any() else -1.0
+                )
+                for t in range(p50.shape[0])
+            ]
+        )
+        if p_curve.max() > -1 and r_scalar > 0:
+            f1_curve = np.where(
+                p_curve > -1,
+                2 * p_curve * r_scalar / np.maximum(p_curve + r_scalar, 1e-12),
+                -1.0,
+            )
+            best_t = int(np.argmax(f1_curve))
+            metrics["f1"] = float(f1_curve[best_t])
+            metrics["precision"] = float(p_curve[best_t])
+            metrics["recall"] = float(r_scalar)
+        else:
+            metrics["f1"] = 0.0
+            metrics["precision"] = 0.0
+            metrics["recall"] = 0.0
+
+        # Per-class detail for the validation report (category order);
+        # classes without ground truth are skipped.
+        class_names = [name for _, name in sorted(self.categories.items())]
+        self.last_per_class = []
+        for k, name in enumerate(class_names):
+            if k >= p50.shape[1] or not (p50[:, k] > -1).any():
+                continue
+            r_k = float(r50[k]) if r50[k] > -1 else -1.0
+            p_k = p50[:, k]
+            if p_k.max() > -1 and r_k > 0:
+                f1_k = np.where(
+                    p_k > -1,
+                    2 * p_k * r_k / np.maximum(p_k + r_k, 1e-12),
+                    -1.0,
+                )
+                best_k = int(np.argmax(f1_k))
+                f1_best = float(f1_k[best_k])
+                p_best = float(p_k[best_k])
+            else:
+                f1_best = 0.0
+                p_best = 0.0
+            self.last_per_class.append(
+                {
+                    "name": name,
+                    "ap": _mean(precision[tind:, :, k, aind, mind]),
+                    "ar": _mean(recall[:, k, aind, mind]),
+                    "f1": f1_best,
+                    "precision": p_best,
+                    "recall": max(r_k, 0.0),
+                }
+            )
+        return metrics

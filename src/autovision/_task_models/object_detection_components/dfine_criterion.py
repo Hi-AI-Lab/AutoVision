@@ -32,11 +32,16 @@ from autovision._task_models.object_detection_components.defe import (
     defe_density_loss,
 )
 from autovision._task_models.object_detection_components.denoising import (
+    box_cxcywh_to_xyxy,
     get_cdn_matched_indices,
 )
 from autovision._task_models.object_detection_components.dfine_utils import (
+    DEFAULT_REG_SCALE,
+    bbox2distance,
     ddf_loss,
     fg_loss,
+    fg_loss_from_targets,
+    matched_pair_iou,
 )
 from autovision._task_models.object_detection_components.rtdetrv2_criterion import (
     loss_boxes,
@@ -63,6 +68,12 @@ class DFINECriterionV2(nn.Module):
     Args:
         matcher: module able to compute the matching between proposals and targets
         weight_dict: dict containing as key the names of the losses and as values their relative weight.
+        dn_fgl_loss_weight: FGL weight on the denoising branches (``_dn_*``).
+            ``None`` follows the main ``loss_fgl`` weight (baseline parity).
+            Dense tiny-object batches (e.g. VisDrone) push CDN to a single
+            group of 2 × max-GT noised queries whose FGL residuals saturate
+            the reg_max bins — the dn FGL term then dominates the total loss
+            without converging; lower it there.
         ssl_params: per-object contrastive SSL contract (design doc 14); ``None``
             disables the objective entirely (no ``loss_ssl`` key, no head wiring).
     """
@@ -72,7 +83,9 @@ class DFINECriterionV2(nn.Module):
         matcher: nn.Module,
         weight_dict: dict[str, float] | None = None,
         reg_max: int = 32,
+        reg_scale: float = DEFAULT_REG_SCALE,
         fgl_loss_weight: float = 0.15,
+        dn_fgl_loss_weight: float | None = None,
         ddf_loss_weight: float = 1.5,
         defe_density_map_weight: float = 1.0,
         defe_count_loss_weight: float = 1.0,
@@ -95,7 +108,9 @@ class DFINECriterionV2(nn.Module):
             }
         )
         self.reg_max = reg_max
+        self.reg_scale = reg_scale
         self.fgl_loss_weight = fgl_loss_weight
+        self.dn_fgl_loss_weight = dn_fgl_loss_weight
         self.ddf_loss_weight = ddf_loss_weight
         self.defe_density_map_weight = defe_density_map_weight
         self.defe_count_loss_weight = defe_count_loss_weight
@@ -108,6 +123,10 @@ class DFINECriterionV2(nn.Module):
         # every_n_steps gate of the SSL objective (state lives outside the
         # forward call, mirroring the RF-DETR-SSL contract).
         self.ssl_step: int = 0
+        # DDF pos/neg normalization counts cached from the aux pass for the
+        # dn pass within the same forward (official semantics).
+        self._ddf_num_pos: float | None = None
+        self._ddf_num_neg: float | None = None
         # Diagnostics from the most recent SSL evaluation (design doc 14
         # D10): matched-pool size and paired-pool size on this rank.
         self.last_ssl_stats: dict[str, float] | None = None
@@ -119,11 +138,15 @@ class DFINECriterionV2(nn.Module):
         world_size: int = 1,
         dn_outputs: list[dict[str, torch.Tensor]] | None = None,
         dn_meta: dict | None = None,
+        dn_pre_outputs: dict[str, torch.Tensor] | None = None,
         corners_list: list[torch.Tensor] | None = None,
         ref_boxes_list: list[torch.Tensor] | None = None,
         dn_corners_list: list[torch.Tensor] | None = None,
         dn_ref_boxes_list: list[torch.Tensor] | None = None,
         query_mask: torch.Tensor | None = None,
+        pre_outputs: dict[str, torch.Tensor] | None = None,
+        enc_aux_outputs: list[dict[str, torch.Tensor]] | None = None,
+        enc_meta: dict | None = None,
         defe_info: dict | None = None,
         ssl_z1: torch.Tensor | None = None,
         ssl_z2: torch.Tensor | None = None,
@@ -178,27 +201,117 @@ class DFINECriterionV2(nn.Module):
             indices = self.matcher(outputs, targets)
             layer_indices.append(indices)
             suffix = "" if output_index == num_entries - 1 else f"_aux_{output_index}"
+            # VFL keeps each layer's own Hungarian assignment (official).
             losses[f"loss_vfl{suffix}"] = loss_labels_vfl(
                 outputs, targets, indices, num_boxes, query_mask=query_mask
             )
-            for name, value in loss_boxes(outputs, targets, indices, num_boxes).items():
-                losses[f"{name}{suffix}"] = value
-            if corners_list is not None and ref_boxes_list is not None:
-                losses[f"loss_fgl{suffix}"] = fg_loss(
-                    corners_list[output_index],
-                    ref_boxes_list[output_index],
-                    outputs["pred_boxes"],
-                    targets,
-                    indices,
-                    num_boxes,
-                    self.reg_max,
+
+        # Union matching across all decoded layers + the pre-output head
+        # + the encoder proposals (official ``_get_go_indices``): box/GIoU
+        # losses are computed ONCE on the final layer over the union; FGL
+        # targets are cached once against the fixed initial anchor and
+        # reused by every layer.
+        aux_indices = layer_indices[:-1]
+        pre_indices: list[tuple[torch.Tensor, torch.Tensor]] | None = None
+        if pre_outputs is not None:
+            pre_indices = self.matcher(pre_outputs, targets)
+        enc_indices_list: list[list[tuple[torch.Tensor, torch.Tensor]]] = []
+        if enc_aux_outputs:
+            class_agnostic = bool(enc_meta.get("class_agnostic", False))
+            enc_targets_list = (
+                [
+                    {"boxes": t["boxes"], "labels": torch.zeros_like(t["labels"])}
+                    for t in targets
+                ]
+                if class_agnostic
+                else targets
+            )
+            for enc_outputs in enc_aux_outputs:
+                enc_indices_list.append(self.matcher(enc_outputs, enc_targets_list))
+        indices_go = self._get_go_indices(
+            layer_indices[-1],
+            aux_indices
+            + ([pre_indices] if pre_indices else [])
+            + enc_indices_list,
+        )
+        num_boxes_go = torch.tensor(
+            float(sum(int(src.numel()) for src, _ in indices_go)),
+            device=num_boxes.device,
+        ).clamp(min=1)
+
+        if pre_outputs is not None:
+            losses["loss_vfl_pre"] = loss_labels_vfl(
+                pre_outputs, targets, pre_indices, num_boxes, query_mask=query_mask
+            )
+            # Box losses ride the union assignment (baseline: the pre head
+            # is one more entry in the go-indices union for "boxes").
+            for name, value in loss_boxes(
+                pre_outputs, targets, indices_go, num_boxes_go
+            ).items():
+                losses[f"{name}_pre"] = value
+
+        final_outputs = outputs_list[-1]
+        for name, value in loss_boxes(
+            final_outputs, targets, indices_go, num_boxes_go
+        ).items():
+            losses[name] = value
+
+        # Cached FGL targets against the fixed initial anchor over the union
+        # assignment — identical for every layer (official caching semantics).
+        anchor = ref_boxes_list[-1] if ref_boxes_list is not None else None
+        fgl_targets: dict | None = None
+        if corners_list is not None and anchor is not None:
+            fgl_targets = {}
+            for batch_index, (src, dst) in enumerate(indices_go):
+                if src.numel() == 0:
+                    continue
+                gt_xyxy = box_cxcywh_to_xyxy(
+                    targets[batch_index]["boxes"][dst].to(anchor.device)
                 )
+                lab, w_r, w_l = bbox2distance(
+                    anchor[batch_index, src].detach(), gt_xyxy, self.reg_max, self.reg_scale
+                )
+                fgl_targets[batch_index] = (src, dst, lab, w_r, w_l)
+
+        if fgl_targets is not None:
+            for output_index in range(num_entries):
+                suffix = "" if output_index == num_entries - 1 else f"_aux_{output_index}"
+                layer_corners = corners_list[output_index]
+                layer_boxes = outputs_list[output_index]["pred_boxes"]
+                layer_loss = layer_corners.sum() * 0.0
+                for batch_index, (src, dst, lab, w_r, w_l) in fgl_targets.items():
+                    quality = matched_pair_iou(
+                        layer_boxes[batch_index, src].detach(),
+                        targets[batch_index]["boxes"][dst].to(layer_boxes.device),
+                    )
+                    layer_loss = layer_loss + fg_loss_from_targets(
+                        layer_corners[batch_index, src].reshape(
+                            src.numel(), 4, self.reg_max + 1
+                        ),
+                        lab,
+                        w_r,
+                        w_l,
+                        quality,
+                        avg_factor=1.0,
+                    )
+                losses[f"loss_fgl{suffix}"] = layer_loss / num_boxes_go.clamp(min=1)
 
         dn_indices: list[tuple[torch.Tensor, torch.Tensor]] | None = None
         dn_num_boxes: torch.Tensor | None = None
         if dn_outputs and dn_meta is not None:
             dn_indices = get_cdn_matched_indices(dn_meta, targets)
             dn_num_boxes = torch.clamp(num_boxes * dn_meta["dn_num_group"], min=1)
+            # The denoising segment of the pre-output head (baseline
+            # ``dn_pre_outputs``) gets the same VFL + box pass as the
+            # matched pre head, over the CDN assignment.
+            if dn_pre_outputs is not None:
+                for name, value in loss_boxes(
+                    dn_pre_outputs, targets, dn_indices, dn_num_boxes
+                ).items():
+                    losses[f"{name}_dn_pre"] = value
+                losses["loss_vfl_dn_pre"] = loss_labels_vfl(
+                    dn_pre_outputs, targets, dn_indices, dn_num_boxes
+                )
             for dn_index, dn_layer in enumerate(dn_outputs):
                 suffix = f"_dn_{dn_index}"
                 losses[f"loss_vfl{suffix}"] = loss_labels_vfl(
@@ -217,31 +330,43 @@ class DFINECriterionV2(nn.Module):
                         dn_indices,
                         dn_num_boxes,
                         self.reg_max,
+                        self.reg_scale,
                     )
 
-        # DDF: the final layer's distributions teach every intermediate layer.
+        # DDF: the final layer's distributions teach every intermediate
+        # layer over ALL queries (official full form — matched weight IoU,
+        # unmatched weight teacher max prob; the num_pos/num_neg counts are
+        # computed on this pass and reused by the dn branch).
         if corners_list is not None and len(corners_list) >= 2 and self.ddf_loss_weight > 0:
             for output_index in range(num_entries - 1):
-                losses[f"loss_ddf_aux_{output_index}"] = ddf_loss(
+                loss_ddf, num_pos, num_neg = ddf_loss(
                     corners_list[output_index],
                     corners_list[-1],
+                    outputs_list[output_index]["pred_logits"],
+                    outputs_list[-1]["pred_logits"],
                     outputs_list[output_index]["pred_boxes"],
                     outputs_list[-1]["pred_boxes"],
-                    layer_indices[output_index],
-                    num_boxes,
+                    indices_go,
                     self.reg_max,
+                    targets=targets,
                 )
+                self._ddf_num_pos, self._ddf_num_neg = num_pos, num_neg
+                losses[f"loss_ddf_aux_{output_index}"] = loss_ddf
             if dn_corners_list and dn_outputs and dn_indices is not None:
                 for dn_index in range(len(dn_corners_list) - 1):
-                    losses[f"loss_ddf_dn_{dn_index}"] = ddf_loss(
+                    loss_ddf, _, _ = ddf_loss(
                         dn_corners_list[dn_index],
                         dn_corners_list[-1],
+                        dn_outputs[dn_index]["pred_logits"],
+                        dn_outputs[-1]["pred_logits"],
                         dn_outputs[dn_index]["pred_boxes"],
                         dn_outputs[-1]["pred_boxes"],
                         dn_indices,
-                        dn_num_boxes,
                         self.reg_max,
+                        targets=targets,
+                        counts=(self._ddf_num_pos, self._ddf_num_neg),
                     )
+                    losses[f"loss_ddf_dn_{dn_index}"] = loss_ddf
 
         # DeFE auxiliary losses (density-guided dynamic queries). The GT
         # heatmap is only present in training; min/max_num_select ride
@@ -296,16 +421,93 @@ class DFINECriterionV2(nn.Module):
                 # leak into this step's log.
                 self.last_ssl_stats = None
 
+        losses = {
+            key: torch.nan_to_num(value, nan=0.0) for key, value in losses.items()
+        }
+        # Encoder-proposal supervision (baseline enc_aux chain — see the
+        # rtdetrv2 criterion for rationale): the enc top-k selection is
+        # non-differentiable and the decoder inputs are detached, so
+        # without this branch the proposal heads never receive a gradient.
+        # Full VFL pass on its own match; box losses ride the union
+        # assignment (baseline ``use_uni_set``).
+        if enc_aux_outputs:
+            class_agnostic = bool(enc_meta.get("class_agnostic", False))
+            for enc_index, enc_outputs in enumerate(enc_aux_outputs):
+                enc_targets = (
+                    [
+                        {"boxes": t["boxes"], "labels": torch.zeros_like(t["labels"])}
+                        for t in targets
+                    ]
+                    if class_agnostic
+                    else targets
+                )
+                suffix = f"_enc_{enc_index}"
+                losses[f"loss_vfl{suffix}"] = loss_labels_vfl(
+                    enc_outputs,
+                    enc_targets,
+                    enc_indices_list[enc_index],
+                    num_boxes,
+                )
+                for name, value in loss_boxes(
+                    enc_outputs, enc_targets, indices_go, num_boxes_go
+                ).items():
+                    losses[f"{name}{suffix}"] = value
+
         weights = dict(self.weight_dict)
+        if pre_outputs is not None:
+            weights["loss_vfl_pre"] = self.weight_dict["loss_vfl"]
+            weights["loss_bbox_pre"] = self.weight_dict["loss_bbox"]
+            weights["loss_giou_pre"] = self.weight_dict["loss_giou"]
+        if dn_pre_outputs is not None:
+            weights["loss_vfl_dn_pre"] = self.weight_dict["loss_vfl"]
+            weights["loss_bbox_dn_pre"] = self.weight_dict["loss_bbox"]
+            weights["loss_giou_dn_pre"] = self.weight_dict["loss_giou"]
+        for enc_index in range(len(enc_aux_outputs or [])):
+            for key, value in self.weight_dict.items():
+                weights[f"{key}_enc_{enc_index}"] = value
         for output_index in range(num_entries - 1):
             for key, value in self.weight_dict.items():
                 weights[f"{key}_aux_{output_index}"] = value
         for dn_index in range(len(dn_outputs or [])):
             for key, value in self.weight_dict.items():
                 weights[f"{key}_dn_{dn_index}"] = value
+            if self.dn_fgl_loss_weight is not None:
+                weights[f"loss_fgl_dn_{dn_index}"] = self.dn_fgl_loss_weight
 
         total = sum(
             losses[key] * weight for key, weight in weights.items() if key in losses
         )
         losses["loss"] = total
         return reduce_dict(losses, average=False)
+
+    def _get_go_indices(
+        self,
+        indices: list[tuple[torch.Tensor, torch.Tensor]],
+        indices_aux_list: list[list[tuple[torch.Tensor, torch.Tensor]]],
+    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        """Union of the per-layer Hungarian assignments (official form).
+
+        Accumulates every layer's (query, gt) pairs, keeps pairs seen in
+        multiple layers first, and de-duplicates per query so each query
+        appears once with its most-frequent GT."""
+        results = []
+        for indices_aux in indices_aux_list:
+            indices = [
+                (torch.cat([idx1[0], idx2[0]]), torch.cat([idx1[1], idx2[1]]))
+                for idx1, idx2 in zip(indices.copy(), indices_aux.copy())
+            ]
+        for ind in [
+            torch.cat([idx[0][:, None], idx[1][:, None]], 1) for idx in indices
+        ]:
+            unique, counts = torch.unique(ind, return_counts=True, dim=0)
+            count_sort_indices = torch.argsort(counts, descending=True)
+            unique_sorted = unique[count_sort_indices]
+            column_to_row: dict[int, int] = {}
+            for idx in unique_sorted:
+                row_idx, col_idx = idx[0].item(), idx[1].item()
+                if row_idx not in column_to_row:
+                    column_to_row[row_idx] = col_idx
+            final_rows = torch.tensor(list(column_to_row.keys()), device=ind.device)
+            final_cols = torch.tensor(list(column_to_row.values()), device=ind.device)
+            results.append((final_rows.long(), final_cols.long()))
+        return results

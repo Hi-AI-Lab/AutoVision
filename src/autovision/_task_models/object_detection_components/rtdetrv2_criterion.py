@@ -27,6 +27,13 @@ __all__ = ["RTDETRCriterionV2", "VFL_LOSS_WEIGHT_DICT"]
 VFL_LOSS_WEIGHT_DICT = {"loss_vfl": 1.0, "loss_bbox": 5.0, "loss_giou": 2.0}
 
 
+def _sanitize_boxes_cxcywh_normalized(boxes: torch.Tensor) -> torch.Tensor:
+    """Baseline guard: NaN/inf → 0 and clamp to the unit box before any
+    L1/IoU/GIoU consumption of predicted boxes."""
+    boxes = torch.nan_to_num(boxes, nan=0.0, posinf=1.0, neginf=0.0)
+    return boxes.clamp(min=0.0, max=1.0)
+
+
 def loss_labels_vfl(
     outputs: dict[str, torch.Tensor],
     targets: list[dict[str, torch.Tensor]],
@@ -52,6 +59,7 @@ def loss_labels_vfl(
     # fp32 targets: IoU scores are fp32, and under bf16 autocast the
     # index_put_ above would otherwise clash with a bf16 destination.
     target_scores = torch.zeros_like(logits, dtype=torch.float32)
+    target = torch.zeros_like(target_scores)  # one-hot class gate (baseline)
     for batch_index, (src, dst) in enumerate(indices):
         if src.numel() == 0:
             continue
@@ -61,9 +69,12 @@ def loss_labels_vfl(
         )
         classes = targets[batch_index]["labels"][dst].to(logits.device)
         target_scores[batch_index, src, classes] = ious
-    pred_scores = logits.sigmoid()
-    # Baseline RT-DETRv2 VFL: weight = alpha * pred^gamma * (1 - target) + target
-    weight = alpha * pred_scores.detach().pow(gamma) * (1 - target_scores) + target_scores
+        target[batch_index, src, classes] = 1.0
+    pred_scores = logits.sigmoid().detach()
+    # Baseline RT-DETRv2 VFL: the (1 - .) term is gated by the ONE-HOT
+    # class indicator, NOT the continuous IoU scores — positives pay no
+    # negative-class penalty on their own class channel.
+    weight = alpha * pred_scores.pow(gamma) * (1 - target) + target_scores
     loss = F.binary_cross_entropy_with_logits(logits, target_scores, reduction="none")
     loss = loss * weight
     if query_mask is not None:
@@ -101,10 +112,11 @@ def loss_boxes(
     """L1 + GIoU on matched pairs, normalized by num_boxes (rank-reduced)."""
     l1_total = outputs["pred_boxes"].sum() * 0.0
     giou_total = outputs["pred_boxes"].sum() * 0.0
+    pred_boxes_sanitized = _sanitize_boxes_cxcywh_normalized(outputs["pred_boxes"])
     for batch_index, (src, dst) in enumerate(indices):
         if src.numel() == 0:
             continue
-        pred = outputs["pred_boxes"][batch_index, src]
+        pred = pred_boxes_sanitized[batch_index, src]
         target = targets[batch_index]["boxes"][dst]
         l1_total = l1_total + (pred - target).abs().sum()
         # generalized_box_iou_loss is PAIRWISE (N, M): taking .sum() over the
@@ -165,6 +177,8 @@ class RTDETRCriterionV2(nn.Module):
         dn_outputs: list[dict[str, torch.Tensor]] | None = None,
         dn_meta: dict | None = None,
         query_mask: torch.Tensor | None = None,
+        enc_aux_outputs: list[dict[str, torch.Tensor]] | None = None,
+        enc_meta: dict | None = None,
     ) -> dict[str, torch.Tensor]:
         num_boxes = sum(int(t["boxes"].shape[0]) for t in targets)
         num_boxes = torch.tensor(float(num_boxes), device=outputs_list[-1]["pred_logits"].device)
@@ -198,6 +212,30 @@ class RTDETRCriterionV2(nn.Module):
                 ).items():
                     losses[f"{name}{suffix}"] = value
 
+        # Encoder-proposal supervision (baseline RT-DETRv2 enc_aux chain):
+        # the enc top-k selection is non-differentiable and the query
+        # content is detached, so without this branch the proposal heads
+        # never receive a gradient. Full VFL+box pass with its own match.
+        if enc_aux_outputs:
+            class_agnostic = bool(enc_meta.get("class_agnostic", False))
+            if class_agnostic:
+                enc_targets = [
+                    {"boxes": t["boxes"], "labels": torch.zeros_like(t["labels"])}
+                    for t in targets
+                ]
+            else:
+                enc_targets = targets
+            for enc_index, enc_outputs in enumerate(enc_aux_outputs):
+                enc_indices = self.matcher(enc_outputs, enc_targets)
+                suffix = f"_enc_{enc_index}"
+                losses[f"loss_vfl{suffix}"] = self.loss_labels(
+                    enc_outputs, enc_targets, enc_indices, num_boxes
+                )
+                for name, value in self.loss_boxes(
+                    enc_outputs, enc_targets, enc_indices, num_boxes
+                ).items():
+                    losses[f"{name}{suffix}"] = value
+
         weights = dict(self.weight_dict)
         for output_index in range(num_entries - 1):
             for key, value in self.weight_dict.items():
@@ -205,6 +243,9 @@ class RTDETRCriterionV2(nn.Module):
         for dn_index in range(len(dn_outputs or [])):
             for key, value in self.weight_dict.items():
                 weights[f"{key}_dn_{dn_index}"] = value
+        for enc_index in range(len(enc_aux_outputs or [])):
+            for key, value in self.weight_dict.items():
+                weights[f"{key}_enc_{enc_index}"] = value
         total = sum(losses[key] * weight for key, weight in weights.items() if key in losses)
         losses["loss"] = total
         return reduce_dict(losses, average=False)

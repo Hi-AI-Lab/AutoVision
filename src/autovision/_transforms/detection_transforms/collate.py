@@ -38,6 +38,7 @@ class RTDETRDetectionCollateFunction:
         self.step = 0
         self._reinit_pending = False
         self._mixup_active: bool | None = None
+        self._copyblend_active: bool = False
         self._scale_jitter_active: bool | None = None
 
     def _scale_jitter_on_at(self, step: int) -> bool:
@@ -72,6 +73,12 @@ class RTDETRDetectionCollateFunction:
         if self._mixup_active is not None and active != self._mixup_active:
             self._reinit_pending = True
         self._mixup_active = active
+        cb_stop = getattr(self.transform_args, "copyblend_step_stop", None)
+        cb_stop = None if cb_stop in (None, "auto") else int(cb_stop)
+        self._copyblend_active = bool(
+            self.transform_args.copyblend_prob is not None
+            and (cb_stop is None or step < cb_stop)
+        )
         if self._scale_jitter_active is not None and (
             scale_jitter_active != self._scale_jitter_active
         ):
@@ -83,6 +90,65 @@ class RTDETRDetectionCollateFunction:
 
     def mark_dataloader_as_reinitialized(self) -> None:
         self._reinit_pending = False
+
+    def _copyblend_batch(
+        self,
+        images: list[torch.Tensor],
+        boxes_list: list[torch.Tensor],
+        classes_list: list[torch.Tensor],
+    ) -> None:
+        """Copy-paste blending (baseline CopyBlend, tensor form).
+
+        Object pool from the whole batch (boxes above the pixel-area
+        threshold); pastes up to ``num_objects`` crops into each image with
+        a random expand ratio and beta blend; appends the source boxes
+        remapped to the pasted placement. Simplification vs the baseline:
+        random placement without collision avoidance.
+        """
+        args = self.transform_args
+        h, w = images[0].shape[-2], images[0].shape[-1]
+        pool = [
+            (index, i)
+            for index, boxes in enumerate(boxes_list)
+            for i in range(boxes.shape[0])
+            if boxes[i, 2] * boxes[i, 3] * w * h >= args.copyblend_area_threshold
+        ]
+        if not pool:
+            return
+        beta = random.uniform(0.45, 0.55)
+        for image_index, image in enumerate(images):
+            for _ in range(args.copyblend_num_objects):
+                src_index, box_index = random.choice(pool)
+                cx, cy, bw, bh = boxes_list[src_index][box_index].tolist()
+                ratio = random.uniform(*args.copyblend_expand_ratios)
+                bw, bh = bw * (1 + ratio), bh * (1 + ratio)
+                x1 = int(max((cx - bw / 2) * w, 0.0))
+                y1 = int(max((cy - bh / 2) * h, 0.0))
+                x2 = int(min((cx + bw / 2) * w, float(w)))
+                y2 = int(min((cy + bh / 2) * h, float(h)))
+                if x2 - x1 < 2 or y2 - y1 < 2:
+                    continue
+                src = images[src_index]
+                images[image_index][:, y1:y2, x1:x2] = beta * image[
+                    :, y1:y2, x1:x2
+                ] + (1.0 - beta) * src[:, y1:y2, x1:x2]
+                boxes_list[image_index] = torch.cat(
+                    [
+                        boxes_list[image_index],
+                        torch.tensor(
+                            [[(x1 + x2) / 2 / w, (y1 + y2) / 2 / h, bw, bh]],
+                            dtype=boxes_list[image_index].dtype,
+                        ),
+                    ],
+                    dim=0,
+                )
+                classes_list[image_index] = torch.cat(
+                    [
+                        classes_list[image_index],
+                        classes_list[src_index][box_index : box_index + 1],
+                    ],
+                    dim=0,
+                )
 
     def _filter_small_boxes(
         self, boxes: torch.Tensor, classes: torch.Tensor, width: int, height: int
@@ -147,6 +213,14 @@ class RTDETRDetectionCollateFunction:
                 torch.cat([classes_list[i], classes_list[i - 1]], dim=0)
                 for i in range(len(classes_list))
             ]
+
+        elif (
+            self._copyblend_active
+            and len(batch) >= 1
+            and args.copyblend_prob is not None
+            and random.random() < args.copyblend_prob
+        ):
+            self._copyblend_batch(images, boxes_list, classes_list)
 
         filtered = [
             self._filter_small_boxes(b, c, input_size[0], input_size[1])

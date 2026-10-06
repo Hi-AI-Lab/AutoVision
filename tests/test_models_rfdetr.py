@@ -82,7 +82,6 @@ class FakeRfDetrDinov2Config:
             patch_size=14,
             num_register_tokens=4,
             num_windows=4,
-            window_block_indexes=[0, 1, 3, 4, 6, 7, 9, 10],
             out_indices=[2, 5, 8, 11],
             out_features=["stage2", "stage5", "stage8", "stage11"],
             reshape_hidden_states=True,
@@ -91,6 +90,12 @@ class FakeRfDetrDinov2Config:
         defaults.update(kwargs)
         for key, value in defaults.items():
             setattr(self, key, value)
+        # Mirror the real RfDetrDinov2Config: window blocks are derived from
+        # out_indices, never passed in (all non-tap blocks are windowed).
+        out_indices = set(self.out_indices)
+        self.window_block_indexes = sorted(
+            set(range(max(out_indices) + 1)) - out_indices
+        )
 
 
 class FakeRfDetrDinov2Backbone(nn.Module):
@@ -111,6 +116,26 @@ class FakeRfDetrDinov2Backbone(nn.Module):
         )
 
 
+class FakeRfDetrConvEncoder(nn.Module):
+    """Mirrors ``RfDetrConvEncoder``: the ViT plus a projector, with a
+    ``forward(pixel_values, pixel_mask)`` that returns a plain tuple. The
+    wrapper must call the inner backbone, so this forward is wired to fail
+    loudly if anything reaches it."""
+
+    def __init__(self, config) -> None:
+        super().__init__()
+        self.backbone = FakeRfDetrDinov2Backbone(config)
+        self.projector = nn.Conv2d(
+            config.hidden_size * len(config.out_features), config.hidden_size, 1
+        )
+
+    def forward(self, pixel_values, pixel_mask=None):  # pragma: no cover
+        raise AssertionError(
+            "RFDETRModelWrapper must use the inner DINOv2 backbone "
+            "(model.backbone.backbone), not the conv encoder."
+        )
+
+
 class FakeRfDetrConfig:
     def __init__(self, backbone_config=None, **kwargs) -> None:
         self.model_type = "rf_detr"
@@ -124,7 +149,7 @@ class FakeRfDetrModel(nn.Module):
     def __init__(self, config) -> None:
         super().__init__()
         self.config = config
-        self.backbone = FakeRfDetrDinov2Backbone(config.backbone_config)
+        self.backbone = FakeRfDetrConvEncoder(config.backbone_config)
         # Head-equivalent params beyond the backbone prove exports and
         # state dict round-trips stay full-model.
         self.head = nn.Linear(config.backbone_config.hidden_size, 4)
@@ -161,7 +186,8 @@ class TestWithInjectedSupport:
             "rfdetr/rf-detr-large-notpretrained",
         ):
             assert expected in names
-        # The seg variant has no converted checkpoint; it stays unlisted.
+        # The seg variants load into RfDetrForInstanceSegmentation, not the
+        # bare RfDetrModel this package wraps; they stay unlisted.
         assert "rfdetr/rf-detr-seg-preview" not in names
 
     def test_registration_before_custom(self, fake_rfdetr_transformers):
@@ -178,6 +204,7 @@ class TestWithInjectedSupport:
         backbone_config = model.config.backbone_config
         assert backbone_config.patch_size == 14
         assert backbone_config.num_windows == 4
+        # Derived from out_indices by the config, matching the checkpoints.
         assert backbone_config.window_block_indexes == [0, 1, 3, 4, 6, 7, 9, 10]
         assert backbone_config.out_indices == [2, 5, 8, 11]
         assert backbone_config.use_mask_token is True
@@ -219,6 +246,24 @@ class TestWithInjectedSupport:
         wrapper = make_wrapper()
         out = wrapper.forward_features(torch.randn(2, 3, 224, 224))
         assert out["features"].shape == (2, 384, 16, 16)  # 224 / patch 14
+
+    def test_backbone_property_is_inner_vit(self, fake_rfdetr_transformers):
+        # The wrapper reaches past RfDetrConvEncoder to the DINOv2 backbone
+        # (the conv encoder's forward would demand a pixel_mask and return
+        # a plain tuple without .feature_maps).
+        wrapper = make_wrapper()
+        assert isinstance(wrapper.backbone, FakeRfDetrDinov2Backbone)
+
+    def test_masked_forward_rejected(self, fake_rfdetr_transformers):
+        # DINOv2-style methods pass bool_masked_pos through EmbeddingModel;
+        # the HF RF-DETR backbone cannot apply it, so the wrapper must fail
+        # with a direction to the ViT backbones instead of ignoring it.
+        wrapper = make_wrapper()
+        with pytest.raises(ValueError, match="bool_masked_pos"):
+            wrapper.forward_features(
+                torch.randn(1, 3, 224, 224),
+                bool_masked_pos=torch.ones(1, 256, dtype=torch.bool),
+            )
 
     def test_feature_dim_and_patch_size(self, fake_rfdetr_transformers):
         wrapper = make_wrapper("rf-detr-nano-notpretrained")
@@ -316,5 +361,5 @@ class TestWithInjectedSupport:
             },
         )
         RFDETR_PACKAGE.get_model("rf-detr-base")  # pretrained by default
-        assert downloaded == ["stevenbucaille/rf-detr-base"]
+        assert downloaded == ["Roboflow/rf-detr-base"]
         assert requested == [snapshot]

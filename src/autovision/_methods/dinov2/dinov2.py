@@ -40,7 +40,7 @@ from autovision._methods.dino.dino import (
     _cosine_schedule,
     _update_momentum,
 )
-from autovision._methods.method import Method, TrainingStepResult
+from autovision._methods.method import Method, TrainingStepResult, prepare_teacher
 from autovision._methods.method_args import MethodArgs
 from autovision._optim import AdamWArgs, TrainableModules, get_weight_decay_parameters
 from autovision._scaling import ScalingInfo
@@ -222,9 +222,9 @@ class DINOv2(Method):
         )
         self.teacher_projection_head = copy.deepcopy(self.student_projection_head)
         for teacher_module in (self.teacher_embedding_model, self.teacher_projection_head):
-            teacher_module.eval()
-            for parameter in teacher_module.parameters():
-                parameter.requires_grad_(False)
+            # eval + no grads + zeroed dropout/drop-path (via make_teacher),
+            # so the EMA teacher stays deterministic in every phase.
+            prepare_teacher(teacher_module)
         self.mask_generator = _MaskGenerator(
             method_args.mask_ratio_min, method_args.mask_ratio_max
         )

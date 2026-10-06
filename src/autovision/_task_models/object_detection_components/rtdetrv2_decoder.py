@@ -732,11 +732,14 @@ class RTDETRv2Decoder(nn.Module):
         topk_memory = memory.gather(
             dim=1, index=topk_ind.unsqueeze(-1).repeat(1, 1, memory.shape[-1])
         )
+        topk_logits = outputs_logits.gather(
+            dim=1, index=topk_ind.unsqueeze(-1).repeat(1, 1, outputs_logits.shape[-1])
+        )
         topk_coords = outputs_coords_unact.gather(
             dim=1,
             index=topk_ind.unsqueeze(-1).repeat(1, 1, outputs_coords_unact.shape[-1]),
         )
-        return topk_memory, outputs_logits, topk_coords
+        return topk_memory, topk_logits, topk_coords
 
     def _get_decoder_input(
         self,
@@ -756,9 +759,15 @@ class RTDETRv2Decoder(nn.Module):
             self.enc_bbox_head(output_memory) + anchors
         )
 
-        enc_topk_memory, _, enc_topk_bbox_unact = self._select_topk(
+        enc_topk_memory, enc_topk_logits, enc_topk_bbox_unact = self._select_topk(
             output_memory, enc_outputs_logits, enc_outputs_coord_unact, self.num_queries
         )
+        # Pre-detach snapshot for the encoder-proposal supervision head: the
+        # enc_score/enc_bbox heads otherwise receive no gradient at all
+        # (the topk gather is non-differentiable and the query content is
+        # detached), freezing proposal quality at its random init.
+        enc_topk_bboxes = enc_topk_bbox_unact.sigmoid() if self.training else None
+        enc_topk_logits_supervised = enc_topk_logits if self.training else None
 
         if getattr(self, "_emit_candidate_features", False):
             # Route B (design doc 14 §4.10): the pre-detach top-k candidate
@@ -780,7 +789,7 @@ class RTDETRv2Decoder(nn.Module):
             )
             content = torch.concat([denoising_logits, content], dim=1)
 
-        return content, enc_topk_bbox_unact
+        return content, enc_topk_bbox_unact, enc_topk_logits_supervised, enc_topk_bboxes
 
     def forward(self, feats: List[torch.Tensor], targets=None):
         memory, spatial_shapes = self._get_encoder_input(feats)
@@ -802,7 +811,12 @@ class RTDETRv2Decoder(nn.Module):
                 None, None, None, None,
             )
 
-        init_ref_contents, init_ref_points_unact = self._get_decoder_input(
+        (
+            init_ref_contents,
+            init_ref_points_unact,
+            enc_topk_logits,
+            enc_topk_bboxes,
+        ) = self._get_decoder_input(
             memory, spatial_shapes, denoising_logits, denoising_bbox_unact
         )
 
@@ -832,6 +846,10 @@ class RTDETRv2Decoder(nn.Module):
 
         if self.training:
             out["aux_outputs"] = self._set_aux_loss(out_logits[:-1], out_bboxes[:-1])
+            out["enc_aux_outputs"] = self._set_aux_loss(
+                [enc_topk_logits], [enc_topk_bboxes]
+            )
+            out["enc_meta"] = {"class_agnostic": self.query_select_method == "agnostic"}
             if dn_meta is not None:
                 out["dn_aux_outputs"] = self._set_aux_loss(dn_out_logits, dn_out_bboxes)
                 out["dn_meta"] = dn_meta

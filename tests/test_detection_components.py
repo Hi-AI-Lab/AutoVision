@@ -15,6 +15,9 @@ from autovision._task_models.object_detection_components import (
     box_cxcywh_norm_to_xyxy,
     box_xyxy_to_cxcywh_norm,
 )
+from autovision._task_models.object_detection_components.multistep_schedule import (
+    MultiStepWarmupScheduler,
+)
 
 
 def fake_targets(batch_size: int = 2, device="cpu"):
@@ -118,24 +121,27 @@ class TestFlatCosine:
         return FlatCosineLRScheduler(optimizer, **kwargs), optimizer
 
     def _lr_at(self, scheduler, optimizer, step):
-        for _ in range(step):
+        """Advance to the ABSOLUTE scheduler step and read the LR."""
+        while scheduler.last_epoch < step:
             scheduler.step()
         return optimizer.param_groups[0]["lr"]
 
     def test_warmup_then_flat_then_decay(self):
+        """Baseline semantics: quadratic warmup -> flat -> cosine decaying to
+        min_factor (0.5) -> tail HOLDS min_factor (no restart)."""
         scheduler, optimizer = self._sched(
             total_steps=100, warmup_steps=10, flat_steps=40, no_aug_steps=10
         )
-        # _lr_at steps forward cumulatively: steps 0-8 are warmup (lr<1),
-        # step 9 completes the warmup at full lr.
-        assert self._lr_at(scheduler, optimizer, 9) == pytest.approx(1.0)
-        # flat plateau: cumulative steps 10..49
-        assert self._lr_at(scheduler, optimizer, 40) == pytest.approx(1.0)
-        # cosine region decreases (cumulative step 80)
-        assert self._lr_at(scheduler, optimizer, 31) < 1.0
-        # tail: lr returns to full for the no-augmentation window (baseline
-        # flat-cosine semantics); min_factor is the cosine floor.
-        assert self._lr_at(scheduler, optimizer, 15) == pytest.approx(1.0)
+        # Quadratic warmup: at absolute step 5 lr = (5/10)^2; step 10 -> 1.0.
+        assert self._lr_at(scheduler, optimizer, 5) == pytest.approx(0.25)
+        assert self._lr_at(scheduler, optimizer, 10) == pytest.approx(1.0)
+        # flat plateau up to (exclusive) cosine_start = 50.
+        assert self._lr_at(scheduler, optimizer, 49) == pytest.approx(1.0)
+        # cosine midpoint (step 70, progress 0.5) -> halfway to min_factor.
+        assert self._lr_at(scheduler, optimizer, 70) == pytest.approx(0.75)
+        # cosine end floors at min_factor and the tail HOLDS it.
+        assert self._lr_at(scheduler, optimizer, 90) == pytest.approx(0.5)
+        assert self._lr_at(scheduler, optimizer, 99) == pytest.approx(0.5)
 
     def test_validation(self):
         model = nn.Linear(2, 2)
@@ -230,3 +236,95 @@ class TestDecoderAndCriterion:
             losses["loss_vfl"] + 5 * losses["loss_bbox"] + 2 * losses["loss_giou"]
         ).detach()
         assert losses["loss"].detach() == pytest.approx(expected, rel=1e-5)
+
+
+class TestTrainWindow:
+    def test_means_over_window(self):
+        from autovision._engine.engine import _TrainWindow
+
+        window = _TrainWindow()
+        for value in (2.0, 4.0, 6.0):
+            window.update({"loss": torch.tensor(value), "tag": "not-a-tensor"})
+        means = window.means()
+        assert means["loss"] == pytest.approx(4.0)
+        assert window.count == 3
+        window.reset()
+        assert window.count == 0
+        assert window.means() == {}
+
+    def test_seconds_per_step_positive(self):
+        import time
+
+        from autovision._engine.engine import _TrainWindow
+
+        window = _TrainWindow()
+        window.update({"loss": torch.tensor(1.0)})
+        time.sleep(0.02)
+        assert window.seconds_per_step() > 0.0
+
+
+class TestValidationReportTables:
+    def test_detection_report_renders_overall_and_per_class(self):
+        from autovision._metrics.report import format_detection_validation_report
+
+        metrics = {
+            "map": 0.0625, "map_50": 0.1030, "map_75": 0.05,
+            "mar": 0.20, "f1": 0.24, "precision": 0.25, "recall": 0.27,
+        }
+        per_class = [
+            {"name": "car", "ap": 0.29, "ar": 0.47, "f1": 0.49,
+             "precision": 0.37, "recall": 0.69},
+            {"name": "bus", "ap": 0.08, "ar": 0.25, "f1": 0.28,
+             "precision": 0.36, "recall": 0.22},
+        ]
+        report = format_detection_validation_report(
+            "Validation (EMA weights)", metrics, per_class, max_dets=500,
+            footer="note: val_loss covers VFL/bbox/GIoU only",
+        )
+        assert "Validation (EMA weights)" in report
+        assert "mAR @500" in report
+        assert "car" in report and "bus" in report
+        assert "0.0625" in report and "0.1030" in report
+        assert "val_loss covers VFL/bbox/GIoU only" in report
+        # Box-drawing frame lines enclose the table body.
+        lines = report.splitlines()
+        assert lines[1].startswith("┏") and lines[-2].startswith("└")
+
+    def test_metric_table_first_column_left_aligned(self):
+        from autovision._metrics.report import format_metric_table
+
+        table = format_metric_table(
+            "T", ("Name", "Val"), [["longer-name", "1.0"], ["x", "22"]]
+        )
+        name_line = next(line for line in table.splitlines() if "longer-name" in line)
+        assert "longer-name┃" in name_line.replace(" ", "")
+
+
+class TestMultiStepWarmup:
+    def _sched(self, **kwargs):
+        model = nn.Linear(2, 2)
+        optimizer = torch.optim.SGD(model.parameters(), lr=1.0)
+        return MultiStepWarmupScheduler(optimizer, **kwargs), optimizer
+
+    def _lr_at(self, scheduler, optimizer, step):
+        """Advance to the ABSOLUTE scheduler step and read the LR."""
+        while scheduler.last_epoch < step:
+            scheduler.step()
+        return optimizer.param_groups[0]["lr"]
+
+    def test_warmup_then_constant_with_drops(self):
+        scheduler, optimizer = self._sched(
+            total_steps=100, warmup_steps=10, milestones=(30, 60), gamma=0.8
+        )
+        assert self._lr_at(scheduler, optimizer, 10) == pytest.approx(1.0)
+        assert self._lr_at(scheduler, optimizer, 29) == pytest.approx(1.0)
+        assert self._lr_at(scheduler, optimizer, 30) == pytest.approx(0.8)
+        assert self._lr_at(scheduler, optimizer, 60) == pytest.approx(0.64)
+        assert self._lr_at(scheduler, optimizer, 99) == pytest.approx(0.64)
+
+    def test_total_steps_validated(self):
+        with pytest.raises(ValueError, match="total_steps"):
+            MultiStepWarmupScheduler(
+                torch.optim.SGD(nn.Linear(2, 2).parameters(), lr=1.0),
+                total_steps=0,
+            )

@@ -541,3 +541,53 @@ class TestFileLogging:
         finally:
             logger.handlers = previous_handlers
             logger.setLevel(previous_level)
+
+    @staticmethod
+    def _handler_kinds(logger):
+        import logging as logging_module
+        from logging.handlers import RotatingFileHandler
+
+        return [
+            "file" if isinstance(h, RotatingFileHandler) else "console"
+            if type(h) is logging_module.StreamHandler else "other"
+            for h in logger.handlers
+        ]
+
+    def test_console_setup_preserves_file_handler_in_both_orders(self, tmp_path):
+        # Regression: set_up_console_logging used to strip every handler
+        # except the ones its isinstance check was meant to remove —
+        # calling it after set_up_file_logging silently deleted the
+        # train.log handler (0-byte train.log, real pilot run).
+        import logging as logging_module
+
+        from autovision._logging import set_up_console_logging, set_up_file_logging
+
+        logger = logging_module.getLogger("autovision")
+        previous_level = logger.level
+        previous_handlers = logger.handlers[:]
+        try:
+            # Hermetic start: e2e tests elsewhere call the train command and
+            # leak handlers into the shared logger; this test pins the
+            # setup functions' own behavior from a clean slate.
+            logger.handlers = []
+            set_up_file_logging(tmp_path / "train.log")
+            set_up_console_logging()
+            kinds = self._handler_kinds(logger)
+            assert kinds.count("file") == 1, kinds
+            assert kinds.count("console") == 1, kinds
+
+            # And the reverse order must land in the same state.
+            logger.handlers = []
+            set_up_console_logging()
+            set_up_file_logging(tmp_path / "train.log")
+            kinds = self._handler_kinds(logger)
+            assert kinds.count("file") == 1, kinds
+            assert kinds.count("console") == 1, kinds
+
+            # Idempotence: a second console call must not stack handlers.
+            set_up_console_logging()
+            kinds = self._handler_kinds(logger)
+            assert kinds.count("console") == 1, kinds
+        finally:
+            logger.handlers = previous_handlers
+            logger.setLevel(previous_level)

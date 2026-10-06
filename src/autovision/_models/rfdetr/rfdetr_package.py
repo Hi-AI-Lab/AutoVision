@@ -5,15 +5,16 @@ Per framework policy (see the DINOv2/DINOv3 packages), RF-DETR is provided
 through ``transformers`` (``RfDetrModel``) instead of the Roboflow
 ``rfdetr`` package: HF models are plain ``nn.Module``\ s and the DINOv2
 backbone exposes multi-scale feature maps directly. transformers gained
-RF-DETR support recently (mid-2026), so this package is **gated**: it
+RF-DETR support in 5.9.0 (2026-05), so this package is **gated**: it
 auto-enables when the installed transformers exposes the RfDetr classes
 and degrades gracefully (empty model list, informative error) otherwise.
 
-Checkpoints are the converted RF-DETR family on the Hub
-(``stevenbucaille/rf-detr-*``, weight-compatible with the original
-Roboflow rf-detr library). Each model also has a ``-notpretrained``
-offline variant built locally from the config. The ``seg-preview``
-instance-segmentation variant is not listed (no converted checkpoint).
+Checkpoints are the official Roboflow conversions on the Hub
+(``Roboflow/rf-detr-*``). Each model also has a ``-notpretrained``
+offline variant built locally from the config. The ``seg-preview`` and
+other instance-segmentation variants are not listed: they load into
+``RfDetrForInstanceSegmentation``, not the bare ``RfDetrModel`` this
+package wraps.
 """
 
 from __future__ import annotations
@@ -32,7 +33,9 @@ __all__ = ["RFDETR_PACKAGE", "RFDETRPackage"]
 
 # All RF-DETR variants share the distilled DINOv2 backbone architecture;
 # variants differ in patch/window layout, input size and decoder depth
-# (per the stevenbucaille/rf-detr-* checkpoint configs).
+# (per the Roboflow/rf-detr-* checkpoint configs). The config derives
+# window_block_indexes from out_indices, so only the layout the config
+# cannot infer is tabulated here.
 _HIDDEN_SIZE = 384
 _NUM_HIDDEN_LAYERS = 12
 _NUM_ATTENTION_HEADS = 6
@@ -41,56 +44,51 @@ _IMAGE_SIZE = 224  # local untrained builds; divisible by patch*windows for ever
 # model name -> (HF checkpoint, decoder depth, backbone layout)
 _MODEL_INFO: dict[str, dict[str, Any]] = {
     "rf-detr-base": dict(
-        hf="stevenbucaille/rf-detr-base",
+        hf="Roboflow/rf-detr-base",
         decoder_layers=3,
         backbone=dict(
             patch_size=14,
             num_windows=4,
-            window_block_indexes=[0, 1, 3, 4, 6, 7, 9, 10],
             out_indices=[2, 5, 8, 11],
             out_features=["stage2", "stage5", "stage8", "stage11"],
         ),
     ),
     "rf-detr-nano": dict(
-        hf="stevenbucaille/rf-detr-nano",
+        hf="Roboflow/rf-detr-nano",
         decoder_layers=2,
         backbone=dict(
             patch_size=16,
             num_windows=2,
-            window_block_indexes=[0, 1, 2, 4, 5, 7, 8, 10, 11],
             out_indices=[3, 6, 9, 12],
             out_features=["stage3", "stage6", "stage9", "stage12"],
         ),
     ),
     "rf-detr-small": dict(
-        hf="stevenbucaille/rf-detr-small",
+        hf="Roboflow/rf-detr-small",
         decoder_layers=3,
         backbone=dict(
             patch_size=16,
             num_windows=2,
-            window_block_indexes=[0, 1, 2, 4, 5, 7, 8, 10, 11],
             out_indices=[3, 6, 9, 12],
             out_features=["stage3", "stage6", "stage9", "stage12"],
         ),
     ),
     "rf-detr-medium": dict(
-        hf="stevenbucaille/rf-detr-medium",
+        hf="Roboflow/rf-detr-medium",
         decoder_layers=4,
         backbone=dict(
             patch_size=16,
             num_windows=2,
-            window_block_indexes=[0, 1, 2, 4, 5, 7, 8, 10, 11],
             out_indices=[3, 6, 9, 12],
             out_features=["stage3", "stage6", "stage9", "stage12"],
         ),
     ),
     "rf-detr-large": dict(
-        hf="stevenbucaille/rf-detr-large",
+        hf="Roboflow/rf-detr-large",
         decoder_layers=4,
         backbone=dict(
             patch_size=16,
             num_windows=2,
-            window_block_indexes=[0, 1, 2, 4, 5, 7, 8, 10, 11],
             out_indices=[3, 6, 9, 12],
             out_features=["stage3", "stage6", "stage9", "stage12"],
         ),
@@ -101,9 +99,9 @@ _MODEL_INFO: dict[str, dict[str, Any]] = {
 def _rfdetr_classes() -> dict[str, Any] | None:
     """Live detection of RF-DETR support in the installed transformers.
 
-    Returns the class map or ``None`` when transformers is missing or too
-    old. Reads module attributes (not imports) so the check stays honest
-    across transformers versions with differing class spellings.
+    Returns the class map or ``None`` when transformers is missing or older
+    than 5.9. Reads module attributes (not imports) so the check stays
+    honest across transformers versions with differing class spellings.
     """
     try:
         transformers = importlib.import_module("transformers")
@@ -126,8 +124,8 @@ def _rfdetr_classes() -> dict[str, Any] | None:
 def _support_error(model_name: str) -> ImportError:
     return ImportError(
         f"RF-DETR model '{model_name}' requires a transformers version with "
-        f"RF-DETR support (classes RfDetrModel/RfDetrConfig). Upgrade: "
-        f"pip install -U 'autovision[transformers]'."
+        f"RF-DETR support (classes RfDetrModel/RfDetrConfig, transformers "
+        f">= 5.9). Upgrade: pip install -U 'autovision[rfdetr]'."
     )
 
 

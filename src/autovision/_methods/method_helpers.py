@@ -15,7 +15,7 @@ from autovision._methods.dinov2 import DINOv2
 from autovision._methods.dinov3 import DINOv3
 from autovision._methods.distillationv2 import DistillationV2
 from autovision._methods.distillationv3 import DistillationV3
-from autovision._methods.method import Method
+from autovision._methods.method import Method, prepare_teacher
 from autovision._methods.simclr import SimCLR
 from autovision._models._model_helpers import load_state_dict_compat
 
@@ -63,9 +63,9 @@ def get_teacher(method_args: Any, num_input_channels: int = 3) -> Any:
             method_args.teacher_weights, map_location="cpu", weights_only=True
         )
         load_state_dict_compat(teacher.get_model(), state_dict)
-    teacher.eval()
-    for param in teacher.parameters():
-        param.requires_grad_(False)
+    # eval + no grads + zeroed dropout/drop-path when the wrapper supports
+    # it (mirroring lightly-train's DistillationV3 get_teacher).
+    prepare_teacher(teacher)
     return teacher
 
 

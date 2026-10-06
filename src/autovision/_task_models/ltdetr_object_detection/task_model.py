@@ -99,6 +99,10 @@ class LTDETRObjectDetection(ONNXExportMixin, TaskModel):
         image_size: tuple[int, int] | None = None,
         decoder: Literal["rtdetrv2", "dfine", "auto"] = "auto",
         reg_max: int = 32,
+        reg_scale: float = 4.0,
+        enc_dim_feedforward: int | Literal["auto"] = "auto",
+        enc_expansion: float | Literal["auto"] = "auto",
+        enc_depth_mult: float | Literal["auto"] = "auto",
         hidden_dim: int | None = None,
         num_queries: int | None = None,
         dec_layers: int | None = None,
@@ -120,11 +124,17 @@ class LTDETRObjectDetection(ONNXExportMixin, TaskModel):
         # loader (weights_only=True), which rejects arbitrary objects —
         # snapshot the density/ssl configs as plain dicts; __init__
         # re-coerces dicts back into the args classes below, so the round
-        # trip is lossless.
+        # trip is lossless. Same for Path-valued args: the export safe
+        # loader (weights_only=True) rejects pathlib types, and this
+        # task model treats backbone_weights as a str either way.
         if isinstance(self._init_args.get("density"), LTDETRDensityArgs):
             self._init_args["density"] = self._init_args["density"].model_dump()
         if isinstance(self._init_args.get("ssl"), LTDETRSSLArgs):
             self._init_args["ssl"] = self._init_args["ssl"].model_dump()
+        if isinstance(self._init_args.get("backbone_weights"), pathlib.PurePath):
+            self._init_args["backbone_weights"] = str(
+                self._init_args["backbone_weights"]
+            )
         self.num_classes = num_classes
         self.num_top_queries = num_top_queries
         self.normalize = NormalizeArgs()
@@ -258,13 +268,33 @@ class LTDETRObjectDetection(ONNXExportMixin, TaskModel):
             # ECViT loads its backbone weights inside the wrapper.
             self._load_backbone_weights(backbone_weights)
 
+        # Encoder width knobs: "auto" follows the variant spec (the
+        # ConvNeXt specs carry the heavy baseline recipe — 2048/1.0/1.0);
+        # explicit values align with the official Dome-S "S" encoder
+        # (1024/0.5/0.34), a ~4-6x lighter randomly-initialized module.
+        enc_ffn = (
+            spec.enc_dim_feedforward
+            if enc_dim_feedforward == "auto"
+            else int(enc_dim_feedforward)
+        )
+        enc_exp = (
+            spec.enc_expansion
+            if enc_expansion == "auto"
+            else float(enc_expansion)
+        )
+        enc_depth = (
+            spec.enc_depth_mult
+            if enc_depth_mult == "auto"
+            else float(enc_depth_mult)
+        )
+
         if self._density_enabled:
             self.encoder = DomeHybridEncoder(
                 in_channels,
                 hidden_dim=hidden_dim,
-                dim_feedforward=spec.enc_dim_feedforward,
-                expansion=spec.enc_expansion,
-                depth_mult=spec.enc_depth_mult,
+                dim_feedforward=enc_ffn,
+                expansion=enc_exp,
+                depth_mult=enc_depth,
                 use_encoder_idx=[pyramid_levels - 1],
                 density=density,
             )
@@ -272,9 +302,9 @@ class LTDETRObjectDetection(ONNXExportMixin, TaskModel):
             self.encoder = HybridEncoder(
                 in_channels,
                 hidden_dim=hidden_dim,
-                dim_feedforward=spec.enc_dim_feedforward,
-                expansion=spec.enc_expansion,
-                depth_mult=spec.enc_depth_mult,
+                dim_feedforward=enc_ffn,
+                expansion=enc_exp,
+                depth_mult=enc_depth,
                 use_encoder_idx=[pyramid_levels - 1],
             )
         # Pyramid strides: 3-level [8, 16, 32]; 4-level prepends the
@@ -308,6 +338,7 @@ class LTDETRObjectDetection(ONNXExportMixin, TaskModel):
                 self.decoder: nn.Module = DomeDFINEv2Decoder(
                     **decoder_kwargs,
                     reg_max=reg_max,
+                    reg_scale=reg_scale,
                     min_num_select=density.resolved_min_num_select(num_queries),
                     max_num_select=density.max_num_select,
                     nms_iou_base=density.nms_iou_base,
@@ -317,6 +348,7 @@ class LTDETRObjectDetection(ONNXExportMixin, TaskModel):
                 self.decoder = DFINEv2Decoder(
                     **decoder_kwargs,
                     reg_max=reg_max,
+                    reg_scale=reg_scale,
                     ssl_candidate_features=self._ssl_candidates_mode,
                 )
         else:

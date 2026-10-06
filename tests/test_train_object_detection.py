@@ -1,6 +1,8 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
 """End-to-end tests: object detection finetuning -> artifacts -> resume -> load."""
 
+import json
+
 import pytest
 import torch
 
@@ -114,16 +116,33 @@ class TestTrainObjectDetection:
             model_args=model_args(), transform_args=transform_args(),
         )
         train_object_detection(out=tmp_path / "det3", steps=2, **common)
+        from autovision._checkpoint import Checkpoint
+
+        # The best-metric baseline rides in every checkpoint AND in a
+        # sidecar written at each best improvement (regression: a resume
+        # used to reset tracking and let a worse metric overwrite
+        # best.ckpt; the last.ckpt copy alone also lags its own final
+        # validation, hence the sidecar).
+        first_state = Checkpoint.from_path(
+            tmp_path / "det3" / "checkpoints" / "last.ckpt"
+        ).autovision.engine_state
+        assert "best_metric" in first_state
+        sidecar = tmp_path / "det3" / "checkpoints" / "best_metric.json"
+        assert sidecar.exists()
+        first_best = float(json.loads(sidecar.read_text())["best_metric"])
+
         result = train_object_detection(
             out=tmp_path / "det3", steps=4, resume_interrupted=True, **common
         )
         assert result.steps_run == 2  # continued, not restarted
-        from autovision._checkpoint import Checkpoint
-
         metadata = Checkpoint.from_path(
             tmp_path / "det3" / "checkpoints" / "last.ckpt"
         ).autovision
         assert metadata.epoch == 3  # final step index
+        # The resumed run restored the pre-resume baseline, so the tracked
+        # best can never drop below it.
+        final_best = float(json.loads(sidecar.read_text())["best_metric"])
+        assert final_best >= first_best
 
     def test_weights_only_checkpoint(self, tmp_path, coco):
         train_json, val_json, images_dir = coco

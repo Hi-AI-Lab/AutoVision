@@ -42,12 +42,13 @@ super-gradients = ["super-gradients>=3.6.1"]
 ultralytics = ["ultralytics>=8.1.0"]
 # DINOv2/DINOv3 and RF-DETR backbones via HuggingFace transformers (per
 # framework policy: prefer transformers over third-party/vendored model
-# code; see src/autovision/_models/rfdetr/). Both extras share one floor:
-# the RfDetr classes ship in recent transformers releases (mid-2026), and
-# the RF-DETR package gates on class presence at runtime, so a single
-# floor keeps every extra's promise true regardless of which is installed.
+# code; see src/autovision/_models/rfdetr/). The RF-DETR package gates on
+# class presence at runtime; its floor is transformers 5.9.0 (2026-05),
+# the first release shipping the RfDetr classes — verified by wheel
+# inspection (4.57–5.8 lack them), so only the rfdetr extra can promise
+# the classes are importable.
 transformers = ["transformers>=4.56"]
-rfdetr = ["transformers>=4.56"]
+rfdetr = ["transformers>=5.9"]
 # ONNX export pipeline (torch.export -> dynamo/legacy ONNX -> FP16 ->
 # onnxslim -> verification gates); also required by the deployment tests.
 export = ["onnx>=1.15", "onnxruntime>=1.17", "onnxslim>=0.1"]

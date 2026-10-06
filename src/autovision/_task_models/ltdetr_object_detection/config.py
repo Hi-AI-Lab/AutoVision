@@ -461,6 +461,11 @@ class LTDETRSSLArgs(PydanticConfig):
     #: mirrored object is the same object and its raw normalized-box IoU is
     #: ~0. Disable to restore the strict identity-alignment pairing.
     flip_invariant_pairing: bool = True
+    #: Feed matched instances whose cross-view counterpart failed validation
+    #: back into the pool as extra candidates (negatives under "unsup",
+    #: soft positives via label equality under "sup") instead of dropping
+    #: them — reclaims hard instances (design doc 14, D14).
+    use_unpaired_as_negatives: bool = True
     #: Weight λ_w of the IoU soft-alignment logit bias (positives only).
     iou_bias: float = Field(default=0.5, ge=0.0)
     #: Exponent on the alignment IoU before the log bias.
@@ -527,6 +532,7 @@ class LTDETRSSLArgs(PydanticConfig):
             iou_bias=self.iou_bias,
             iou_gamma=self.iou_gamma,
             flip_invariant_pairing=self.flip_invariant_pairing,
+            use_unpaired_as_negatives=self.use_unpaired_as_negatives,
             same_image_positive_only=self.same_image_positive_only,
             gather_distributed=self.gather_distributed,
             every_n_steps=self.every_n_steps,
@@ -555,8 +561,20 @@ class LTDETRObjectDetectionTrainArgs(TrainModelArgs, PydanticConfig):
     #: ("dfine" for the ECViT "v2" variants, else "rtdetrv2"). "dfine"
     #: swaps in the distributional box refinement head (FGL/DDF).
     decoder: Literal["rtdetrv2", "dfine", "auto"] = "auto"
-    #: D-FINE per-side bin resolution (``2 × reg_max + 1`` bins).
+    #: D-FINE per-side bin resolution (``reg_max + 1`` bins).
     reg_max: int = 32
+    #: D-FINE weighting-function curvature (official ``reg_scale``): bins
+    #: encode distances in ``w / reg_scale`` units, geometric spacing spans
+    #: ``±2 · 0.5 · reg_scale`` units (``±reg_scale × w`` of reach).
+    reg_scale: float = 4.0
+    #: HybridEncoder width knobs (official Dome-S "S" recipe: 1024 / 0.5 /
+    #: 0.34). ``"auto"`` follows the variant spec — the ConvNeXt specs
+    #: carry the heavy baseline values (2048 / 1.0 / 1.0), a ~4-6x larger
+    #: randomly-initialized encoder that measurably slows early
+    #: convergence on dense tiny-object benchmarks.
+    enc_dim_feedforward: int | Literal["auto"] = "auto"
+    enc_expansion: float | Literal["auto"] = "auto"
+    enc_depth_mult: float | Literal["auto"] = "auto"
 
     hidden_dim: int | Literal["auto"] = "auto"
     num_queries: int = 300
@@ -567,8 +585,17 @@ class LTDETRObjectDetectionTrainArgs(TrainModelArgs, PydanticConfig):
     num_denoising: int = 100
     label_noise_ratio: float = 0.5
     box_noise_scale: float = 1.0
+    #: D-FINE only: FGL weight on the denoising (``_dn_*``) branches.
+    #: ``None`` follows the main FGL weight (baseline parity). Dense
+    #: tiny-object batches (VisDrone) push CDN to a single group of
+    #: 2 × max-GT noised queries whose FGL residuals saturate the reg_max
+    #: bins — the dn FGL term then dominates the total loss (~40 % in the
+    #: 10-epoch pilot) without converging; lower it there.
+    dn_fgl_loss_weight: float | None = None
 
-    lr: float = 5e-4
+    #: "auto" follows the backbone-family recipe (baseline lightly-train
+    #: 0.17.0): DINOv2 ViT 1e-4, CNN 5e-4.
+    lr: float | Literal["auto"] = "auto"
     #: "auto" resolves to the per-variant recipe default (baseline: 0.05
     #: for small/tiny models, 0.0025 for the larger ECViT models).
     backbone_lr_factor: float | Literal["auto"] = "auto"
@@ -578,6 +605,17 @@ class LTDETRObjectDetectionTrainArgs(TrainModelArgs, PydanticConfig):
     lr_warmup_steps: int | Literal["auto"] = "auto"
     scheduler_flat_steps: int | Literal["auto"] = "auto"
     scheduler_no_aug_steps: int | Literal["auto"] = "auto"
+    #: LR schedule family. ``"flat_cosine"``: the baseline warmup → plateau
+    #: → cosine → restart-tail window. ``"multistep"``: the official
+    #: Dome/D-FINE recipe — linear warmup, then constant LR with ``gamma``
+    #: drops at ``lr_milestones`` fractions of the run (official: ×0.8 at
+    #: epochs 80/120 of 160, i.e. the LR never drops below 64 % of peak).
+    #: The multistep family is the measured-safe choice on dense
+    #: tiny-object benchmarks: deep cosine annealing plus the restart tail
+    #: degraded end-of-run mAP in the 10-epoch VisDrone pilots.
+    lr_scheduler: Literal["flat_cosine", "multistep", "linear", "auto"] = "auto"
+    lr_milestones: tuple[float, ...] | Literal["auto"] = "auto"
+    lr_gamma: float = 0.8
 
     use_ema_model: bool = True
     ema_momentum: float = 0.9999
@@ -611,13 +649,22 @@ class LTDETRObjectDetectionTrainArgs(TrainModelArgs, PydanticConfig):
         )
 
         key, spec = resolve_ltdetr_variant(f"ltdetr/{self.backbone}")
+        family_is_vit = spec.family == "vit"
         if self.hidden_dim == "auto":
             self.hidden_dim = spec.hidden_dim
         if self.dec_layers == "auto":
             self.dec_layers = spec.dec_layers
         if self.num_heads == "auto":
             self.num_heads = spec.dec_num_heads
-        if self.backbone_lr_factor == "auto":
+        if family_is_vit:
+            # DINOv2 ViT family recipe (baseline V2 args: lr 1e-4, factor
+            # 1e-2, linear schedule, warmup 2000). The spec table carries
+            # the CNN 0.05 factor — overridden here.
+            if self.backbone_lr_factor == "auto":
+                self.backbone_lr_factor = 1e-2
+            if self.lr_warmup_steps == "auto":
+                self.lr_warmup_steps = 2000
+        elif self.backbone_lr_factor == "auto":
             self.backbone_lr_factor = spec.backbone_lr_factor
         warmup, flat, no_aug = resolve_flat_cosine_windows(
             total_steps, train_num_batches, gradient_accumulation_steps
@@ -628,6 +675,21 @@ class LTDETRObjectDetectionTrainArgs(TrainModelArgs, PydanticConfig):
             self.scheduler_flat_steps = flat
         if self.scheduler_no_aug_steps == "auto":
             self.scheduler_no_aug_steps = no_aug
+        if self.lr_milestones == "auto":
+            # Official Dome-S ratio: ×0.8 at epochs 80/120 of 160.
+            self.lr_milestones = (0.5, 0.75)
+        if self.lr == "auto":
+            self.lr = 1e-4 if spec.family == "vit" else 5e-4
+        if self.lr_scheduler == "auto":
+            # DINOv2 ViT family trains with the linear recipe (warmup →
+            # constant); CNN families with flat-cosine (baseline defaults).
+            self.lr_scheduler = "linear" if spec.family == "vit" else "flat_cosine"
+        if self.enc_dim_feedforward == "auto":
+            self.enc_dim_feedforward = spec.enc_dim_feedforward
+        if self.enc_expansion == "auto":
+            self.enc_expansion = spec.enc_expansion
+        if self.enc_depth_mult == "auto":
+            self.enc_depth_mult = spec.enc_depth_mult
 
     def resolve_image_size(self) -> None:
         """Snap ``image_size`` to the backbone's patch grid (in place).

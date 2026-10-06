@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import math
 from typing import Any
 
 import torch
@@ -35,9 +36,15 @@ class ModelEMA:
     @torch.no_grad()
     def update(self, model: nn.Module) -> None:
         self.updates += 1
-        decay = min(self.decay, (1 + self.updates) / (10 + self.updates)) if (
-            self.updates <= self.warmup_steps
-        ) else self.decay
+        if self.warmup_steps > 0:
+            # Baseline exponential ramp: at step k the effective decay is
+            # decay * (1 - exp(-k / warmup_steps)) — a SLOW approach (at
+            # k = warmup the effective decay is still ~63% of target), so
+            # the EMA tracks recent weights early instead of averaging in
+            # initial ones.
+            decay = self.decay * (1 - math.exp(-self.updates / self.warmup_steps))
+        else:
+            decay = self.decay
         model_state: dict[str, Any] = model.state_dict()
         ema_state = self.model.state_dict()
         float_targets: list[torch.Tensor] = []
