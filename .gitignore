@@ -22,6 +22,7 @@ htmlcov/
 
 # Experiment run artifacts (checkpoints, exports, logs)
 runs/
+output/
 
 # Model / export artifacts
 *.pt

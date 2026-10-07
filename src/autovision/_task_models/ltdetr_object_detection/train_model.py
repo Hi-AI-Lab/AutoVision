@@ -78,9 +78,7 @@ class LTDETRObjectDetectionTrain(TrainModel):
             dec_layers=model_args.dec_layers
             if model_args.dec_layers != "auto"
             else None,
-            num_heads=model_args.num_heads
-            if model_args.num_heads != "auto"
-            else None,
+            num_heads=model_args.num_heads if model_args.num_heads != "auto" else None,
             num_top_queries=model_args.num_top_queries,
             num_denoising=model_args.num_denoising,
             label_noise_ratio=model_args.label_noise_ratio,
@@ -114,6 +112,13 @@ class LTDETRObjectDetectionTrain(TrainModel):
                 "ssl (per-object contrastive head) requires the D-FINE "
                 "decoder in v1; pass decoder='dfine' (design doc 14 §3.3)."
             )
+        # The SIoU swap (design doc 15) lives in the same D-FINE criterion;
+        # a non-dfine decoder with the flag set would silently train giou.
+        if model_args.box_regression_iou == "siou" and decoder != "dfine":
+            raise ValueError(
+                "box_regression_iou='siou' requires the D-FINE decoder "
+                "in v1; pass decoder='dfine' (design doc 15 §4.5)."
+            )
         if decoder == "dfine":
             self.criterion: RTDETRCriterionV2 | DFINECriterionV2 = DFINECriterionV2(
                 self.matcher,
@@ -131,6 +136,9 @@ class LTDETRObjectDetectionTrain(TrainModel):
                     density.count_underestimation_weight if density else 2.0
                 ),
                 ssl_params=ssl_params,
+                box_regression_iou=model_args.box_regression_iou,
+                siou_loss_coef=model_args.siou_loss_coef,
+                siou_theta=model_args.siou_theta,
             )
         else:
             self.criterion = RTDETRCriterionV2(self.matcher)
@@ -162,6 +170,11 @@ class LTDETRObjectDetectionTrain(TrainModel):
         # (per-image (query_count, gt_count)); consumed by compute_metrics
         # so the engine persists them (validation log_dict is dropped).
         self._val_query_stats: list[tuple[int, int]] = []
+        # Fraction of MWAS windows the adaptive mask selected, per val
+        # image — the gate-tightness readout: 1.0 means the density gate
+        # passes every window (random-init DeFE head), shrinking toward
+        # the dense-region fraction as the head converges (doc 13 §4.2).
+        self._val_window_ratios: list[float] = []
 
     # ── steps ───────────────────────────────────────────────────────────
     def training_step(self, batch: dict, step: int) -> TaskStepResult:
@@ -202,6 +215,8 @@ class LTDETRObjectDetectionTrain(TrainModel):
                 enc_meta=out.get("enc_meta"),
                 ssl_z1=out.get("ssl_z1"),
                 ssl_z2=out.get("ssl_z2"),
+                ssl_s1=out.get("ssl_s1"),
+                ssl_s2=out.get("ssl_s2"),
             )
         else:
             loss_dict = self.criterion(
@@ -227,7 +242,11 @@ class LTDETRObjectDetectionTrain(TrainModel):
         if ssl_stats:
             pool = float(ssl_stats.get("pool_size", 0.0))
             paired = float(ssl_stats.get("paired_size", 0.0))
-            ssl_view = self.criterion.ssl_params.view if self.criterion.ssl_params else "two_crop"
+            ssl_view = (
+                self.criterion.ssl_params.view
+                if self.criterion.ssl_params
+                else "two_crop"
+            )
             denominator = max(pool / 2.0 if ssl_view == "two_crop" else pool, 1.0)
             log_dict["ssl_pool_size"] = pool
             log_dict["ssl_paired_ratio"] = paired / denominator
@@ -264,6 +283,12 @@ class LTDETRObjectDetectionTrain(TrainModel):
             outputs = (raw["pred_logits"], raw["pred_boxes"])
             query_mask = raw.get("query_valid_mask")
             queries_num = raw.get("batch_queries_num")
+            defe_info = raw.get("defe_info")
+            if isinstance(defe_info, dict) and "window_mask" in defe_info:
+                window_mask = defe_info["window_mask"]
+                self._val_window_ratios.extend(
+                    window_mask.float().mean(dim=(1, 2)).detach().tolist()
+                )
         else:
             outputs = model(x)
         decoded = model.postprocess(
@@ -352,10 +377,17 @@ class LTDETRObjectDetectionTrain(TrainModel):
         if isinstance(self.criterion, DFINECriterionV2):
             # Mirrors the note on validation_step: the val loss skips the
             # train-time distributional terms, so the two totals in the
-            # metrics file are different scopes by construction.
+            # metrics file are different scopes by construction. The IoU
+            # term name follows the criterion's box-loss swap (doc 15) so
+            # the note never goes stale again.
+            iou_name = (
+                "SIoU"
+                if getattr(self.criterion, "box_regression_iou", "giou") == "siou"
+                else "GIoU"
+            )
             footer = (
-                "note: val_loss covers VFL/bbox/GIoU only (FGL/DDF and the "
-                "denoising/aux branches are train-time) — not comparable "
+                f"note: val_loss covers VFL/bbox/{iou_name} only (FGL/DDF and "
+                "the denoising/aux branches are train-time) — not comparable "
                 "to train_loss"
             )
         return format_detection_validation_report(
@@ -383,6 +415,11 @@ class LTDETRObjectDetectionTrain(TrainModel):
                 sum(n >= g for n, g in stats) / max(len(stats), 1)
             )
             self._val_query_stats.clear()
+        if split == "val" and self._val_window_ratios:
+            metrics["dome_window_ratio"] = float(
+                sum(self._val_window_ratios) / max(len(self._val_window_ratios), 1)
+            )
+            self._val_window_ratios.clear()
         return {f"{split}_metric/{name}": value for name, value in metrics.items()}
 
     def reset_metrics(self, split: str) -> None:
@@ -391,6 +428,7 @@ class LTDETRObjectDetectionTrain(TrainModel):
             evaluator.reset()
         if split == "val":
             self._val_query_stats.clear()
+            self._val_window_ratios.clear()
 
     def export_metric_state(self, split: str) -> dict | None:
         evaluator = self._evaluators.get(split)
@@ -401,6 +439,7 @@ class LTDETRObjectDetectionTrain(TrainModel):
             return {
                 "evaluator": evaluator_state,
                 "dome_query_stats": list(self._val_query_stats),
+                "dome_window_ratios": list(self._val_window_ratios),
             }
         return evaluator_state
 
@@ -411,6 +450,7 @@ class LTDETRObjectDetectionTrain(TrainModel):
         if split == "val" and isinstance(state, dict) and "evaluator" in state:
             evaluator_state = state.get("evaluator")
             self._val_query_stats.extend(state.get("dome_query_stats", []))
+            self._val_window_ratios.extend(state.get("dome_window_ratios", []))
         evaluator = self._evaluators.setdefault(
             split, COCOMAPEvaluator(self.categories, max_dets=self._max_dets)
         )
@@ -503,9 +543,7 @@ class LTDETRObjectDetectionTrain(TrainModel):
         # encoder/decoder), so it needs its own explicit group at the base
         # LR — mirroring RF-DETR-SSL, which assigns the head the base LR.
         if getattr(self.model, "ssl_head", None) is not None:
-            ssl_all = [
-                p for p in self.model.ssl_head.parameters() if p.requires_grad
-            ]
+            ssl_all = [p for p in self.model.ssl_head.parameters() if p.requires_grad]
             ssl_wd = [p for p in ssl_all if id(p) not in params_no_wd]
             ssl_no_wd = [p for p in ssl_all if id(p) in params_no_wd]
             if ssl_wd:
@@ -521,7 +559,10 @@ class LTDETRObjectDetectionTrain(TrainModel):
                 )
 
         optimizer = torch.optim.AdamW(
-            param_groups, lr=lr, betas=args.optimizer_betas, weight_decay=args.weight_decay
+            param_groups,
+            lr=lr,
+            betas=args.optimizer_betas,
+            weight_decay=args.weight_decay,
         )
         if args.lr_scheduler == "linear":
             # Baseline DINOv2 recipe: warmup then constant.
@@ -578,7 +619,9 @@ class LTDETRObjectDetectionTrain(TrainModel):
         """
         own = self.state_dict()
         missing_ssl = {
-            key: value for key, value in own.items() if self._is_ssl_head_key(key) and key not in incoming
+            key: value
+            for key, value in own.items()
+            if self._is_ssl_head_key(key) and key not in incoming
         }
         if missing_ssl:
             incoming = {**incoming, **missing_ssl}
@@ -597,7 +640,9 @@ class LTDETRObjectDetectionTrain(TrainModel):
             for key, value in incoming.items()
             if not (self._is_ssl_head_key(key) and key not in own_keys)
         }
-        return super().load_state_dict(self._fill_missing_ssl_keys(incoming), strict=strict, **kwargs)
+        return super().load_state_dict(
+            self._fill_missing_ssl_keys(incoming), strict=strict, **kwargs
+        )
 
     def on_save_checkpoint(self, checkpoint: dict) -> None:
         if self.ema_model is not None:

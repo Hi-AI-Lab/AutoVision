@@ -183,3 +183,43 @@ class TestTrainObjectDetection:
                 steps=2, batch_size=4, num_workers=0,
                 model_args=model_args(), transform_args=transform_args(),
             )
+
+
+class TestEvalMaxDets:
+    """eval_max_dets flows into the COCO evaluator (dense datasets need 500)."""
+
+    def test_rtdetr_wiring(self, monkeypatch):
+        from autovision._metrics.map_evaluator import COCOMAPEvaluator
+        from autovision._task_models.rtdetr_object_detection.config import (
+            RTDETRObjectDetectionTrainArgs,
+        )
+        from autovision._task_models.rtdetr_object_detection.train_model import (
+            RTDETRObjectDetectionTrain,
+        )
+
+        captured: dict[str, int] = {}
+        real = COCOMAPEvaluator
+
+        def spy(categories, max_dets=100):
+            captured["max_dets"] = max_dets
+            return real(categories, max_dets=max_dets)
+
+        monkeypatch.setattr(
+            "autovision._task_models.rtdetr_object_detection.train_model.COCOMAPEvaluator",
+            spy,
+        )
+        args = RTDETRObjectDetectionTrainArgs(
+            num_classes=2,
+            backbone="torchvision/resnet18",
+            image_size=(64, 64),
+            hidden_dim=32,
+            num_queries=10,
+            num_top_queries=10,
+            eval_max_dets=500,
+        )
+        train_model = RTDETRObjectDetectionTrain(args)
+        train_model.set_categories({0: "cat", 1: "dog"})
+        probe = real({0: "cat", 1: "dog"})
+        train_model.merge_metric_state("val", probe.export_state())
+        assert captured["max_dets"] == 500
+        assert train_model._evaluators["val"].max_dets == 500

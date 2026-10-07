@@ -77,7 +77,7 @@ class TestPackaging:
         config = tomllib.loads((ROOT / "pyproject.toml").read_text())
         extras = config["project"]["optional-dependencies"]
         for name in ("tensorboard", "mlflow", "wandb", "bitsandbytes",
-                     "ultralytics", "transformers", "rfdetr", "timm"):
+                     "ultralytics", "transformers", "rfdetr", "deimv2", "timm"):
             assert name in extras, f"extra '{name}' missing"
 
     def test_public_api_surface(self):

@@ -15,7 +15,23 @@ from autovision._task_models.object_detection_components.box_ops import (
     generalized_box_iou_loss,
 )
 
-__all__ = ["HungarianMatcher"]
+__all__ = ["HungarianMatcher", "indices_to_device"]
+
+
+def indices_to_device(
+    indices: list[tuple[torch.Tensor, torch.Tensor]], device: torch.device
+) -> list[tuple[torch.Tensor, torch.Tensor]]:
+    """Move per-image match indices to *device* (host→device, once).
+
+    The matcher returns CPU tensors (scipy). Downstream losses index CUDA
+    tensors with them — every such advanced-indexing op then pays a
+    synchronous host→device copy. Hoisting once per matcher call makes
+    every consumer (VFL/box/FGL/DDF loops) sync-free.
+    """
+    return [
+        (src.to(device, non_blocking=True), dst.to(device, non_blocking=True))
+        for src, dst in indices
+    ]
 
 
 @torch.no_grad()
@@ -30,6 +46,13 @@ def forward_match(
     ``outputs["pred_boxes"]: (B, num_queries, 4)`` normalized cxcywh.
     ``targets[i]["boxes"]: (n_i, 4)`` cxcywh, ``targets[i]["labels"]: (n_i,)``.
     Returns per-image ``(query_indices, target_indices)`` tensors.
+
+    The cost matrices are built on the accelerator and moved to the host in
+    ONE bulk transfer for the whole batch: a per-image ``.cpu()`` would
+    stall the CUDA pipeline once per image (the criterion runs several
+    matcher passes per training step), while scipy still assigns per image
+    — a block-diagonal batched assignment would be O((Σn)³) instead of
+    Σ O(n³). Assignments are bit-identical to the per-image transfer.
     """
     batch_logits = outputs["pred_logits"]
     batch_boxes = outputs["pred_boxes"]
@@ -37,7 +60,9 @@ def forward_match(
     batch_boxes = torch.nan_to_num(batch_boxes, nan=0.0, posinf=1.0, neginf=0.0).clamp(
         min=0.0, max=1.0
     )
-    indices = []
+    indices: list[tuple[torch.Tensor, torch.Tensor] | None] = []
+    costs: list[torch.Tensor] = []
+    sizes: list[int] = []
     for batch_index in range(batch_logits.shape[0]):
         target = targets[batch_index]
         if target["boxes"].numel() == 0:
@@ -81,13 +106,24 @@ def forward_match(
             + matcher.cost_giou * giou_cost
         )
         cost = torch.nan_to_num(cost, nan=1.0)
-        rows, cols = linear_sum_assignment(cost.detach().cpu().numpy())
-        indices.append(
-            (
+        costs.append(cost)
+        sizes.append(cost.numel())
+        indices.append(None)  # placeholder keeps batch ordering
+    if costs:
+        # shapes are static metadata — only this transfer waits on the GPU
+        flat = torch.cat([cost.reshape(-1) for cost in costs]).cpu()
+        for slot, cost_cpu in zip(
+            (i for i, entry in enumerate(indices) if entry is None),
+            flat.split(sizes),
+        ):
+            target = targets[slot]
+            rows, cols = linear_sum_assignment(
+                cost_cpu.reshape(-1, target["boxes"].shape[0]).numpy()
+            )
+            indices[slot] = (
                 torch.as_tensor(rows, dtype=torch.int64),
                 torch.as_tensor(cols, dtype=torch.int64),
             )
-        )
     return indices
 
 

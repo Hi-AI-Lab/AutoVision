@@ -85,6 +85,32 @@ def _build_ecvit_backbone(
     return ECViTModelWrapper(spec.backbone_name, weights_path=backbone_weights)
 
 
+def _relabel_prefix_drift(state: dict, target: torch.nn.Module) -> dict:
+    """Absorb cross-version backbone state-dict key renames.
+
+    External ``backbone_weights`` files are converted against one
+    transformers layout and consumed under another (5.19 moved the
+    DINOv3-ConvNeXt weights under a ``model.`` prefix while the final
+    ``layer_norm`` stayed top-level). Applied ONLY when it explains every
+    file key — a pure key-space rename; tensors are never touched, and
+    any unexplainable key returns the state unchanged so the caller's
+    strict check reports the raw names.
+    """
+    expected = target.state_dict().keys()
+    expected_set = set(expected)
+    if set(state) == expected_set:
+        return state
+    relabeled = {}
+    for key, value in state.items():
+        if key in expected_set:
+            relabeled[key] = value
+        elif f"model.{key}" in expected_set:
+            relabeled[f"model.{key}"] = value
+        else:
+            return state
+    return relabeled
+
+
 class LTDETRObjectDetection(ONNXExportMixin, TaskModel):
     """SSL-backbone LT-DETR detector (three-stage inference contract)."""
 
@@ -119,7 +145,9 @@ class LTDETRObjectDetection(ONNXExportMixin, TaskModel):
         ssl: LTDETRSSLArgs | dict | None = None,
         **kwargs: Any,
     ) -> None:
-        super().__init__(init_args=locals(), ignore_args={"load_weights", "kwargs", "self"})
+        super().__init__(
+            init_args=locals(), ignore_args={"load_weights", "kwargs", "self"}
+        )
         # Exported checkpoints are deserialized with the pickle-free safe
         # loader (weights_only=True), which rejects arbitrary objects —
         # snapshot the density/ssl configs as plain dicts; __init__
@@ -167,9 +195,7 @@ class LTDETRObjectDetection(ONNXExportMixin, TaskModel):
         # Density-guided branch (Dome-DETR port). ``None`` keeps the
         # baseline contract bit-for-bit: no dome modules are constructed.
         if pyramid_levels not in (3, 4):
-            raise ValueError(
-                f"pyramid_levels must be 3 or 4, got {pyramid_levels}."
-            )
+            raise ValueError(f"pyramid_levels must be 3 or 4, got {pyramid_levels}.")
         if pyramid_levels == 4 and spec.family != "convnext":
             raise ValueError(
                 f"pyramid_levels=4 needs a ConvNeXt-family backbone (the "
@@ -278,14 +304,10 @@ class LTDETRObjectDetection(ONNXExportMixin, TaskModel):
             else int(enc_dim_feedforward)
         )
         enc_exp = (
-            spec.enc_expansion
-            if enc_expansion == "auto"
-            else float(enc_expansion)
+            spec.enc_expansion if enc_expansion == "auto" else float(enc_expansion)
         )
         enc_depth = (
-            spec.enc_depth_mult
-            if enc_depth_mult == "auto"
-            else float(enc_depth_mult)
+            spec.enc_depth_mult if enc_depth_mult == "auto" else float(enc_depth_mult)
         )
 
         if self._density_enabled:
@@ -359,6 +381,7 @@ class LTDETRObjectDetection(ONNXExportMixin, TaskModel):
         # ssl-enabled model and the baseline model carry IDENTICAL
         # backbone/encoder/decoder weights (bit-for-bit eval contract).
         self.ssl_head: nn.Module | None = None
+        self._ssl_sigreg = ssl is not None and ssl.sigreg_coef > 0
         if ssl is not None and ssl.mode != "off":
             self.ssl_head = SSLProjectionHead(
                 hidden_dim=hidden_dim,
@@ -392,6 +415,7 @@ class LTDETRObjectDetection(ONNXExportMixin, TaskModel):
         if isinstance(state, dict) and "state_dict" in state:
             state = state["state_dict"]
         target = self.backbone.backbone_model
+        state = _relabel_prefix_drift(state, target)
         incompatible = target.load_state_dict(state, strict=False)
         if incompatible.unexpected_keys:
             raise ValueError(
@@ -449,8 +473,16 @@ class LTDETRObjectDetection(ONNXExportMixin, TaskModel):
                         "mode requires the D-FINE decoder family "
                         "(design doc 14 §4.10)."
                     )
-                out["ssl_z1"] = self.ssl_head(candidate_features)
-                out["ssl_z2"] = self.ssl_head(candidate_features)
+                if self._ssl_sigreg:
+                    out["ssl_z1"], out["ssl_s1"] = self.ssl_head.forward_with_raw(
+                        candidate_features
+                    )
+                    out["ssl_z2"], out["ssl_s2"] = self.ssl_head.forward_with_raw(
+                        candidate_features
+                    )
+                else:
+                    out["ssl_z1"] = self.ssl_head(candidate_features)
+                    out["ssl_z2"] = self.ssl_head(candidate_features)
             elif self.training:
                 # Two independent dropout draws through the projection head
                 # give the two views of every query; the criterion selects
@@ -462,8 +494,20 @@ class LTDETRObjectDetection(ONNXExportMixin, TaskModel):
                         "query_features; the SSL head requires the D-FINE "
                         "decoder family (design doc 14 §4.3)."
                     )
-                out["ssl_z1"] = self.ssl_head(query_features)
-                out["ssl_z2"] = self.ssl_head(query_features)
+                if self._ssl_sigreg:
+                    # SIGReg (design doc 16 R1-A1): also emit the RAW
+                    # pre-normalization projector outputs — the unit-sphere
+                    # sample can never look Gaussian, so the distribution
+                    # test must see the raw projector space.
+                    out["ssl_z1"], out["ssl_s1"] = self.ssl_head.forward_with_raw(
+                        query_features
+                    )
+                    out["ssl_z2"], out["ssl_s2"] = self.ssl_head.forward_with_raw(
+                        query_features
+                    )
+                else:
+                    out["ssl_z1"] = self.ssl_head(query_features)
+                    out["ssl_z2"] = self.ssl_head(query_features)
         return out
 
     # deploy(): inherited from TaskModel — it recursively calls
@@ -541,12 +585,12 @@ def _dinov3_supported() -> bool:
 
         # transformers ships the classes as ``DINOv3*`` (4.x lazy exports
         # and 5.x alike); keep the ``Dinov3*`` fallbacks for older layouts.
-        vit = getattr(
-            transformers, "DINOv3ViTModel", None
-        ) or getattr(transformers, "Dinov3ViTModel", None)
-        convnext = getattr(
-            transformers, "DINOv3ConvNextModel", None
-        ) or getattr(transformers, "Dinov3ConvNextModel", None)
+        vit = getattr(transformers, "DINOv3ViTModel", None) or getattr(
+            transformers, "Dinov3ViTModel", None
+        )
+        convnext = getattr(transformers, "DINOv3ConvNextModel", None) or getattr(
+            transformers, "Dinov3ConvNextModel", None
+        )
         return vit is not None and convnext is not None
     except ImportError:
         return False

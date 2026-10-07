@@ -34,6 +34,8 @@ from autovision._models.weight_verification import (  # noqa: E402
 
 
 def pin_all(repo_filter: str | None) -> dict:
+    from dataclasses import replace
+
     from huggingface_hub import HfApi
 
     manifest = dict(weight_hashes.WEIGHT_MANIFEST)
@@ -50,10 +52,8 @@ def pin_all(repo_filter: str | None) -> dict:
         if not hashes:
             print("  WARNING: no LFS weight files found; leaving unpinned.")
             continue
-        manifest[repo_id] = type(artifact)(
-            repo_id=artifact.repo_id,
-            license=artifact.license,
-            source=artifact.source,
+        manifest[repo_id] = replace(
+            artifact,
             revision=revision,
             sha256=dict(hashes),
         )

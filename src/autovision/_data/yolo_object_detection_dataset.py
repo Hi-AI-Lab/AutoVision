@@ -51,10 +51,13 @@ class YOLOObjectDetectionDataArgs(BaseModel):
         return self
 
     def resolve_data_paths(self, base_dir: Path | None = None) -> None:
-        if base_dir is None:
-            return
-        if not self.path.is_absolute():
+        # Relative splits anchor to `path` (Ultralytics layout) even when
+        # invoked with a dict payload (base_dir is only set for config
+        # files, where it anchors `path` itself first).
+        if base_dir is not None and not self.path.is_absolute():
             self.path = base_dir / self.path
+        if not self.path.is_absolute():
+            return
         for name in ("train", "val"):
             path: Path = getattr(self, name)
             if not path.is_absolute():

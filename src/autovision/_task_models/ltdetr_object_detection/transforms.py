@@ -66,9 +66,7 @@ def build_ltdetr_train_transform_args(
         "image_size": tuple(image_size),
         "mosaic_prob": mosaic_prob,
         "scale_jitter": {
-            "sizes": ltdetr_scale_jitter_sizes(
-                tuple(image_size), 2 * spec.patch_size
-            ),
+            "sizes": ltdetr_scale_jitter_sizes(tuple(image_size), 2 * spec.patch_size),
             "step_stop": "auto",
         },
         **(overrides or {}),

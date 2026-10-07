@@ -129,9 +129,9 @@ class RTDETRDetectionCollateFunction:
                 if x2 - x1 < 2 or y2 - y1 < 2:
                     continue
                 src = images[src_index]
-                images[image_index][:, y1:y2, x1:x2] = beta * image[
-                    :, y1:y2, x1:x2
-                ] + (1.0 - beta) * src[:, y1:y2, x1:x2]
+                images[image_index][:, y1:y2, x1:x2] = (
+                    beta * image[:, y1:y2, x1:x2] + (1.0 - beta) * src[:, y1:y2, x1:x2]
+                )
                 boxes_list[image_index] = torch.cat(
                     [
                         boxes_list[image_index],
@@ -184,8 +184,10 @@ class RTDETRDetectionCollateFunction:
             classes: torch.Tensor = item["classes"]
             if jitter_size is not None:
                 image = torch.nn.functional.interpolate(
-                    image[None], size=(jitter_size, jitter_size),
-                    mode="bilinear", align_corners=False,
+                    image[None],
+                    size=(jitter_size, jitter_size),
+                    mode="bilinear",
+                    align_corners=False,
                 )[0]
                 # Normalized coordinates are invariant under full-frame scaling.
             images.append(image)
@@ -274,7 +276,9 @@ class TwoViewDetectionCollateFunction:
     def step(self) -> int:
         return self.base.step
 
-    def __call__(self, batch: list[tuple[dict[str, Any], dict[str, Any]]]) -> dict[str, Any]:
+    def __call__(
+        self, batch: list[tuple[dict[str, Any], dict[str, Any]]]
+    ) -> dict[str, Any]:
         # View-major flattening (SimCSE convention): all view-1 items first,
         # then all view-2 items — row r and row r + B share the source
         # image, which is the boundary the SSL criterion splits on.

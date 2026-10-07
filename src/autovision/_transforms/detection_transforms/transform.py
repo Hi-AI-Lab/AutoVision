@@ -23,6 +23,10 @@ from torchvision import tv_tensors
 from torchvision.transforms import v2
 from torchvision.transforms.v2 import functional as TF
 
+from autovision._transforms.detection_transforms.box_aware_eraser import (
+    erase_background,
+)
+
 __all__ = ["RTDETRDetectionTransform", "StepScheduledCompose"]
 
 
@@ -84,9 +88,21 @@ class StepScheduledCompose:
                 getattr(args, "mosaic_step_start", None),
                 getattr(args, "mosaic_step_stop", None),
             ),
-            is_active(args.photometric_distort_prob, args.photometric_step_start, args.photometric_step_stop),
-            is_active(args.random_zoom_out_prob, args.zoom_out_step_start, args.zoom_out_step_stop),
-            is_active(args.random_iou_crop_prob, args.iou_crop_step_start, args.iou_crop_step_stop),
+            is_active(
+                args.photometric_distort_prob,
+                args.photometric_step_start,
+                args.photometric_step_stop,
+            ),
+            is_active(
+                args.random_zoom_out_prob,
+                args.zoom_out_step_start,
+                args.zoom_out_step_stop,
+            ),
+            is_active(
+                args.random_iou_crop_prob,
+                args.iou_crop_step_start,
+                args.iou_crop_step_stop,
+            ),
         )
 
     def set_step(self, step: int) -> None:
@@ -168,9 +184,7 @@ class RTDETRDetectionTransform:
         tiles = [self._clone_sample(item), *donors]
         random.shuffle(tiles)
 
-        canvas = torch.zeros(
-            (3, 2 * tile, 2 * tile), dtype=tiles[0]["image"].dtype
-        )
+        canvas = torch.zeros((3, 2 * tile, 2 * tile), dtype=tiles[0]["image"].dtype)
         boxes_out: list[torch.Tensor] = []
         classes_out: list[torch.Tensor] = []
         for index, sample in enumerate(tiles):
@@ -200,7 +214,9 @@ class RTDETRDetectionTransform:
 
         if boxes_out:
             merged = tv_tensors.BoundingBoxes(
-                torch.cat(boxes_out, dim=0), format="XYXY", canvas_size=(2 * tile, 2 * tile)
+                torch.cat(boxes_out, dim=0),
+                format="XYXY",
+                canvas_size=(2 * tile, 2 * tile),
             )
             merged_classes = torch.cat(classes_out, dim=0)
         else:
@@ -248,10 +264,30 @@ class RTDETRDetectionTransform:
         cy = (boxes_out[:, 1] + boxes_out[:, 3]) / 2 / height
         w = (boxes_out[:, 2] - boxes_out[:, 0]) / width
         h = (boxes_out[:, 3] - boxes_out[:, 1]) / height
+        bboxes_norm = torch.stack([cx, cy, w, h], dim=-1)
+
+        # Box-aware background erasure (train views only — the val recipe
+        # clears random_erase_prob): per-view coin flip, matching the
+        # rf-detr-ssl-v2 dataset wrapper's per-view sampling semantics.
+        erase_prob = getattr(self.transform_args, "random_erase_prob", None)
+        erase_stop = getattr(self.transform_args, "random_erase_step_stop", None)
+        # Step gate (Dome aug-stop cadence): an unresolved "auto" or None
+        # keeps the constant ratio; a resolved int closes the window.
+        step_active = not isinstance(erase_stop, int) or self.compose.step < erase_stop
+        if erase_prob is not None and step_active and random.random() < erase_prob:
+            image_out = erase_background(
+                image_out,
+                bboxes_norm,
+                self.transform_args.random_erase_ratio,
+                padding=self.transform_args.random_erase_padding,
+                cell=self.transform_args.random_erase_cell,
+                interior=self.transform_args.random_erase_interior,
+                min_keep=self.transform_args.random_erase_min_keep,
+            )
         return {
             "image_path": item["image_path"],
             "image": image_out,
-            "bboxes": torch.stack([cx, cy, w, h], dim=-1),
+            "bboxes": bboxes_norm,
             "classes": labels_out,
             "original_size": item["original_size"],
         }
@@ -270,6 +306,7 @@ def build_val_transform_args(train_args):
     val_args.random_zoom_out_prob = None
     val_args.random_iou_crop_prob = None
     val_args.mosaic_prob = None
+    val_args.random_erase_prob = None
     val_args.horizontal_flip_prob = 0.0
     val_args.vertical_flip_prob = 0.0
     val_args.scale_jitter = None

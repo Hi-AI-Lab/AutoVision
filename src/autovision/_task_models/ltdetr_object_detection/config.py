@@ -478,6 +478,17 @@ class LTDETRSSLArgs(PydanticConfig):
     #: gradient frequency only — it does NOT reduce the doubled two_crop
     #: pipeline compute (design doc 14 §4.4).
     every_n_steps: int = Field(default=1, ge=1)
+    #: SIGReg distribution regularizer (design doc 16, LeVJEPA R1-A1):
+    #: a third loss leg on the RAW projector outputs of the matched pool.
+    #: 0 disables it. Requires mode != "off", view == "two_crop" and
+    #: instance_source == "matched_gt". Reference finding: SIGReg mainly
+    #: buys λ_ssl robustness (E2: λ=1.0 no longer collapses) rather than
+    #: raw mAP.
+    sigreg_coef: float = Field(default=0.0, ge=0.0)
+    #: Random unit directions per SIGReg evaluation (resampled each step).
+    sigreg_slices: int = Field(default=1024, ge=1)
+    #: Trapezoidal quadrature knots for the Epps–Pulley integral.
+    sigreg_knots: int = Field(default=17, ge=5)
     #: Instance pool source. "matched_gt" = the final Hungarian match
     #: (auxiliary objective alongside the detection losses).
     #: "encoder_candidates" = the decoder's top-k candidate features —
@@ -519,6 +530,27 @@ class LTDETRSSLArgs(PydanticConfig):
                     "ssl every_n_steps has no effect with "
                     "instance_source='encoder_candidates'; use 1."
                 )
+            if self.sigreg_coef > 0:
+                # SIGReg (design doc 16 R1-A1) rides the matched-pool taps,
+                # which only exist for the auxiliary objective.
+                raise ValueError(
+                    "ssl sigreg_coef>0 requires "
+                    "instance_source='matched_gt' (encoder_candidates has "
+                    "no Hungarian match to pool from)."
+                )
+        if self.sigreg_coef > 0:
+            if self.mode == "off":
+                raise ValueError(
+                    "ssl sigreg_coef>0 requires an active mode "
+                    "(mode='off' builds the head for nobody)."
+                )
+            if self.view != "two_crop":
+                # v1 scope (reference risk table): the SIGReg pool is the
+                # two_crop matched pool; the dropout view shares one query
+                # set, where the statistic adds nothing over dropout itself.
+                raise ValueError(
+                    "ssl sigreg_coef>0 requires view='two_crop' (v1 scope)."
+                )
         return self
 
     def to_ssl_params(self) -> SSLParams:
@@ -537,6 +569,9 @@ class LTDETRSSLArgs(PydanticConfig):
             gather_distributed=self.gather_distributed,
             every_n_steps=self.every_n_steps,
             instance_source=self.instance_source,
+            sigreg_coef=self.sigreg_coef,
+            sigreg_slices=self.sigreg_slices,
+            sigreg_knots=self.sigreg_knots,
         )
 
 
@@ -592,6 +627,19 @@ class LTDETRObjectDetectionTrainArgs(TrainModelArgs, PydanticConfig):
     #: bins — the dn FGL term then dominates the total loss (~40 % in the
     #: 10-epoch pilot) without converging; lower it there.
     dn_fgl_loss_weight: float | None = None
+
+    #: IoU term of the supervised box loss (design doc 15, D-FINE decoder
+    #: only). "giou" keeps the upstream 1−GIoU emission; "siou" emits
+    #: loss_siou instead (Scylla-IoU, arXiv:2205.12740) — mutually
+    #: exclusive emissions, matcher cost untouched. Single-variable
+    #: ablation switch, NOT a default improvement (expected gain is
+    #: noise-level; design doc 15 §1.3).
+    box_regression_iou: Literal["giou", "siou"] = "giou"
+    #: Weight of loss_siou in siou mode; None inherits the loss_giou weight
+    #: (E0 probe: loss-scale ratio 0.953 on VisDrone — no down-scaling needed).
+    siou_loss_coef: float | None = Field(default=None, ge=0.0)
+    #: SIoU shape-cost exponent (paper experience value 4; no per-dataset search).
+    siou_theta: float = Field(default=4.0, gt=0.0)
 
     #: "auto" follows the backbone-family recipe (baseline lightly-train
     #: 0.17.0): DINOv2 ViT 1e-4, CNN 5e-4.

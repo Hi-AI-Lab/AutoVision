@@ -73,7 +73,12 @@ class SpatialPriorModule(Module):
         self.conv2 = Sequential(
             *[
                 Conv2d(
-                    inplanes, 2 * inplanes, kernel_size=3, stride=2, padding=1, bias=False
+                    inplanes,
+                    2 * inplanes,
+                    kernel_size=3,
+                    stride=2,
+                    padding=1,
+                    bias=False,
                 ),
                 SyncBatchNorm(2 * inplanes),
             ]
@@ -175,7 +180,11 @@ class ViTDetectionBackbone(Module):
             ]
         )
         self.norms = ModuleList(
-            [SyncBatchNorm(hidden_dim), SyncBatchNorm(hidden_dim), SyncBatchNorm(hidden_dim)]
+            [
+                SyncBatchNorm(hidden_dim),
+                SyncBatchNorm(hidden_dim),
+                SyncBatchNorm(hidden_dim),
+            ]
         )
 
     @property
@@ -220,7 +229,10 @@ class ViTDetectionBackbone(Module):
 
         resized_feats = [
             F.interpolate(
-                sem_feat["features"], size=list(size), mode="bilinear", align_corners=False
+                sem_feat["features"],
+                size=list(size),
+                mode="bilinear",
+                align_corners=False,
             )
             for sem_feat, size in zip(sem_feats, sizes)
         ]
@@ -281,8 +293,7 @@ class ConvNeXtDetectionBackbone(Module):
             )
         if num_stages > len(hidden_sizes):
             raise ValueError(
-                f"Backbone has {len(hidden_sizes)} stages; "
-                f"{num_stages} requested."
+                f"Backbone has {len(hidden_sizes)} stages; {num_stages} requested."
             )
         self.num_stages = num_stages
         self.stage_indices = tuple(
@@ -306,13 +317,10 @@ class ConvNeXtDetectionBackbone(Module):
             pixel_values=x, output_hidden_states=True
         )
         hidden_states = outputs.hidden_states  # (embeddings, stage_0, ...)
-        feats = tuple(
-            hidden_states[i + 1] for i in self.stage_indices
-        )
+        feats = tuple(hidden_states[i + 1] for i in self.stage_indices)
         if len(feats) != self.num_stages:
             raise ValueError(
-                f"Expected {self.num_stages} ConvNeXt stage features, "
-                f"got {len(feats)}."
+                f"Expected {self.num_stages} ConvNeXt stage features, got {len(feats)}."
             )
         return feats
 

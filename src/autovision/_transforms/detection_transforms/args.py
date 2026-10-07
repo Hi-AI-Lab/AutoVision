@@ -79,6 +79,25 @@ class RTDETRDetectionTransformArgs(TaskTransformArgs):
     mosaic_output_size: int = 320
     mosaic_step_start: int | str = "auto"
     mosaic_step_stop: int | None | str = "auto"
+    #: Box-aware background erasure (rf-detr-ssl-v2 design doc 8): erase a
+    #: uniform random subset of ``random_erase_cell``-px background cells per
+    #: view while protecting every margin-dilated GT box (any-overlap), so
+    #: Hungarian matching never sees an evidence-free box. None = off.
+    random_erase_prob: float | None = None
+    random_erase_ratio: float = Field(default=0.4, gt=0.0, le=1.0)
+    random_erase_padding: float = Field(default=0.15, ge=0.0)
+    random_erase_cell: int = Field(default=16, ge=1)
+    #: Constrained foreground erasure (design doc V2): box interiors become
+    #: erasable behind a per-box reservation, so every object keeps at least
+    #: ``random_erase_min_keep`` patches (boxes with at most that many cells
+    #: stay fully protected).
+    random_erase_interior: bool = False
+    random_erase_min_keep: int = Field(default=2, ge=1)
+    #: Step at which erasure turns OFF (the Dome aug-stop cadence: training
+    #: ends on the dense distribution it deploys with). "auto" resolves
+    #: to the shared step schedule; None keeps the constant ratio for
+    #: the whole run (the reference-recommended first setting).
+    random_erase_step_stop: int | None | str = "auto"
     normalize: NormalizeArgs = Field(default_factory=NormalizeArgs)
     min_bbox_size_px: float = 4.0
 
@@ -107,7 +126,9 @@ class RTDETRDetectionTransformArgs(TaskTransformArgs):
             resolve_detection_step_schedule,
         )
 
-        steps_per_epoch = max(1, train_num_batches // max(1, gradient_accumulation_steps))
+        steps_per_epoch = max(
+            1, train_num_batches // max(1, gradient_accumulation_steps)
+        )
         schedule = resolve_detection_step_schedule(total_steps, steps_per_epoch)
         for op, start_attr, stop_attr in (
             ("photometric", "photometric_step_start", "photometric_step_stop"),
@@ -123,6 +144,8 @@ class RTDETRDetectionTransformArgs(TaskTransformArgs):
                 setattr(self, stop_attr, stop)
         if self.scale_jitter is not None and self.scale_jitter.step_stop == "auto":
             self.scale_jitter.step_stop = schedule.stop
+        if self.random_erase_step_stop == "auto":
+            self.random_erase_step_stop = schedule.stop
 
     def resolve_incompatible(self) -> None:
         if self.num_channels != 3:

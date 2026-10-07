@@ -16,6 +16,7 @@ WEIGHT_MANIFEST = {
         source='huggingface',
         revision='7b95b089788e6c7db56d5ea9b0a07ca08ea6ac0a',
         sha256={'model.safetensors': '02ad73fd09f0c241db299eaa9ebb50c166516f18e8f2cb9730f09039172fde2d'},
+        modelscope_id='merve/rf-detr-base',
     ),
     'Roboflow/rf-detr-large': WeightArtifact(
         repo_id='Roboflow/rf-detr-large',
@@ -23,6 +24,7 @@ WEIGHT_MANIFEST = {
         source='huggingface',
         revision='f62f7dd5252b61097cbace33886045816dadbde9',
         sha256={'model.safetensors': '1ec604598aea748627eb5755a9989f3c80839fc7fb977a91bfba107ee76fcd7d'},
+        modelscope_id='merve/rf-detr-large',
     ),
     'Roboflow/rf-detr-medium': WeightArtifact(
         repo_id='Roboflow/rf-detr-medium',
@@ -30,6 +32,7 @@ WEIGHT_MANIFEST = {
         source='huggingface',
         revision='1b5b672408f86dd38e05dd3cf3f2e0834e545a59',
         sha256={'model.safetensors': 'e52098adc46969794fbdd16e0548a62b81ba0c0f4b14392676edba50be9a69f6'},
+        modelscope_id='merve/rf-detr-medium',
     ),
     'Roboflow/rf-detr-nano': WeightArtifact(
         repo_id='Roboflow/rf-detr-nano',
@@ -37,6 +40,7 @@ WEIGHT_MANIFEST = {
         source='huggingface',
         revision='9f201577d9415f0378084748d27e68586e6b3600',
         sha256={'model.safetensors': '497b1dbcc8f9d115b806fb82d140d7e22e5b5c3fba45abefef39dd4f99c1f737'},
+        modelscope_id='merve/rf-detr-nano',
     ),
     'Roboflow/rf-detr-small': WeightArtifact(
         repo_id='Roboflow/rf-detr-small',
@@ -44,6 +48,7 @@ WEIGHT_MANIFEST = {
         source='huggingface',
         revision='3bdc465063270f99769da5a1b4c00c68bd2d439d',
         sha256={'model.safetensors': '2bfab2fa5f5fcc4870e756c8dc8d2d5acca3a68ffcc0f7e84972661873eb5a1d'},
+        modelscope_id='merve/rf-detr-small',
     ),
     'facebook/dinov2-base': WeightArtifact(
         repo_id='facebook/dinov2-base',
@@ -184,5 +189,26 @@ WEIGHT_MANIFEST = {
         source='huggingface',
         revision='c93d816fc9e567563bc068f01475bec89cc634a6',
         sha256={'model.safetensors': '208146e499dace99e4c9376ddb8a26f77d64c31c46c4dc4b86ff8bc63b0235e2'},
+    ),
+    'harshaljanjani/DEIMv2_DINOv3_S_COCO_Transformers': WeightArtifact(
+        repo_id='harshaljanjani/DEIMv2_DINOv3_S_COCO_Transformers',
+        license='dinov3-custom (see repository card)',
+        source='huggingface',
+        revision='598fb1fce3a7f0b55c744854ca5ba74864d996b0',
+        sha256={'model.safetensors': 'f127a21daf864f61a8a40b15378a2c58db3a227f16da003ec1d53d846f54dd48'},
+    ),
+    'harshaljanjani/DEIMv2_HGNetv2_N_COCO_Transformers': WeightArtifact(
+        repo_id='harshaljanjani/DEIMv2_HGNetv2_N_COCO_Transformers',
+        license='apache-2.0',
+        source='huggingface',
+        revision='b23bfb92684c98e1adf60939fdef28e409991f68',
+        sha256={'model.safetensors': 'c7ea18e94f96e3971427cbb6f41572923ebbcee7078e05d9258597256be3219f'},
+    ),
+    'harshaljanjani/DEIMv2_HGNetv2_PICO_COCO_Transformers': WeightArtifact(
+        repo_id='harshaljanjani/DEIMv2_HGNetv2_PICO_COCO_Transformers',
+        license='apache-2.0',
+        source='huggingface',
+        revision='2101e0c1d6adc2d87c5971dd5831214a4cae3192',
+        sha256={'model.safetensors': '635377483bdd7d041989133613359b7355ef5a6ef6a42a6eaea2628b8421e6de'},
     ),
 }

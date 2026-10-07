@@ -899,6 +899,14 @@ class TaskEngine(Engine):
                 )
                 if do_validation:
                     with otel_span("engine.validation", {"step": step}):
+                        if device.type == "cuda":
+                            # Release the training cache before the fp32
+                            # validation forward: on memory-saturated GPUs
+                            # the caching allocator holds nearly every byte
+                            # between steps, and validation then fights for
+                            # headroom with only the fragmented remainder —
+                            # the usual hard-OOM point. Re-grown on resume.
+                            torch.cuda.empty_cache()
                         train_model.eval()
                         if val_sampler is not None:
                             val_sampler.set_epoch(step)
@@ -930,6 +938,12 @@ class TaskEngine(Engine):
                         val_metrics: dict[str, float] = (
                             train_model.compute_metrics("val") if is_rank_zero else {}
                         )
+                        if device.type == "cuda":
+                            # Symmetric release on the way back to training:
+                            # leave the freed headroom available for the
+                            # train loop's re-warm instead of carrying the
+                            # validation forward's blocks.
+                            torch.cuda.empty_cache()
                     val_metrics["val_loss"] = val_loss
                     if world_size > 1:
                         # Broadcast rank zero's metrics so every rank makes

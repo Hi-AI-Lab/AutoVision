@@ -123,11 +123,15 @@ MODEL_ARGS = {
     "lr_scheduler": "multistep",
     "lr_milestones": LR_MILESTONES,
     "lr_gamma": LR_GAMMA,
-    # Pilot: 0.995 — 0.999's ~1k-step EMA window averages in early
-    # weights, a measured +9.5% mAP drag at 4k steps. Restore 0.999
-    # (official: 0.9999, warmup 1000) for the 160-epoch run.
-    "ema_momentum": 0.995,
-    "ema_warmup_steps": 200,
+    # Official Dome-S EMA (include/optimizer.yml), restored with the Dome
+    # twin for the 100-epoch run: 0.995's ~200-step window was a
+    # pilot-only setting — at 80k steps the official 10k-step window
+    # tracks the converged weights instead of averaging in the early
+    # ones. The exponential ramp (decay × (1 − e^−k/warmup)) keeps the
+    # early EMA tracking recent weights, so the old pilot concern does
+    # not apply to the official pair.
+    "ema_momentum": 0.9999,
+    "ema_warmup_steps": 1000,
     "eval_max_dets": 500,
 }
 # Identical augmentations to the Dome run: no mosaic / no mixup,
@@ -140,6 +144,11 @@ TRANSFORM_ARGS = {
     "photometric_step_stop": AUG_STOP_STEP,
     "zoom_out_step_stop": AUG_STOP_STEP,
     "iou_crop_step_stop": AUG_STOP_STEP,
+    # Erasure stop-step parity with the Dome twin (doc 16 P1.5): inert
+    # until erase args are supplied at runtime, but carrying the key here
+    # guarantees a future --erase baseline follows the Dome aug-stop
+    # cadence instead of the generic "auto" resolution (epoch 88).
+    "random_erase_step_stop": AUG_STOP_STEP,
     "scale_jitter": {
         # Pilot: locked at 800 — the 576-960 ladder sends ~43% of batches
         # below the val resolution and undersamples VisDrone's small

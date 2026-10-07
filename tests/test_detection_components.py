@@ -15,6 +15,13 @@ from autovision._task_models.object_detection_components import (
     box_cxcywh_norm_to_xyxy,
     box_xyxy_to_cxcywh_norm,
 )
+from autovision._task_models.object_detection_components.box_ops import (
+    elementwise_box_iou,
+    elementwise_siou,
+)
+from autovision._task_models.object_detection_components.dfine_criterion import (
+    DFINECriterionV2,
+)
 from autovision._task_models.object_detection_components.multistep_schedule import (
     MultiStepWarmupScheduler,
 )
@@ -328,3 +335,284 @@ class TestMultiStepWarmup:
                 torch.optim.SGD(nn.Linear(2, 2).parameters(), lr=1.0),
                 total_steps=0,
             )
+
+
+def _random_xyxy_boxes(n: int, seed: int) -> torch.Tensor:
+    """Random non-degenerate xyxy boxes in a ~[0, 2] canvas."""
+    generator = torch.Generator().manual_seed(seed)
+    xy = torch.rand(n, 2, generator=generator)
+    wh = torch.rand(n, 2, generator=generator) + 0.05
+    return torch.cat([xy, xy + wh], dim=-1)
+
+
+class TestElementwiseSIoU:
+    """Scylla-IoU math (design doc 15 §4.1; cases mirrored from the reference
+    implementation's validated suite)."""
+
+    def test_identical_boxes_give_exact_zero_loss(self):
+        boxes = _random_xyxy_boxes(16, seed=7)
+
+        loss = elementwise_siou(boxes, boxes)
+
+        assert torch.equal(loss, torch.zeros_like(loss))
+
+    def test_is_symmetric(self):
+        boxes1 = _random_xyxy_boxes(32, seed=11)
+        boxes2 = _random_xyxy_boxes(32, seed=12)
+
+        torch.testing.assert_close(
+            elementwise_siou(boxes1, boxes2), elementwise_siou(boxes2, boxes1)
+        )
+
+    def test_is_bounded_and_finite(self):
+        pairs1 = torch.cat(
+            [_random_xyxy_boxes(64, seed=13), torch.tensor([[10.0, 10.0, 10.0, 10.0]])]
+        )
+        pairs2 = torch.cat(
+            [_random_xyxy_boxes(64, seed=14), torch.tensor([[10.0, 10.0, 10.0, 10.0]])]
+        )
+
+        loss = elementwise_siou(pairs1, pairs2)
+
+        assert torch.isfinite(loss).all()
+        assert (loss >= 0).all()
+        assert (loss < 3).all()
+
+    def test_is_axis_symmetric(self):
+        """A pure x-axis center offset and the equal pure y-axis offset give the same loss."""
+        pred = torch.tensor([[0.0, 0.0, 2.0, 2.0]])
+        gt_x = torch.tensor([[3.0, 0.0, 5.0, 2.0]])
+        gt_y = torch.tensor([[0.0, 3.0, 2.0, 5.0]])
+
+        torch.testing.assert_close(elementwise_siou(pred, gt_x), elementwise_siou(pred, gt_y))
+
+    def test_angle_contribution_extinguishes_for_shared_center(self):
+        """Same-center pairs reduce exactly to 1 - IoU + shape/2 (self-extinguish)."""
+        pred = torch.tensor([[0.0, 0.0, 2.0, 2.0]])  # center (1, 1), w = h = 2
+        gt = torch.tensor([[0.5, -0.5, 1.5, 2.5]])  # center (1, 1), w = 1, h = 3
+
+        loss = elementwise_siou(pred, gt)
+        iou, _ = elementwise_box_iou(pred, gt)
+        expected = 1 - iou + (
+            (1 - torch.exp(torch.tensor(-0.5))) ** 4
+            + (1 - torch.exp(torch.tensor(-1.0 / 3.0))) ** 4
+        ) / 2
+
+        torch.testing.assert_close(loss, expected)
+
+    def test_known_values_lock_the_formula(self):
+        """Hand-derived values pin gamma = 2 - Lambda, the outer 1/2, and the
+        per-axis enclosure normalization.
+
+        Case A: x-only center offset (Lambda=0 -> gamma=2), disjoint boxes,
+        equal shapes, enclosure 5x2 -> 1 + (1 - exp(-2*(3/5)^2))/2.
+        Case B: 45-degree offset (Lambda=1 -> gamma=1), enclosure 4x4
+        -> 2 - exp(-0.25); a gamma=2 implementation fails this case.
+        """
+        pred = torch.tensor([[0.0, 0.0, 2.0, 2.0], [0.0, 0.0, 2.0, 2.0]])
+        gt = torch.tensor([[3.0, 0.0, 5.0, 2.0], [2.0, 2.0, 4.0, 4.0]])
+
+        loss = elementwise_siou(pred, gt)
+
+        expected_a = 1 + (1 - torch.exp(torch.tensor(-2 * (3.0 / 5.0) ** 2))) / 2
+        expected_b = 2 - torch.exp(torch.tensor(-0.25))
+        torch.testing.assert_close(loss[0], expected_a)
+        torch.testing.assert_close(loss[1], expected_b)
+
+    def test_gradients_are_finite(self):
+        """Mixed batch (aligned, diagonal, disjoint, degenerate) keeps grads finite."""
+        boxes1 = torch.tensor(
+            [
+                [0.0, 0.0, 2.0, 2.0],
+                [0.0, 0.0, 2.0, 2.0],
+                [0.0, 0.0, 2.0, 2.0],
+                [5.0, 5.0, 5.0, 5.0],
+            ],
+            requires_grad=True,
+        )
+        boxes2 = torch.tensor(
+            [
+                [3.0, 0.0, 5.0, 2.0],
+                [2.0, 2.0, 4.0, 4.0],
+                [10.0, 10.0, 12.0, 12.0],
+                [5.0, 5.0, 5.0, 5.0],
+            ],
+            requires_grad=True,
+        )
+
+        elementwise_siou(boxes1, boxes2).sum().backward()
+
+        assert torch.isfinite(boxes1.grad).all()
+        assert torch.isfinite(boxes2.grad).all()
+
+    def test_forward_is_finite_under_cpu_bfloat16_autocast(self):
+        boxes1 = _random_xyxy_boxes(32, seed=15)
+        boxes2 = _random_xyxy_boxes(32, seed=16)
+
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            loss = elementwise_siou(boxes1, boxes2)
+
+        assert torch.isfinite(loss).all()
+
+    def test_empty_input_returns_empty(self):
+        empty = torch.empty(0, 4)
+
+        assert elementwise_siou(empty, empty).shape == (0,)
+
+    def test_rejects_unequal_length(self):
+        with pytest.raises(ValueError, match="same length"):
+            elementwise_siou(_random_xyxy_boxes(3, seed=4), _random_xyxy_boxes(1, seed=5))
+
+    def test_theta_only_affects_shape_mismatched_pairs(self):
+        """theta=2 vs theta=4 differ when shapes mismatch and coincide when equal."""
+        same_shape = (torch.tensor([[0.0, 0.0, 2.0, 2.0]]), torch.tensor([[1.0, 0.0, 3.0, 2.0]]))
+        mismatched = (torch.tensor([[0.0, 0.0, 2.0, 2.0]]), torch.tensor([[0.5, 0.0, 1.5, 3.0]]))
+
+        for boxes1, boxes2 in (same_shape, mismatched):
+            loss_low = elementwise_siou(boxes1, boxes2, theta=2.0)
+            loss_high = elementwise_siou(boxes1, boxes2, theta=4.0)
+            if boxes2 is mismatched[1]:
+                assert not torch.allclose(loss_low, loss_high)
+            else:
+                torch.testing.assert_close(loss_low, loss_high)
+
+
+class TestDFINESIoUCriterion:
+    """box_regression_iou='siou' wiring (design doc 15 §4.3)."""
+
+    def _outputs(self, layers: int = 1, grad: bool = False):
+        torch.manual_seed(0)
+        outputs = []
+        for _ in range(layers):
+            boxes = torch.rand(2, 10, 4) * 0.4 + 0.3
+            if grad:
+                boxes = boxes.detach().requires_grad_(True)
+            outputs.append(
+                {
+                    "pred_logits": torch.randn(2, 10, 3),
+                    "pred_boxes": boxes,
+                }
+            )
+        return outputs
+
+    def _criterion(self, **kwargs):
+        return DFINECriterionV2(HungarianMatcher(), **kwargs)
+
+    def test_default_mode_emits_giou_not_siou(self):
+        losses = self._criterion()(self._outputs(), fake_targets(), world_size=1)
+
+        assert "loss_giou" in losses
+        assert "loss_siou" not in losses
+
+    def test_siou_mode_emits_siou_not_giou(self):
+        criterion = self._criterion(box_regression_iou="siou")
+
+        losses = criterion(self._outputs(layers=2), fake_targets(), world_size=1)
+
+        assert "loss_siou" in losses
+        assert "loss_bbox" in losses
+        assert not any("loss_giou" in key for key in losses)
+        # Box losses stay final-layer-only: the aux VFL keeps its suffix,
+        # the swapped IoU term never grows one.
+        assert "loss_vfl_aux_0" in losses
+        assert not any(key.endswith("_aux_0") for key in losses if "siou" in key)
+
+    def test_siou_value_matches_box_ops_on_matched_pairs(self):
+        from autovision._task_models.object_detection_components.rtdetrv2_criterion import (
+            _cxcywh_to_xyxy_unit,
+        )
+
+        outputs = self._outputs()
+        targets = fake_targets()
+        criterion = self._criterion(box_regression_iou="siou")
+        losses = criterion(outputs, targets, world_size=1)
+
+        indices = criterion.matcher(outputs[-1], targets)
+        manual = sum(
+            elementwise_siou(
+                _cxcywh_to_xyxy_unit(outputs[-1]["pred_boxes"][b, src].detach()),
+                _cxcywh_to_xyxy_unit(targets[b]["boxes"][dst]),
+            ).sum()
+            for b, (src, dst) in enumerate(indices)
+            if src.numel()
+        )
+        matched = sum(int(src.numel()) for src, _ in indices)
+        torch.testing.assert_close(
+            losses["loss_siou"] * max(matched, 1), manual, check_dtype=False
+        )
+
+    def test_siou_gradient_flows_to_pred_boxes(self):
+        outputs = self._outputs(grad=True)
+        criterion = self._criterion(box_regression_iou="siou")
+
+        losses = criterion(outputs, fake_targets(), world_size=1)
+        losses["loss_siou"].backward()
+
+        grad = outputs[-1]["pred_boxes"].grad
+        assert grad is not None
+        assert torch.isfinite(grad).all()
+
+    def test_weight_inherits_giou_and_explicit_value_wins(self):
+        inherited = self._criterion(box_regression_iou="siou")
+        assert inherited.weight_dict["loss_siou"] == pytest.approx(2.0)
+        assert "loss_giou" not in inherited.weight_dict
+
+        explicit = self._criterion(box_regression_iou="siou", siou_loss_coef=1.5)
+        assert explicit.weight_dict["loss_siou"] == pytest.approx(1.5)
+
+        supplied = self._criterion(
+            weight_dict={"loss_giou": 3.0}, box_regression_iou="siou"
+        )
+        assert supplied.weight_dict["loss_siou"] == pytest.approx(3.0)
+        assert "loss_giou" not in supplied.weight_dict
+
+    def test_pre_branch_weight_key_follows_the_active_iou_term(self):
+        """The hardcoded _pre/_dn_pre weight lines must track the active term
+        (design doc 15 E4) — a missing weight would silently drop the branch."""
+        outputs = self._outputs(layers=2)
+        pre_outputs = self._outputs()[-1]
+        targets = fake_targets()
+
+        siou = self._criterion(box_regression_iou="siou")
+        losses_siou = siou(outputs, targets, world_size=1, pre_outputs=pre_outputs)
+        assert "loss_siou_pre" in losses_siou
+        assert "loss_bbox_pre" in losses_siou
+        assert torch.isfinite(losses_siou["loss"]).all()
+
+        giou = self._criterion()
+        losses_giou = giou(outputs, targets, world_size=1, pre_outputs=pre_outputs)
+        assert "loss_giou_pre" in losses_giou
+
+    def test_pre_branch_siou_weights_are_actually_applied(self):
+        """Zeroing the loss_siou weights must shift the total by exactly
+        Σ siou_loss × weight (design doc 15 E4). A stale _pre weight line
+        would shrink the difference by the silently-unweighted term."""
+        outputs = self._outputs(layers=2)
+        pre_outputs = self._outputs()[-1]
+        targets = fake_targets()
+        criterion = self._criterion(box_regression_iou="siou")
+        weights = dict(criterion.weight_dict)
+
+        base = criterion(outputs, targets, world_size=1, pre_outputs=pre_outputs)
+        for key in weights:
+            if key.startswith("loss_siou"):
+                criterion.weight_dict[key] = 0.0
+        zeroed = criterion(outputs, targets, world_size=1, pre_outputs=pre_outputs)
+
+        siou_weights = {
+            key: weight
+            for key, weight in weights.items()
+            if key.startswith("loss_siou")
+        }
+        expected = sum(
+            base[key] * weight for key, weight in siou_weights.items() if key in base
+        )
+        # The _pre weight is a forward-local copy of the main term's weight
+        # (the E4 line) — it must carry the same factor.
+        if "loss_siou_pre" in base:
+            expected = expected + base["loss_siou_pre"] * siou_weights["loss_siou"]
+        torch.testing.assert_close(base["loss"] - zeroed["loss"], expected)
+
+    def test_ctor_rejects_unknown_iou_term(self):
+        with pytest.raises(ValueError, match="box_regression_iou"):
+            self._criterion(box_regression_iou="diou")

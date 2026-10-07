@@ -1336,3 +1336,32 @@ def test_two_crop_unpaired_negatives_keep_ratio_semantics():
     assert torch.isfinite(loss)
     loss.backward()
     assert z1.grad is not None
+
+
+def test_sigreg_training_step_emits_and_backprops():
+    """R1-A1 (design doc 16): loss_sigreg joins the total and reaches the head."""
+    model = make_ssl_train_model(sigreg_coef=0.2)
+    batch = make_two_crop_batch(pairs=2, matching=True, seed=3)
+    result = model.training_step(batch, step=0)
+    assert "loss_sigreg" in result.log_dict
+    assert torch.isfinite(result.log_dict["loss_sigreg"])
+    assert result.log_dict["loss_sigreg"] > 0.0
+    assert torch.isfinite(result.loss)
+    result.loss.backward()
+    grads = [p.grad for p in model.model.ssl_head.parameters()]
+    assert any(g is not None and g.abs().sum() > 0 for g in grads)
+
+
+def test_sigreg_disabled_by_default_matches_baseline():
+    """Without sigreg_coef no raw taps, no loss_sigreg key — baseline intact."""
+    model = make_ssl_train_model()
+    batch = make_two_crop_batch(pairs=2, matching=True, seed=3)
+    result = model.training_step(batch, step=0)
+    assert "loss_sigreg" not in result.log_dict
+    raw = model.model._forward_train(
+        batch["image"],
+        targets=[
+            {"boxes": b, "labels": c} for b, c in zip(batch["bboxes"], batch["classes"])
+        ],
+    )
+    assert "ssl_s1" not in raw and "ssl_s2" not in raw

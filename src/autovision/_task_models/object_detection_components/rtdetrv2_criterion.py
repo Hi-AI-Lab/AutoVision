@@ -10,16 +10,22 @@ the baseline deep supervision.
 
 from __future__ import annotations
 
+from typing import Literal
+
 import torch
 import torch.nn.functional as F
 from torch import nn
 
 from autovision._distributed import reduce_dict
 from autovision._task_models.object_detection_components.box_ops import (
+    elementwise_siou,
     generalized_box_iou_loss,
 )
 from autovision._task_models.object_detection_components.denoising import (
     get_cdn_matched_indices,
+)
+from autovision._task_models.object_detection_components.matcher import (
+    indices_to_device,
 )
 
 __all__ = ["RTDETRCriterionV2", "VFL_LOSS_WEIGHT_DICT"]
@@ -108,10 +114,19 @@ def loss_boxes(
     targets: list[dict[str, torch.Tensor]],
     indices: list[tuple[torch.Tensor, torch.Tensor]],
     num_boxes: torch.Tensor,
+    *,
+    iou_term: Literal["giou", "siou"] = "giou",
+    siou_theta: float = 4.0,
 ) -> dict[str, torch.Tensor]:
-    """L1 + GIoU on matched pairs, normalized by num_boxes (rank-reduced)."""
+    """L1 + a matched-pair IoU loss, normalized by num_boxes (rank-reduced).
+
+    ``iou_term="giou"`` (default) emits ``loss_giou`` (1 - GIoU);
+    ``iou_term="siou"`` emits ``loss_siou`` (Scylla-IoU, arXiv:2205.12740)
+    instead — the emissions are mutually exclusive, so every box-loss
+    consumer switches together (design doc 15 §4.2).
+    """
     l1_total = outputs["pred_boxes"].sum() * 0.0
-    giou_total = outputs["pred_boxes"].sum() * 0.0
+    iou_total = outputs["pred_boxes"].sum() * 0.0
     pred_boxes_sanitized = _sanitize_boxes_cxcywh_normalized(outputs["pred_boxes"])
     for batch_index, (src, dst) in enumerate(indices):
         if src.numel() == 0:
@@ -122,14 +137,23 @@ def loss_boxes(
         # generalized_box_iou_loss is PAIRWISE (N, M): taking .sum() over the
         # full matrix would add every pred-vs-every-other-GT cross term. The
         # matched pairs live on the diagonal.
-        giou_matrix = generalized_box_iou_loss(
-            _cxcywh_to_xyxy_unit(pred), _cxcywh_to_xyxy_unit(target)
-        )
-        giou_total = giou_total + giou_matrix.diagonal().sum()
-    return {
+        pred_xyxy = _cxcywh_to_xyxy_unit(pred)
+        target_xyxy = _cxcywh_to_xyxy_unit(target)
+        if iou_term == "siou":
+            iou_total = iou_total + elementwise_siou(
+                pred_xyxy, target_xyxy, theta=siou_theta
+            ).sum()
+        else:
+            giou_matrix = generalized_box_iou_loss(pred_xyxy, target_xyxy)
+            iou_total = iou_total + giou_matrix.diagonal().sum()
+    losses = {
         "loss_bbox": l1_total / num_boxes.clamp(min=1),
-        "loss_giou": giou_total / num_boxes.clamp(min=1),
     }
+    if iou_term == "siou":
+        losses["loss_siou"] = iou_total / num_boxes.clamp(min=1)
+    else:
+        losses["loss_giou"] = iou_total / num_boxes.clamp(min=1)
+    return losses
 
 
 class RTDETRCriterionV2(nn.Module):
@@ -181,7 +205,8 @@ class RTDETRCriterionV2(nn.Module):
         enc_meta: dict | None = None,
     ) -> dict[str, torch.Tensor]:
         num_boxes = sum(int(t["boxes"].shape[0]) for t in targets)
-        num_boxes = torch.tensor(float(num_boxes), device=outputs_list[-1]["pred_logits"].device)
+        device = outputs_list[-1]["pred_logits"].device
+        num_boxes = torch.tensor(float(num_boxes), device=device)
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             torch.distributed.all_reduce(num_boxes)
             num_boxes /= torch.distributed.get_world_size()
@@ -189,7 +214,7 @@ class RTDETRCriterionV2(nn.Module):
         losses: dict[str, torch.Tensor] = {}
         num_entries = len(outputs_list)
         for output_index, outputs in enumerate(outputs_list):
-            indices = self.matcher(outputs, targets)
+            indices = indices_to_device(self.matcher(outputs, targets), device)
             suffix = "" if output_index == num_entries - 1 else f"_aux_{output_index}"
             losses[f"loss_vfl{suffix}"] = self.loss_labels(
                 outputs, targets, indices, num_boxes, query_mask=query_mask
@@ -226,7 +251,9 @@ class RTDETRCriterionV2(nn.Module):
             else:
                 enc_targets = targets
             for enc_index, enc_outputs in enumerate(enc_aux_outputs):
-                enc_indices = self.matcher(enc_outputs, enc_targets)
+                enc_indices = indices_to_device(
+                    self.matcher(enc_outputs, enc_targets), device
+                )
                 suffix = f"_enc_{enc_index}"
                 losses[f"loss_vfl{suffix}"] = self.loss_labels(
                     enc_outputs, enc_targets, enc_indices, num_boxes

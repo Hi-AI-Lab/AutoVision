@@ -1,0 +1,9 @@
+# VisDrone2019-DET (COCO format) for autovision train-object-detection.
+# Images live per split; class ids come from the train json's categories.
+format: coco
+train:
+  annotations: /home/hdjs/Research/Project/Dino-Dome-Research/dataset/visdrone/annotations/visdrone_train.json
+  images: /home/hdjs/Research/Project/Dino-Dome-Research/dataset/visdrone/VisDrone2019-DET-train/images
+val:
+  annotations: /home/hdjs/Research/Project/Dino-Dome-Research/dataset/visdrone/annotations/visdrone_val.json
+  images: /home/hdjs/Research/Project/Dino-Dome-Research/dataset/visdrone/VisDrone2019-DET-val/images

@@ -34,6 +34,8 @@ from typing import List
 
 import torch
 import torch.nn as nn
+
+from autovision._env import Env
 import torch.nn.functional as F
 import torch.nn.init as init
 from torch import Tensor
@@ -144,6 +146,39 @@ def deformable_attention_core_func_v2(
     bs, _, n_head, c = value.shape
     _, Len_q, _, _, _ = sampling_locations.shape
 
+    if method == "cuda":
+        # Fused MSDA op (opt-in via AUTOVISION_MSDA_CROSS_ATTN=1): same
+        # bilinear math as the "default" grid_sample path in one kernel.
+        # Our value layout (bs, Len, heads, C) is already the op's.
+        from autovision._task_models.object_detection_components.msda import (
+            ms_deform_attn_cuda,
+        )
+
+        shapes_tensor = torch.as_tensor(
+            value_spatial_shapes, dtype=torch.long, device=value.device
+        )
+        level_start_index = torch.cat(
+            [
+                shapes_tensor.new_zeros(1),
+                shapes_tensor.prod(-1).cumsum(0)[:-1],
+            ]
+        )
+        num_levels = shapes_tensor.shape[0]
+        points_per_level = sampling_locations.shape[3] // num_levels
+        # fp32 in/out: the op's fp32 kernel matches the grid_sample path's
+        # internal-fp32 accumulation bit-for-bit; a native-bf16 kernel
+        # rounds differently mid-interpolation. The cast is bandwidth-
+        # trivial next to the fused sampling.
+        return ms_deform_attn_cuda(
+            value.float().contiguous(),
+            shapes_tensor,
+            level_start_index,
+            sampling_locations.float().view(
+                *sampling_locations.shape[:3], num_levels, points_per_level, 2
+            ),
+            attention_weights.float(),
+        ).to(value.dtype)
+
     split_shape = [h * w for h, w in value_spatial_shapes]
     value_list = value.permute(0, 2, 3, 1).flatten(0, 1).split(split_shape, dim=-1)
 
@@ -251,6 +286,8 @@ class MSDeformableAttention(nn.Module):
         )
 
         self.total_points = num_heads * sum(num_points_list)
+        if method == "default" and Env.MSDA_CROSS_ATTN.value:
+            method = "cuda"
         self.method = method
         self.head_dim = embed_dim // num_heads
         assert self.head_dim * num_heads == self.embed_dim
@@ -296,7 +333,7 @@ class MSDeformableAttention(nn.Module):
     def convert_to_deploy(self) -> None:
         """Switch the grid_sample sampler to the gather-based bilinear
         equivalent that exports to a TensorRT-compatible ONNX graph."""
-        if self.method == "default":
+        if self.method in ("default", "cuda"):
             self.method = "bilinear_gather"
             self.ms_deformable_attn_core = functools.partial(
                 deformable_attention_core_func_v2, method=self.method
@@ -564,7 +601,7 @@ class RTDETRv2Decoder(nn.Module):
         self.feat_strides = feat_strides
 
         assert query_select_method in ("default", "one2many", "agnostic")
-        assert cross_attn_method in ("default", "discrete")
+        assert cross_attn_method in ("default", "discrete", "cuda")
         self.cross_attn_method = cross_attn_method
         self.query_select_method = query_select_method
 

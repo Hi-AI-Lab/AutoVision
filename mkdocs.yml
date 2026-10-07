@@ -17,3 +17,6 @@ nav:
       - Baseline Appendix: design/11-appendix-baseline-analysis.md
       - Gap Implementation: design/12-gap-implementation-status.md
       - LT-DETR × Dome-DETR Integration: design/13-ltdetr-dome-integration.md
+      - LT-DETR SSL Contrastive Head: design/14-ltdetr-ssl-contrastive-head.md
+      - SIoU Box Regression: design/15-siou-box-regression-loss.md
+      - Box-Aware Eraser: design/16-box-aware-eraser.md

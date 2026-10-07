@@ -16,6 +16,9 @@ from autovision._task_models.ltdetr_object_detection import (
     list_ltdetr_model_names,
     resolve_ltdetr_variant,
 )
+from autovision._task_models.ltdetr_object_detection.task_model import (
+    _relabel_prefix_drift,
+)
 from tests.conftest import create_image
 from tests.test_train_object_detection import (
     data_config,
@@ -273,6 +276,48 @@ class TestTaskModel:
         reference = train_model.model.backbone.backbone_model.state_dict()
         for key, value in fresh.model.backbone.backbone_model.state_dict().items():
             assert torch.equal(value, reference[key])
+
+
+class _PrefixedInner(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = torch.nn.Conv2d(1, 1, 1)
+
+
+class _PrefixedTarget(torch.nn.Module):
+    """Mirrors the transformers 5.x DINOv3-ConvNeXt layout: weights under
+    ``model.*`` plus a top-level ``norm`` (the ConvNeXt ``layer_norm``)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.model = _PrefixedInner()
+        self.norm = torch.nn.LayerNorm(1)
+
+
+class TestBackbonePrefixDrift:
+    def test_relabels_legacy_unprefixed_keys(self):
+        target = _PrefixedTarget()
+        reference = target.state_dict()
+        legacy = {
+            key.removeprefix("model."): value.clone()
+            for key, value in reference.items()
+        }
+        relabeled = _relabel_prefix_drift(legacy, target)
+        assert set(relabeled) == set(reference)
+        for key, value in relabeled.items():
+            assert torch.equal(value, reference[key])
+
+    def test_identity_state_passes_through(self):
+        target = _PrefixedTarget()
+        state = target.state_dict()
+        assert _relabel_prefix_drift(state, target) is state
+
+    def test_foreign_keys_returned_unchanged_for_strict_report(self):
+        target = _PrefixedTarget()
+        reference = target.state_dict()
+        foreign = {key: value.clone() for key, value in reference.items()}
+        foreign["does.not.exist"] = torch.zeros(1)
+        assert _relabel_prefix_drift(foreign, target) is foreign
 
 
 class TestOptimizerGroups:
@@ -765,3 +810,68 @@ class TestEncoderOverrides:
         assert model.encoder.enc_dim_feedforward == 2048  # variant spec value
         assert model.encoder.enc_expansion == 1.0
         assert model.encoder.enc_depth_mult == 1.0
+
+
+class TestSIoUBoxRegression:
+    """box_regression_iou='siou' config surface (design doc 15 §4.4-4.5)."""
+
+    def test_default_config_keeps_giou(self):
+        from autovision._task_models.ltdetr_object_detection import (
+            LTDETRObjectDetectionTrainArgs,
+        )
+
+        args = LTDETRObjectDetectionTrainArgs(num_classes=2)
+        assert args.box_regression_iou == "giou"
+        assert args.siou_loss_coef is None
+        assert args.siou_theta == pytest.approx(4.0)
+
+    def test_config_rejects_invalid_siou_values(self):
+        from pydantic import ValidationError
+
+        from autovision._task_models.ltdetr_object_detection import (
+            LTDETRObjectDetectionTrainArgs,
+        )
+
+        with pytest.raises(ValidationError):
+            LTDETRObjectDetectionTrainArgs(num_classes=2, siou_theta=0.0)
+        with pytest.raises(ValidationError):
+            LTDETRObjectDetectionTrainArgs(num_classes=2, siou_loss_coef=-0.1)
+
+    def test_siou_requires_dfine_decoder(self):
+        with pytest.raises(ValueError, match="box_regression_iou='siou'"):
+            make_train_model(box_regression_iou="siou", decoder="rtdetrv2")
+
+    def test_siou_wires_dfine_criterion_weight(self):
+        train_model = make_train_model(
+            decoder="dfine", box_regression_iou="siou", reg_max=16
+        )
+        assert train_model.criterion.box_regression_iou == "siou"
+        assert train_model.criterion.weight_dict["loss_siou"] == pytest.approx(2.0)
+        assert "loss_giou" not in train_model.criterion.weight_dict
+
+    def test_siou_training_step_emits_full_suffix_family(self):
+        """End-to-end (design doc 15 §7 item 12): the swapped term reaches
+        every box-loss branch — main, _pre, _dn_pre, the dn layers and the
+        encoder proposals — with no loss_giou key anywhere."""
+        torch.manual_seed(0)
+        train_model = make_train_model(
+            decoder="dfine", box_regression_iou="siou", reg_max=16
+        )
+        batch = make_batch()
+        result = train_model.training_step(
+            {
+                "image": batch["image"],
+                "bboxes": batch["bboxes"],
+                "classes": batch["classes"],
+            },
+            0,
+        )
+        keys = set(result.log_dict)
+        assert "loss_siou" in keys
+        assert "loss_bbox_pre" in keys  # the _pre branch ran
+        assert "loss_siou_pre" in keys
+        assert "loss_siou_dn_pre" in keys
+        assert any(key.startswith("loss_siou_dn_") for key in keys)
+        assert any(key.startswith("loss_siou_enc_") for key in keys)
+        assert not any("loss_giou" in key for key in keys)
+        assert torch.isfinite(result.loss)

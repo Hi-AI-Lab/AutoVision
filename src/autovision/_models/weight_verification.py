@@ -5,6 +5,9 @@ Every pretrained download goes through :func:`load_pretrained_verified`:
 
 1. ``AUTOVISION_MIRROR_URL`` is bridged to the HF endpoint mechanism when the
    process has not already configured ``HF_ENDPOINT`` (the mirror consumer).
+   The bridge runs at import time of this module — ``huggingface_hub``
+   freezes its endpoint at import, so later bridging cannot redirect the
+   download it precedes.
 2. ``AUTOVISION_OFFLINE=1`` resolves from the local HF cache only; a missing
    snapshot raises an actionable error instead of attempting network I/O.
 3. The snapshot's weight files are sha256-verified against the manifest in
@@ -13,6 +16,12 @@ Every pretrained download goes through :func:`load_pretrained_verified`:
    registry metadata (transfer-integrity tier).
 4. On a hash mismatch the repo cache is deleted and the download retried
    once; a second mismatch raises :class:`WeightVerificationError`.
+5. ``AUTOVISION_WEIGHT_SOURCE`` selects the download source: ``auto``
+   (default) uses the hub — honoring ``AUTOVISION_MIRROR_URL``, e.g.
+   hf-mirror.com — and falls back to a pinned ModelScope mirror when the
+   hub path fails; ``modelscope`` forces the mirror; ``huggingface``
+   disables fallback. The sha256 flow is identical for every source
+   because verified mirrors are byte-identical.
 
 The manifest is machine-pinned via ``scripts/update_weight_hashes.py`` so
 the pinned tier grows over time without trusting first use.
@@ -40,7 +49,26 @@ __all__ = [
 
 logger = logging.getLogger("autovision")
 
+
+def _bridge_mirror_to_hf_endpoint() -> None:
+    """Propagate ``AUTOVISION_MIRROR_URL`` to ``HF_ENDPOINT``.
+
+    Must run before the first ``huggingface_hub`` import anywhere in the
+    process: hub freezes its endpoint constant at import time (verified on
+    hub 1.x — setting ``HF_ENDPOINT`` afterwards has no effect), so a
+    bridge inside :func:`load_pretrained_verified` would be too late for
+    the very download it is meant to route.
+    """
+    mirror_url = Env.MIRROR_URL.value
+    if mirror_url and not os.getenv("HF_ENDPOINT"):
+        os.environ["HF_ENDPOINT"] = mirror_url
+        logger.info("Using weight mirror: %s", mirror_url)
+
+
+_bridge_mirror_to_hf_endpoint()
+
 _WEIGHT_PATTERNS = ("*.safetensors", "*.bin")
+_WEIGHT_SUFFIXES = (".safetensors", ".bin")  # for str.endswith (no glob support)
 _SNAPSHOT_PATTERNS = ("config.json", "*.safetensors", "*.bin")
 _RETRY_MESSAGE = (
     "If the failure persists the download source may be compromised or "
@@ -59,7 +87,10 @@ class WeightArtifact:
 
     ``sha256`` maps weight filenames to pinned hashes; an empty dict means
     the entry is unpinned and verification falls back to the LFS sha256
-    from the registry metadata (see module docstring).
+    from the registry metadata (see module docstring). ``modelscope_id``
+    optionally names a byte-identical mirror repository on ModelScope
+    (modelscope.cn), selectable via ``AUTOVISION_WEIGHT_SOURCE=modelscope``
+    — pinned hashes are source-agnostic, so verification is unchanged.
     """
 
     repo_id: str
@@ -67,6 +98,7 @@ class WeightArtifact:
     source: str = "huggingface"
     revision: str | None = None
     sha256: dict[str, str] = field(default_factory=dict)
+    modelscope_id: str | None = None
 
 
 def get_weight_artifact(repo_id: str) -> WeightArtifact | None:
@@ -112,11 +144,15 @@ def _delete_repo_cache(snapshot_dir: Path) -> None:
     shutil.rmtree(snapshot_dir, ignore_errors=True)
 
 
-def _verify_snapshot(snapshot_dir: Path, artifact: WeightArtifact) -> str:
+def _verify_snapshot(
+    snapshot_dir: Path, artifact: WeightArtifact, source: str = "huggingface"
+) -> str:
     """Verify every weight file in the snapshot.
 
     Returns the verification tier ("pinned" or "lfs-metadata"); raises
-    :class:`WeightVerificationError` on the first mismatch.
+    :class:`WeightVerificationError` on the first mismatch. ``source``
+    selects where unpinned hashes are fetched from (hub LFS metadata or
+    the ModelScope file listing).
     """
     weight_files = sorted(
         path
@@ -134,7 +170,16 @@ def _verify_snapshot(snapshot_dir: Path, artifact: WeightArtifact) -> str:
     ]
     registry_hashes: dict[str, str] = {}
     if unpinned:
-        registry_hashes = _lfs_sha256(artifact.repo_id, artifact.revision)
+        if source == "modelscope":
+            if artifact.modelscope_id is None:
+                raise WeightVerificationError(
+                    f"'{artifact.repo_id}' has unpinned weight files but no "
+                    "modelscope_id in the manifest; pin it with "
+                    "scripts/update_weight_hashes.py."
+                )
+            registry_hashes = _modelscope_registry_sha256(artifact.modelscope_id)
+        else:
+            registry_hashes = _lfs_sha256(artifact.repo_id, artifact.revision)
     tier = "pinned" if not unpinned else "lfs-metadata"
     for path in weight_files:
         expected = artifact.sha256.get(path.name) or registry_hashes.get(path.name)
@@ -170,24 +215,128 @@ def _download_snapshot(
     )
 
 
-def load_pretrained_verified(
+_MODELSCOPE_API = "https://modelscope.cn/api/v1/models/{repo}/repo"
+_MODELSCOPE_CACHE = Path.home() / ".cache" / "autovision" / "modelscope"
+
+
+def _modelscope_registry_sha256(ms_id: str) -> dict[str, str]:
+    """ModelScope-published sha256 per weight filename (network tier)."""
+    import json
+    from urllib.request import Request, urlopen
+
+    url = _MODELSCOPE_API.format(repo=ms_id) + "/files?Revision=master"
+    with urlopen(Request(url), timeout=Env.DOWNLOAD_CHUNK_TIMEOUT_SEC.value) as resp:
+        payload = json.load(resp)
+    hashes: dict[str, str] = {}
+    for entry in payload.get("Data", {}).get("Files", []):
+        name = entry.get("Path", "")
+        sha = entry.get("Sha256")
+        if sha and name.endswith(_WEIGHT_SUFFIXES):
+            hashes[name] = sha
+    return hashes
+
+
+def _download_modelscope_snapshot(
+    ms_id: str, local_files_only: bool = False
+) -> Path:
+    """Download a ModelScope repo snapshot (config + weight files).
+
+    Cached under ``~/.cache/autovision/modelscope/<ms_id>``; sha256
+    verification happens in :func:`_verify_snapshot` against the manifest,
+    exactly like the hub path.
+    """
+    import json
+    from urllib.request import Request, urlopen
+
+    snapshot_dir = _MODELSCOPE_CACHE / ms_id.replace("/", "--")
+    weight_files = (
+        [
+            path
+            for pattern in _WEIGHT_PATTERNS
+            for path in snapshot_dir.glob(pattern)
+        ]
+        if snapshot_dir.is_dir()
+        else []
+    )
+    if weight_files and (snapshot_dir / "config.json").is_file():
+        return snapshot_dir
+    if local_files_only:
+        raise CheckpointError(
+            f"AUTOVISION_OFFLINE=1 and no cached ModelScope snapshot for "
+            f"'{ms_id}'. Run once without AUTOVISION_OFFLINE to populate "
+            "the cache."
+        )
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    listing_url = _MODELSCOPE_API.format(repo=ms_id) + "/files?Revision=master"
+    with urlopen(Request(listing_url), timeout=60.0) as resp:
+        files = [
+            entry["Path"]
+            for entry in json.load(resp).get("Data", {}).get("Files", [])
+            if entry.get("Path") == "config.json"
+            or entry.get("Path", "").endswith(_WEIGHT_SUFFIXES)
+        ]
+    if not any(name.endswith(_WEIGHT_SUFFIXES) for name in files):
+        raise WeightVerificationError(
+            f"ModelScope repo '{ms_id}' lists no weight files matching "
+            f"{_WEIGHT_PATTERNS}."
+        )
+    timeout = Env.DOWNLOAD_CHUNK_TIMEOUT_SEC.value
+    for name in files:
+        target = snapshot_dir / name
+        url = _MODELSCOPE_API.format(repo=ms_id) + f"?Revision=master&FilePath={name}"
+        with urlopen(Request(url), timeout=timeout) as resp, open(target, "wb") as out:
+            while chunk := resp.read(1 << 20):
+                out.write(chunk)
+        logger.info("Downloaded %s from ModelScope.", name)
+    return snapshot_dir
+
+
+def _load_from_modelscope(
     model_cls: Any,
-    repo_id: str,
-    config_kwargs: dict[str, Any] | None = None,
+    artifact: WeightArtifact,
+    config_kwargs: dict[str, Any],
 ) -> Any:
-    """``model_cls.from_pretrained`` wrapped with the verification flow."""
+    """Verified load from the artifact's ModelScope mirror.
+
+    Mirrors the hub flow: snapshot (cached), sha256 verify, one
+    delete-and-retry on mismatch, then ``from_pretrained`` on the local
+    directory. Requires a pinned manifest entry (``artifact.sha256``) so
+    verification never depends on the network.
+    """
+    assert artifact.modelscope_id is not None  # gated by the caller
+    if Env.OFFLINE.value:
+        snapshot_dir = _download_modelscope_snapshot(
+            artifact.modelscope_id, local_files_only=True
+        )
+        _verify_snapshot(snapshot_dir, artifact, source="modelscope")
+        return model_cls.from_pretrained(snapshot_dir, **config_kwargs)
+
+    snapshot_dir = _download_modelscope_snapshot(artifact.modelscope_id)
+    try:
+        _verify_snapshot(snapshot_dir, artifact, source="modelscope")
+    except WeightVerificationError:
+        logger.warning(
+            "Hash mismatch for '%s' (ModelScope); retrying once.",
+            artifact.repo_id,
+        )
+        shutil.rmtree(snapshot_dir, ignore_errors=True)
+        snapshot_dir = _download_modelscope_snapshot(artifact.modelscope_id)
+        _verify_snapshot(snapshot_dir, artifact, source="modelscope")
+    return model_cls.from_pretrained(snapshot_dir, **config_kwargs)
+
+
+def _load_from_hub(
+    model_cls: Any,
+    artifact: WeightArtifact,
+    config_kwargs: dict[str, Any],
+) -> Any:
+    """Hub flow: mirror bridge, offline resolution, verify with one retry."""
     try:
         from huggingface_hub.errors import LocalEntryNotFoundError
     except ImportError:  # hub < 1.0 re-exports at the top level
         from huggingface_hub import LocalEntryNotFoundError  # noqa: F401
 
-    artifact = get_weight_artifact(repo_id)
-    if artifact is None:
-        logger.warning(
-            "Model '%s' is not in the weight manifest; loading WITHOUT "
-            "sha256 verification.", repo_id,
-        )
-        return model_cls.from_pretrained(repo_id, **(config_kwargs or {}))
+    repo_id = artifact.repo_id
     revision = artifact.revision
 
     # Mirror consumer (§3.2): AUTOVISION_MIRROR_URL -> HF endpoint, unless the
@@ -215,7 +364,7 @@ def load_pretrained_verified(
                 "Offline load of '%s' skipped sha256 verification (entry is "
                 "unpinned; run scripts/update_weight_hashes.py).", repo_id,
             )
-        return model_cls.from_pretrained(snapshot_dir, **(config_kwargs or {}))
+        return model_cls.from_pretrained(snapshot_dir, **config_kwargs)
 
     snapshot_dir = _download_snapshot(repo_id, revision)
     try:
@@ -226,7 +375,46 @@ def load_pretrained_verified(
         _delete_repo_cache(snapshot_dir)
         snapshot_dir = _download_snapshot(repo_id, revision)
         _verify_snapshot(snapshot_dir, artifact)  # raises on second failure
-    return model_cls.from_pretrained(snapshot_dir, **(config_kwargs or {}))
+    return model_cls.from_pretrained(snapshot_dir, **config_kwargs)
+
+
+def load_pretrained_verified(
+    model_cls: Any,
+    repo_id: str,
+    config_kwargs: dict[str, Any] | None = None,
+) -> Any:
+    """``model_cls.from_pretrained`` wrapped with the verification flow."""
+    artifact = get_weight_artifact(repo_id)
+    if artifact is None:
+        logger.warning(
+            "Model '%s' is not in the weight manifest; loading WITHOUT "
+            "sha256 verification.", repo_id,
+        )
+        return model_cls.from_pretrained(repo_id, **(config_kwargs or {}))
+
+    source = Env.WEIGHT_SOURCE.value
+    mirrorable = artifact.modelscope_id is not None and bool(artifact.sha256)
+
+    if source == "modelscope":
+        if mirrorable:
+            return _load_from_modelscope(model_cls, artifact, config_kwargs or {})
+        logger.warning(
+            "AUTOVISION_WEIGHT_SOURCE=modelscope but '%s' has no pinned "
+            "ModelScope mirror in the manifest; falling back to the hub.",
+            repo_id,
+        )
+    elif source == "auto" and mirrorable:
+        try:
+            return _load_from_hub(model_cls, artifact, config_kwargs or {})
+        except Exception as hub_error:  # network failure, blocked endpoint, ...
+            logger.warning(
+                "Hub download for '%s' failed (%s); falling back to the "
+                "ModelScope mirror '%s'.",
+                repo_id, hub_error, artifact.modelscope_id,
+            )
+            return _load_from_modelscope(model_cls, artifact, config_kwargs or {})
+
+    return _load_from_hub(model_cls, artifact, config_kwargs or {})
 
 
 def _render_manifest(manifest: dict[str, WeightArtifact]) -> str:
@@ -254,6 +442,8 @@ def _render_manifest(manifest: dict[str, WeightArtifact]) -> str:
         lines.append(f"        source={artifact.source!r},")
         lines.append(f"        revision={artifact.revision!r},")
         lines.append(f"        sha256={artifact.sha256!r},")
+        if artifact.modelscope_id is not None:
+            lines.append(f"        modelscope_id={artifact.modelscope_id!r},")
         lines.append("    ),")
     lines.append("}")
     return "\n".join(lines) + "\n"

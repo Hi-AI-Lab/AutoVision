@@ -105,6 +105,16 @@ class Env:
     MIRROR_URL = EnvVar[str | None](
         "AUTOVISION_MIRROR_URL", _default=None, _type=_parse_optional_str
     )
+    # Weight download source: "auto" (default), "huggingface", or
+    # "modelscope". "auto" uses the hub (honoring AUTOVISION_MIRROR_URL,
+    # e.g. hf-mirror.com) and falls back to a pinned ModelScope mirror when
+    # the hub path fails; explicit values force one source. Applies only to
+    # manifest entries that declare a `modelscope_id`; everything else
+    # stays on the hub. sha256 verification is source-agnostic (pinned
+    # hashes are byte-level identities).
+    WEIGHT_SOURCE = EnvVar[str](
+        "AUTOVISION_WEIGHT_SOURCE", _default="auto", _type=str
+    )
     # Compliance: telemetry is opt-in (default off), the inverse of the baseline.
     TELEMETRY = EnvVar[bool]("AUTOVISION_TELEMETRY", _default=False, _type=_parse_bool)
     TELEMETRY_ENDPOINT = EnvVar[str](
@@ -120,6 +130,13 @@ class Env:
     # can set AUTOVISION_DDP_FIND_UNUSED=0 to shed that tax.
     DDP_FIND_UNUSED = EnvVar[bool](
         "AUTOVISION_DDP_FIND_UNUSED", _default=True, _type=_parse_bool
+    )
+    # Route the DETR decoders' deformable cross-attention through the
+    # vendored fused MSDA CUDA op (object_detection_components/_msda_src,
+    # JIT-compiled on first use; needs nvcc) instead of the per-level
+    # grid_sample path. Numerically equivalent, opt-in until benchmarked.
+    MSDA_CROSS_ATTN = EnvVar[bool](
+        "AUTOVISION_MSDA_CROSS_ATTN", _default=False, _type=_parse_bool
     )
     # Reserved for the per-step watchdog (design §7) — declared so the
     # config surface is discoverable, not yet consumed by the engine.

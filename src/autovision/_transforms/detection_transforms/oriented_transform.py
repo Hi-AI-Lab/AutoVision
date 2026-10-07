@@ -79,7 +79,10 @@ class OrientedObjectDetectionTransform:
         else:
             image = image.float() / 255.0
 
-        if args.horizontal_flip_prob > 0 and random.random() < args.horizontal_flip_prob:
+        if (
+            args.horizontal_flip_prob > 0
+            and random.random() < args.horizontal_flip_prob
+        ):
             image = torch.flip(image, dims=[-1])
             polys = polys.clone()
             polys[:, 0::2] = width - polys[:, 0::2]
@@ -91,8 +94,11 @@ class OrientedObjectDetectionTransform:
         new_width, new_height = args.image_size
         if (new_width, new_height) != (width, height):
             image = torch.nn.functional.interpolate(
-                image[None], size=(new_height, new_width),
-                mode="bilinear", align_corners=False, antialias=True,
+                image[None],
+                size=(new_height, new_width),
+                mode="bilinear",
+                align_corners=False,
+                antialias=True,
             )[0]
             polys = polys.clone()
             polys[:, 0::2] *= new_width / width
@@ -118,7 +124,9 @@ class OrientedObjectDetectionTransform:
         }
 
 
-def build_oriented_val_transform_args(train_args: OrientedObjectDetectionTransformArgs) -> OrientedObjectDetectionTransformArgs:
+def build_oriented_val_transform_args(
+    train_args: OrientedObjectDetectionTransformArgs,
+) -> OrientedObjectDetectionTransformArgs:
     """Disable all stochastic augmentations for the val transform.
 
     The polygon-area filter is relaxed to 1 px²: at eval time dropping
@@ -141,7 +149,9 @@ class OrientedObjectDetectionCollateFunction:
     "original_size": list[(w,h)]}``.
     """
 
-    def __init__(self, transform_args: OrientedObjectDetectionTransformArgs, train: bool = True) -> None:
+    def __init__(
+        self, transform_args: OrientedObjectDetectionTransformArgs, train: bool = True
+    ) -> None:
         self.transform_args = transform_args
         self.train = train
 

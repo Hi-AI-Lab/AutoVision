@@ -2,6 +2,7 @@
 """Tests for the task data layer and detection transforms."""
 
 import json
+from pathlib import Path
 
 import pytest
 import torch
@@ -150,6 +151,30 @@ class TestYOLOData:
                 path=tmp_path, train=tmp_path / "x", val=tmp_path / "y",
                 names={0: "a"},
             )
+
+    def test_relative_splits_resolve_against_path(self, tmp_path):
+        # Dict payloads pass no base_dir: relative splits must still anchor
+        # to the (absolute) `path` root — the Ultralytics layout contract.
+        args, _ = self._make_yolo(tmp_path)
+        relative = YOLOObjectDetectionDataArgs(
+            path=tmp_path, train="train/images", val="train/images",
+            names={3: "dog", 7: "cat"},
+        )
+        relative.resolve_data_paths(base_dir=None)  # dict payload: no base_dir
+        assert relative.train == tmp_path / "train" / "images"
+        assert relative.val == tmp_path / "train" / "images"
+        rows = list(relative.list_image_info("train"))
+        assert len(rows) == 4
+
+    def test_relative_path_anchors_with_base_dir(self, tmp_path):
+        # Config-file payloads: base_dir anchors `path` first, then splits.
+        relative = YOLOObjectDetectionDataArgs(
+            path=Path("dataset"), train="train/images", val="val/images",
+            names={3: "dog", 7: "cat"},
+        )
+        relative.resolve_data_paths(base_dir=tmp_path)
+        assert relative.path == tmp_path / "dataset"
+        assert relative.train == tmp_path / "dataset" / "train" / "images"
 
 
 class TestStepSchedule:

@@ -225,7 +225,7 @@ class WindowProcessor(nn.Module):
         pad_w = n_w * window_size - width
 
         padded = F.pad(memory, (0, pad_w, 0, pad_h))
-        enhanced = padded.clone()
+        enhanced: torch.Tensor = padded.clone()
         windows = (
             padded.view(
                 batch, channels, n_h, window_size, n_w, window_size
@@ -246,15 +246,35 @@ class WindowProcessor(nn.Module):
         seq_len = window_size * window_size
         rel_pos_flat = rel_pos.reshape(channels, seq_len).permute(1, 0).unsqueeze(0)
 
-        # One host sync for the whole batch (adaptive_window_mask keeps at
-        # least one window per image; the fallback branch is defensive).
-        nonempty = window_mask.flatten(1).any(dim=1).tolist()
+        # One host sync for the whole batch: all selected window positions
+        # come from a single batched nonzero (repeated `.nonzero()` per
+        # image, plus `int(ys[k])` per window, used to pay two pipeline
+        # syncs per window — ~1600 of the ~2400 syncs per training step at
+        # VisDrone window counts).
+        sel_b, sel_y, sel_x = window_mask.nonzero(as_tuple=True)
+        sel_b_host = sel_b.cpu().tolist()
+        rows_by_image: list[list[int]] = [[] for _ in range(batch)]
+        for row, image_id in enumerate(sel_b_host):
+            rows_by_image[image_id].append(row)
+
+        blocks: list[torch.Tensor] = []
+        put_indices: list[torch.Tensor] = []
         for b in range(batch):
-            if not nonempty[b]:
+            rows = rows_by_image[b]
+            if not rows:
                 continue
-            selected = window_mask[b]
-            window_feats = windows[b][selected]  # (N, C, win, win)
-            window_pos = glob_grid[selected].to(memory.dtype)  # (N, C, win, win)
+            row_idx = torch.tensor(rows, device=sel_y.device, dtype=torch.long)
+            y_idx = sel_y[row_idx]
+            x_idx = sel_x[row_idx]
+            # Index-based gather (no boolean indexing → no extra syncs).
+            selected_windows = torch.stack([y_idx, x_idx], dim=1)
+            window_feats = windows[b][
+                selected_windows[:, 0], selected_windows[:, 1]
+            ]  # (N, C, win, win)
+            window_pos = (
+                glob_grid[selected_windows[:, 0], selected_windows[:, 1]]
+                .to(memory.dtype)
+            )  # (N, C, win, win)
             num_win = window_feats.shape[0]
 
             feats_flat = window_feats.reshape(num_win, channels, seq_len).permute(
@@ -268,14 +288,42 @@ class WindowProcessor(nn.Module):
             encoded = encoded.permute(0, 2, 1).reshape(
                 num_win, channels, window_size, window_size
             )
-
-            ys, xs = selected.nonzero(as_tuple=True)
-            for k in range(num_win):
-                y0 = int(ys[k]) * window_size
-                x0 = int(xs[k]) * window_size
-                enhanced[b, :, y0 : y0 + window_size, x0 : x0 + window_size] += (
-                    encoded[k]
+            blocks.append(encoded)
+            put_indices.append(
+                torch.stack(
+                    [
+                        torch.full_like(y_idx, b),
+                        y_idx,
+                        x_idx,
+                    ],
+                    dim=1,
                 )
+            )
+
+        if blocks:
+            # One batched residual write. The old loop did, per window,
+            # `bf16_slice += encoded` — i.e. bf16(f32(memory) + encoded).
+            # Doing the same accumulation on an f32 view of the padded
+            # memory and casting back once is value-identical (the bf16 →
+            # f32 → bf16 round trip of untouched cells is lossless), and
+            # index_put_(accumulate=True) rejects bf16 destinations, which
+            # the encoder's fp32 output would trip.
+            grid = (
+                padded.to(torch.float32)
+                .view(batch, channels, n_h, window_size, n_w, window_size)
+                .permute(0, 2, 4, 1, 3, 5)
+            )  # (B, n_h, n_w, C, win, win), a view of the f32 copy
+            index = torch.cat(put_indices, dim=0)
+            grid.index_put_(
+                (index[:, 0], index[:, 1], index[:, 2]),
+                torch.cat(blocks, dim=0),
+                accumulate=True,
+            )
+            enhanced = (
+                grid.permute(0, 3, 1, 4, 2, 5)
+                .reshape(batch, channels, n_h * window_size, n_w * window_size)
+                .to(memory.dtype)
+            )
 
         return enhanced[:, :, :height, :width]
 

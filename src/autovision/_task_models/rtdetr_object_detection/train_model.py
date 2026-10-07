@@ -122,7 +122,9 @@ class RTDETRObjectDetectionTrain(TrainModel):
             enc_aux_outputs=out.get("enc_aux_outputs"),
             enc_meta=out.get("enc_meta"),
         )
-        log_dict = {key: float(value.detach()) for key, value in loss_dict.items()}
+        # Keep detached tensors: the engine's log window sums them on-device
+        # and only syncs at log points (floats would be skipped entirely).
+        log_dict = {key: value.detach() for key, value in loss_dict.items()}
         return TaskStepResult(loss=loss_dict["loss"], log_dict=log_dict)
 
     @torch.no_grad()
@@ -134,7 +136,7 @@ class RTDETRObjectDetectionTrain(TrainModel):
             {"orig_w": w, "orig_h": h} for w, h in batch["original_size"]
         ], threshold=0.05)
         evaluator = self._evaluators.setdefault(
-            "val", COCOMAPEvaluator(self.categories)
+            "val", COCOMAPEvaluator(self.categories, max_dets=self.model_args.eval_max_dets)
         )
         evaluator.update(decoded)
         evaluator.update_targets(
@@ -188,7 +190,8 @@ class RTDETRObjectDetectionTrain(TrainModel):
         if state is None:
             return
         evaluator = self._evaluators.setdefault(
-            split, COCOMAPEvaluator(self.categories)
+            split,
+            COCOMAPEvaluator(self.categories, max_dets=self.model_args.eval_max_dets),
         )
         evaluator.merge_state(state)
 

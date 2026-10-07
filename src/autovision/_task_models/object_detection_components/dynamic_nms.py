@@ -80,18 +80,29 @@ def per_class_dynamic_nms(
     Returns:
         Indices into the original (N,) arrays that survive NMS, in
         ascending scan order. Empty input returns an empty index tensor.
+
+    The four inputs move to the host in one bulk transfer up front and
+    every per-class partition below runs on CPU tensors: the previous
+    GPU-tensor loop (``class_ids.unique()``, boolean indexing and
+    ``nonzero`` per class) paid ~6 pipeline syncs per class — hundreds of
+    syncs per training step at VisDrone query counts.
     """
     if boxes.shape[0] == 0:
         return torch.empty(0, dtype=torch.long, device=boxes.device)
+    device = boxes.device
+    boxes_cpu = boxes.detach().cpu()
+    scores_cpu = scores.detach().cpu()
+    class_cpu = class_ids.detach().cpu()
+    thresholds_cpu = iou_thresholds.detach().cpu()
 
-    keep_mask = torch.zeros(boxes.shape[0], dtype=torch.bool, device=boxes.device)
-    for class_id in class_ids.unique():
-        class_mask = class_ids == class_id
+    keep_mask = torch.zeros(boxes.shape[0], dtype=torch.bool)
+    for class_id in class_cpu.unique():
+        class_mask = class_cpu == class_id
         keep_class = _nms_single_class(
-            boxes[class_mask],
-            scores[class_mask],
-            iou_thresholds[class_mask],
+            boxes_cpu[class_mask],
+            scores_cpu[class_mask],
+            thresholds_cpu[class_mask],
         )
         original_indices = torch.nonzero(class_mask, as_tuple=True)[0]
         keep_mask[original_indices[keep_class]] = True
-    return torch.nonzero(keep_mask, as_tuple=True)[0]
+    return torch.nonzero(keep_mask, as_tuple=True)[0].to(device)

@@ -92,6 +92,23 @@ def weighting_function(reg_max: int, up: float, reg_scale: float) -> torch.Tenso
     return torch.tensor(values, dtype=torch.float32)
 
 
+#: Per-device cache of the weighting function — ``translate_gt`` runs once
+#: per matched-pair batch on every FGL site; rebuilding the (reg_max + 1)
+#: tensor on CPU and copying it per call paid a pipeline sync each time.
+_WEIGHTING_CACHE: dict[tuple[int, float, float, torch.device], torch.Tensor] = {}
+
+
+def _weighting_function_cached(
+    reg_max: int, reg_scale: float, up: float, device: torch.device
+) -> torch.Tensor:
+    key = (reg_max, float(reg_scale), float(up), device)
+    values = _WEIGHTING_CACHE.get(key)
+    if values is None:
+        values = weighting_function(reg_max, up, reg_scale).to(device)
+        _WEIGHTING_CACHE[key] = values
+    return values
+
+
 def translate_gt(
     gt: torch.Tensor, reg_max: int, reg_scale: float, up: float
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -102,40 +119,41 @@ def translate_gt(
     ``weight_left`` on bin ``label`` and ``weight_right`` on bin
     ``label + 1`` (linear interpolation between adjacent ``W`` values).
     Out-of-range values clamp to the end bins with all mass on the edge.
-    Ported 1:1 from the official implementation.
+    Ported 1:1 from the official implementation, then rewritten from
+    boolean-mask writes (each one a GPU pipeline sync) to ``torch.where``
+    selection — value-identical on every lane, including the historical
+    NaN when ``gt`` coincides exactly with a ``W`` knot.
     """
     gt = gt.reshape(-1)
-    function_values = weighting_function(reg_max, up, reg_scale).to(gt.device)
+    function_values = _weighting_function_cached(reg_max, reg_scale, up, gt.device)
 
     diffs = function_values.unsqueeze(0) - gt.unsqueeze(1)
-    mask = diffs <= 0
-    closest_left_indices = torch.sum(mask, dim=1) - 1
+    closest_left_indices = torch.sum(diffs <= 0, dim=1) - 1
 
     indices = closest_left_indices.float()
-    weight_right = torch.zeros_like(indices)
-    weight_left = torch.zeros_like(indices)
-
     valid_idx_mask = (indices >= 0) & (indices < reg_max)
-    valid_indices = indices[valid_idx_mask].long()
+    invalid_neg = indices < 0
+    invalid_pos = indices >= reg_max
 
-    left_values = function_values[valid_indices]
-    right_values = function_values[valid_indices + 1]
+    # Gather the bracketing W values for every lane (clamped); invalid
+    # lanes compute garbage ratios that the ``where`` selects away — the
+    # valid lanes see exactly the old arithmetic.
+    gather_idx = indices.clamp(0, reg_max - 1).long()
+    left_values = function_values[gather_idx]
+    right_values = function_values[(gather_idx + 1).clamp(max=reg_max)]
+    left_diffs = (gt - left_values).abs()
+    right_diffs = (right_values - gt).abs()
+    ratio = left_diffs / (left_diffs + right_diffs)
 
-    left_diffs = torch.abs(gt[valid_idx_mask] - left_values)
-    right_diffs = torch.abs(right_values - gt[valid_idx_mask])
-
-    weight_right[valid_idx_mask] = left_diffs / (left_diffs + right_diffs)
-    weight_left[valid_idx_mask] = 1.0 - weight_right[valid_idx_mask]
-
-    invalid_idx_mask_neg = indices < 0
-    weight_right[invalid_idx_mask_neg] = 0.0
-    weight_left[invalid_idx_mask_neg] = 1.0
-    indices[invalid_idx_mask_neg] = 0.0
-
-    invalid_idx_mask_pos = indices >= reg_max
-    weight_right[invalid_idx_mask_pos] = 1.0
-    weight_left[invalid_idx_mask_pos] = 0.0
-    indices[invalid_idx_mask_pos] = reg_max - 0.1
+    weight_right = torch.where(valid_idx_mask, ratio, torch.zeros_like(indices))
+    weight_left = torch.where(valid_idx_mask, 1.0 - ratio, torch.ones_like(indices))
+    weight_right = torch.where(invalid_pos, torch.ones_like(indices), weight_right)
+    weight_left = torch.where(invalid_pos, torch.zeros_like(indices), weight_left)
+    indices = torch.where(
+        invalid_pos,
+        torch.full_like(indices, reg_max - 0.1),
+        torch.where(invalid_neg, torch.zeros_like(indices), indices),
+    )
 
     return indices, weight_right, weight_left
 
@@ -357,7 +375,7 @@ def ddf_loss(
     reg_max: int,
     targets: list[dict[str, torch.Tensor]] | None = None,
     temperature: float = 5.0,
-    counts: tuple[float, float] | None = None,
+    counts: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Decoupled Distillation Focal loss (DDF) — official full form.
 
@@ -417,20 +435,24 @@ def ddf_loss(
     query_mask_flat = mask.reshape(-1)
     elem_mask = query_mask_flat.unsqueeze(-1).expand(-1, 4).reshape(-1)
 
+    # All scalars stay on-device: float()/bool() here would sync the GPU
+    # twice per pass (the criterion runs one pass per aux layer, every
+    # step). An empty selection normalizes to exactly 0 through the
+    # clamped sum (0 / 1), matching the previous `if mask.any()` guard.
     if counts is None:
         batch_size = max(b, 1)
-        num_pos = max(float((query_mask_flat.sum() * 8.0 / batch_size) ** 0.5), 1e-6)
-        num_neg = max(
-            float(((~query_mask_flat).sum() * 8.0 / batch_size) ** 0.5), 1e-6
+        num_pos = torch.clamp((query_mask_flat.sum() * 8.0 / batch_size) ** 0.5, min=1e-6)
+        num_neg = torch.clamp(
+            ((~query_mask_flat).sum() * 8.0 / batch_size) ** 0.5, min=1e-6
         )
     else:
         num_pos, num_neg = counts
 
-    m1 = loss_match_local[elem_mask].mean() if mask.any() else loss_match_local.sum() * 0.0
-    m2 = (
-        loss_match_local[~elem_mask].mean()
-        if (~mask).any()
-        else loss_match_local.sum() * 0.0
-    )
+    # Element-level normalization: 4 sides per query, so the divisor is the
+    # element count, not the query count (mean == sum / count).
+    matched_elements = elem_mask.sum()
+    unmatched_elements = elem_mask.numel() - matched_elements
+    m1 = loss_match_local[elem_mask].sum() / matched_elements.clamp(min=1)
+    m2 = loss_match_local[~elem_mask].sum() / unmatched_elements.clamp(min=1)
     loss = (m1 * num_pos + m2 * num_neg) / (num_pos + num_neg)
     return loss, num_pos, num_neg

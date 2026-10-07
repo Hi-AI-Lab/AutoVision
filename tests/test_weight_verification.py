@@ -280,6 +280,148 @@ class TestOfflineAndMirror:
         assert os.environ["HF_ENDPOINT"] == "https://explicit.example"
 
 
+class TestModelScopeSource:
+    """AUTOVISION_WEIGHT_SOURCE=modelscope routes pinned mirrors to
+    modelscope.cn; verification semantics are identical."""
+
+    def _fake_ms_download(self, monkeypatch, tmp_path, content=GOOD_CONTENT):
+        calls: list[str] = []
+
+        def download(ms_id: str, local_files_only: bool = False) -> Path:
+            calls.append(ms_id)
+            snapshot = tmp_path / "ms" / ms_id.replace("/", "--")
+            snapshot.mkdir(parents=True, exist_ok=True)
+            (snapshot / "config.json").write_bytes(b"{}")
+            (snapshot / "model.safetensors").write_bytes(content)
+            return snapshot
+
+        monkeypatch.setattr(
+            "autovision._models.weight_verification._download_modelscope_snapshot",
+            download,
+        )
+        return calls
+
+    def _ms_artifact(self, monkeypatch, **overrides):
+        artifact = make_artifact(modelscope_id="merve/model", **overrides)
+        monkeypatch.setattr(
+            "autovision._models.weight_verification.get_weight_artifact",
+            lambda repo_id: artifact,
+        )
+        return artifact
+
+    def test_modelscope_source_loads_mirror(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("AUTOVISION_WEIGHT_SOURCE", "modelscope")
+        self._ms_artifact(monkeypatch)
+        calls = self._fake_ms_download(monkeypatch, tmp_path)
+        model = load_pretrained_verified(FakeModelCls, "org/model")
+        assert isinstance(model, FakeModelCls)
+        assert calls == ["merve/model"]
+        assert FakeModelCls.calls[-1] == tmp_path / "ms" / "merve--model"
+
+    def test_modelscope_hash_mismatch_retries_once(
+        self, monkeypatch, tmp_path
+    ):
+        contents = iter([BAD_CONTENT, GOOD_CONTENT])
+        monkeypatch.setenv("AUTOVISION_WEIGHT_SOURCE", "modelscope")
+        self._ms_artifact(monkeypatch)
+
+        def download(ms_id: str, local_files_only: bool = False) -> Path:
+            snapshot = tmp_path / "ms" / ms_id.replace("/", "--")
+            snapshot.mkdir(parents=True, exist_ok=True)
+            (snapshot / "config.json").write_bytes(b"{}")
+            (snapshot / "model.safetensors").write_bytes(next(contents))
+            return snapshot
+
+        monkeypatch.setattr(
+            "autovision._models.weight_verification._download_modelscope_snapshot",
+            download,
+        )
+        model = load_pretrained_verified(FakeModelCls, "org/model")
+        assert isinstance(model, FakeModelCls)  # second download verified
+
+    def test_modelscope_falls_back_without_mirror_id(
+        self, monkeypatch, fake_download
+    ):
+        # Manifest entry without modelscope_id: the env switch must not
+        # break the hub path.
+        monkeypatch.setenv("AUTOVISION_WEIGHT_SOURCE", "modelscope")
+        model = load_pretrained_verified(FakeModelCls, "org/model")
+        assert isinstance(model, FakeModelCls)
+
+    def test_modelscope_offline_missing_cache_raises(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("AUTOVISION_WEIGHT_SOURCE", "modelscope")
+        monkeypatch.setenv("AUTOVISION_OFFLINE", "1")
+        self._ms_artifact(monkeypatch)
+
+        def no_cache(ms_id: str, local_files_only: bool = False) -> Path:
+            raise CheckpointError("no cached snapshot")
+
+        monkeypatch.setattr(
+            "autovision._models.weight_verification._download_modelscope_snapshot",
+            no_cache,
+        )
+        with pytest.raises(CheckpointError):
+            load_pretrained_verified(FakeModelCls, "org/model")
+
+    def test_auto_default_falls_back_to_modelscope_on_hub_failure(
+        self, monkeypatch, tmp_path
+    ):
+        # Default source ("auto"): hub first, ModelScope mirror on failure.
+        self._ms_artifact(monkeypatch)
+
+        def hub_fail(*args: Any, **kwargs: Any) -> Path:
+            raise RuntimeError("connection refused")
+
+        monkeypatch.setattr(
+            "autovision._models.weight_verification._download_snapshot",
+            hub_fail,
+        )
+        calls = self._fake_ms_download(monkeypatch, tmp_path)
+        model = load_pretrained_verified(FakeModelCls, "org/model")
+        assert isinstance(model, FakeModelCls)
+        assert calls == ["merve/model"]
+
+    def test_auto_default_prefers_hub_when_available(
+        self, monkeypatch, tmp_path
+    ):
+        # Hub works -> the ModelScope mirror must not be touched.
+        self._ms_artifact(monkeypatch)
+        ms_calls: list[str] = []
+
+        def ms_download(ms_id: str, local_files_only: bool = False) -> Path:
+            ms_calls.append(ms_id)
+            raise AssertionError("fallback must not run")
+
+        monkeypatch.setattr(
+            "autovision._models.weight_verification._download_modelscope_snapshot",
+            ms_download,
+        )
+        snapshot = tmp_path / "hub"
+        snapshot.mkdir()
+        (snapshot / "config.json").write_bytes(b"{}")
+        (snapshot / "model.safetensors").write_bytes(GOOD_CONTENT)
+        monkeypatch.setattr(
+            "autovision._models.weight_verification._download_snapshot",
+            lambda *a, **k: snapshot,
+        )
+        model = load_pretrained_verified(FakeModelCls, "org/model")
+        assert isinstance(model, FakeModelCls)
+        assert FakeModelCls.calls[-1] == snapshot
+
+    def test_render_manifest_emits_modelscope_id(self):
+        rendered = _render_manifest(
+            {"org/model": make_artifact(modelscope_id="merve/model")}
+        )
+        assert "modelscope_id='merve/model'" in rendered
+        # Entries without a mirror keep the old shape (no None noise).
+        plain = _render_manifest({"org/model": make_artifact()})
+        assert "modelscope_id" not in plain
+
+
 def _write_snapshot(root: Path, content: bytes, write: bool = True) -> Path:
     snapshot = root / "cache" / "models--org--model" / "snap"
     if write:

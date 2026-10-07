@@ -120,9 +120,7 @@ class DomeDFINEv2Decoder(DFINEv2Decoder):
         topk_ind = enc_scores.topk(topk, dim=-1).indices
 
         def _gather(t: torch.Tensor) -> torch.Tensor:
-            return t.gather(
-                1, topk_ind.unsqueeze(-1).expand(-1, -1, t.shape[-1])
-            )
+            return t.gather(1, topk_ind.unsqueeze(-1).expand(-1, -1, t.shape[-1]))
 
         mem_k = _gather(output_memory)
         # Undetached full-logit view for the encoder-proposal supervision
@@ -153,59 +151,64 @@ class DomeDFINEv2Decoder(DFINEv2Decoder):
         gate[:, :min_num] = True
 
         pooled_h, pooled_w = pooled.shape[-2:]
+        # Density-modulated per-candidate IoU thresholds for the whole
+        # batch (same per-candidate math the per-image loop used — the
+        # lookups are elementwise, so computing them for all K candidates
+        # and gathering later is value-identical).
+        proposals_k = coords_k.sigmoid()
+        density_y = (proposals_k[..., 1] * pooled_h).long().clamp(0, pooled_h - 1)
+        density_x = (proposals_k[..., 0] * pooled_w).long().clamp(0, pooled_w - 1)
+        density_k = pooled[:, 0][batch_index[:, None], density_y, density_x].detach()
+        thresholds_k = self.nms_iou_base + self.nms_iou_density_scale * density_k
+        nms_boxes_k = box_cxcywh_to_xyxy(proposals_k).detach()
+
+        # Single host transfer of the selection inputs (gate + NMS feeds);
+        # every per-image gate/NMS decision below runs on the host. The
+        # previous per-image boolean indexing (five tensors × B images)
+        # forced a data-dependent-shape pipeline sync per tensor —
+        # hundreds per training step.
+        gate_cpu = gate.detach().cpu()
+        boxes_cpu = nms_boxes_k.cpu()
+        scores_cpu = scores_k.detach().cpu()
+        class_cpu = class_k.detach().cpu()
+        thresholds_cpu = thresholds_k.cpu()
+
         kept_memory: list[torch.Tensor] = []
         kept_coords: list[torch.Tensor] = []
         kept_logits: list[torch.Tensor] = []
         queries_num: list[int] = []
         for b in range(mem_k.shape[0]):
-            rest = gate[b, min_num:]
-            mem_i = torch.cat([mem_k[b, :min_num], mem_k[b, min_num:][rest]], dim=0)
-            scores_i = torch.cat(
-                [scores_k[b, :min_num], scores_k[b, min_num:][rest]], dim=0
+            gate_b = gate_cpu[b]
+            rest_positions = (
+                torch.nonzero(gate_b[min_num:], as_tuple=True)[0] + min_num
             )
-            class_i = torch.cat(
-                [class_k[b, :min_num], class_k[b, min_num:][rest]], dim=0
-            )
-            coords_i = torch.cat(
-                [coords_k[b, :min_num], coords_k[b, min_num:][rest]], dim=0
-            )
-            logits_i = torch.cat(
-                [logits_k[b, :min_num], logits_k[b, min_num:][rest]], dim=0
-            )
-
-            # Density-modulated per-class NMS over the combined candidates;
-            # the first min_num survive regardless (baseline semantics).
-            proposals = coords_i.sigmoid()  # (n, 4) normalized cxcywh
-            if proposals.shape[0] > min_num:
-                center_y = proposals[:, 1]
-                center_x = proposals[:, 0]
-                density_y = (center_y * pooled_h).long().clamp(0, pooled_h - 1)
-                density_x = (center_x * pooled_w).long().clamp(0, pooled_w - 1)
-                density = pooled[b, 0, density_y, density_x].detach()
-                iou_thresholds = (
-                    self.nms_iou_base + self.nms_iou_density_scale * density
-                )
+            if rest_positions.numel() > 0:
+                # NMS candidates: the forced-first block plus the
+                # window-gated rest, in original position order (the old
+                # per-image candidate list). The NMS may suppress
+                # first-block candidates as suppressors; they are
+                # force-kept afterwards (baseline semantics).
+                cand = torch.cat([torch.arange(min_num), rest_positions])
                 keep = per_class_dynamic_nms(
-                    box_cxcywh_to_xyxy(proposals).detach(),
-                    scores_i.detach(),
-                    class_i.detach(),
-                    iou_thresholds.detach(),
+                    boxes_cpu[b][cand],
+                    scores_cpu[b][cand],
+                    class_cpu[b][cand],
+                    thresholds_cpu[b][cand],
                 )
                 keep = keep[keep >= min_num]
-                keep = torch.cat(
-                    [
-                        torch.arange(min_num, device=proposals.device),
-                        keep,
-                    ]
+                # NMS indices address the candidate list — map them back to
+                # original K-space before gathering (the first block is
+                # identity under this mapping, so only survivors move).
+                keep_b = torch.cat(
+                    [torch.arange(min_num), cand[keep]]
                 )
-                mem_i = mem_i[keep]
-                coords_i = coords_i[keep]
-                logits_i = logits_i[keep]
-
-            kept_memory.append(mem_i)
-            kept_coords.append(coords_i)
-            kept_logits.append(logits_i)
-            queries_num.append(int(mem_i.shape[0]))
+            else:
+                keep_b = torch.arange(min_num)
+            queries_num.append(int(keep_b.numel()))
+            keep_gpu = keep_b.to(mem_k.device)
+            kept_memory.append(mem_k[b][keep_gpu])
+            kept_coords.append(coords_k[b][keep_gpu])
+            kept_logits.append(logits_k[b][keep_gpu])
 
         padded_queries = max(queries_num)
         content = output_memory.new_zeros(
@@ -368,9 +371,7 @@ class DomeDFINEv2Decoder(DFINEv2Decoder):
             # rows are filtered by the criterion (matcher + query mask).
             out["query_features"] = matched_hidden
             if dn_meta is not None:
-                out["dn_aux_outputs"] = self._set_aux_loss(
-                    dn_out_logits, dn_out_bboxes
-                )
+                out["dn_aux_outputs"] = self._set_aux_loss(dn_out_logits, dn_out_bboxes)
                 out["dn_pre_outputs"] = {
                     "pred_logits": dn_pre_scores,
                     "pred_boxes": dn_pre_bboxes,

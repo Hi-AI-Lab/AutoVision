@@ -658,8 +658,47 @@ class TestDomeTaskModel:
         metrics = train_model.compute_metrics("val")
         assert "val_metric/dome_avg_queries" in metrics
         assert "val_metric/dome_ample_rate" in metrics
+        # Gate-tightness readout: the adaptive window mask always selects
+        # at least one window per image, so the ratio lies in (0, 1].
+        assert "val_metric/dome_window_ratio" in metrics
+        assert 0.0 < metrics["val_metric/dome_window_ratio"] <= 1.0
         consumed = train_model.compute_metrics("val")
         assert "val_metric/dome_avg_queries" not in consumed
+        assert "val_metric/dome_window_ratio" not in consumed
+
+    def test_window_ratio_rides_the_ddp_metric_state(self):
+        train_model = make_dome_train_model()
+        train_model.set_categories({0: "cat0", 1: "cat1"})
+        batch = make_batch()
+        batch["original_size"] = [(100, 80), (100, 80)]
+        train_model.validation_step(batch, 0)
+        state = train_model.export_metric_state("val")
+        assert state["dome_window_ratios"]
+        train_model.reset_metrics("val")
+        assert train_model._val_window_ratios == []
+        train_model.merge_metric_state("val", state)
+        metrics = train_model.compute_metrics("val")
+        assert 0.0 < metrics["val_metric/dome_window_ratio"] <= 1.0
+
+    def test_validation_report_footer_follows_iou_term(self):
+        # The stale-GIoU footgun: with box_regression_iou="siou" (doc 15)
+        # the note must name SIoU, the default must keep GIoU.
+        baseline = make_baseline_train_model()
+        report = baseline.validation_report({"val_metric/map": 0.0})
+        assert "VFL/bbox/GIoU only" in report
+        siou_train = LTDETRObjectDetectionTrain(
+            LTDETRObjectDetectionTrainArgs(
+                num_classes=2,
+                backbone="dinov2-vittest-notpretrained",
+                image_size=(224, 224),
+                num_queries=20,
+                num_top_queries=20,
+                decoder="dfine",
+                box_regression_iou="siou",
+            )
+        )
+        siou_report = siou_train.validation_report({"val_metric/map": 0.0})
+        assert "VFL/bbox/SIoU only" in siou_report
 
     def test_validation_step_baseline_has_no_dome_metrics(self):
         train_model = make_baseline_train_model()
@@ -828,8 +867,32 @@ class TestScriptTwin:
         for key, value in base.MODEL_ARGS.items():
             assert value == dome.MODEL_ARGS[key], f"model_args.{key} diverged"
         assert dome.MODEL_ARGS["density"] == {"max_num_select": 500}
-        assert base.TRANSFORM_ARGS == dome.TRANSFORM_ARGS
-        assert (base.STEPS, base.AUG_STOP_STEP) == (dome.STEPS, dome.AUG_STOP_STEP)
+        # The scripts may target different horizons (10-epoch pilot vs
+        # 100-epoch full run), so absolute step counts are NOT the twin
+        # invariant — the recipe is. Compare the aug-stop FRACTION and
+        # the transform args with their derived step stops normalized to
+        # that fraction; anything else that drifts (optimizer, EMA, ...)
+        # is caught by the exact MODEL_ARGS equality above.
+        assert base.AUG_STOP_FRACTION == dome.AUG_STOP_FRACTION
+        assert base.AUG_STOP_STEP == round(base.STEPS * base.AUG_STOP_FRACTION)
+        assert dome.AUG_STOP_STEP == round(dome.STEPS * dome.AUG_STOP_FRACTION)
+
+        def _normalized(args: dict, aug_stop_step: int) -> dict:
+            """Replace the aug-stop step values with a horizon-agnostic
+            sentinel (top-level ints and nested ``step_stop`` dicts)."""
+
+            def scrub(value):
+                if value == aug_stop_step:
+                    return "<aug-stop>"
+                if isinstance(value, dict):
+                    return {k: scrub(v) for k, v in value.items()}
+                return value
+
+            return {key: scrub(value) for key, value in args.items()}
+
+        assert _normalized(base.TRANSFORM_ARGS, base.AUG_STOP_STEP) == _normalized(
+            dome.TRANSFORM_ARGS, dome.AUG_STOP_STEP
+        ), "transform_args diverged beyond the horizon step stops"
 
     def test_twin_configs_pass_strict_validation(self):
         from autovision._task_models.ltdetr_object_detection import (

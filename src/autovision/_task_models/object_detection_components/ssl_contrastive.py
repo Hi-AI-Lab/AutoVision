@@ -41,6 +41,7 @@ __all__ = [
     "SSLParams",
     "SSLProjectionHead",
     "cosine_logits",
+    "epps_pulley_sigreg",
     "gather_distributed",
     "gather_distributed_padded",
     "match_cross_view",
@@ -94,6 +95,15 @@ class SSLParams:
     #: dropout view only, and it IS the whole loss (SSL-only pretraining,
     #: design doc 14 §4.10).
     instance_source: str = "matched_gt"
+    #: SIGReg distribution regularizer (design doc 16, LeVJEPA R1-A1): a
+    #: third loss leg applied to the RAW (pre-normalization) projector
+    #: outputs of the matched pool. 0 disables it entirely. Its weight is
+    #: ``sigreg_coef`` (the criterion scales ``loss_sigreg`` by it) — the
+    #: reference finding is that SIGReg mainly buys λ_ssl robustness rather
+    #: than raw mAP.
+    sigreg_coef: float = 0.0
+    sigreg_slices: int = 1024
+    sigreg_knots: int = 17
 
 
 class SSLProjectionHead(nn.Module):
@@ -140,6 +150,76 @@ class SSLProjectionHead(nn.Module):
         """Project query features; returns float32 unit-norm embeddings."""
         z = self.projector(self.input_dropout(features))
         return F.normalize(z.float(), dim=-1)
+
+    def forward_with_raw(self, features: Tensor) -> tuple[Tensor, Tensor]:
+        """Project query features, returning both the normalized and raw embeddings.
+
+        The SIGReg regularizer operates on the pre-normalization output (a
+        unit-sphere sample can never look Gaussian, so the distribution test
+        must see the raw projector space), while the contrastive losses keep
+        consuming the normalized view.
+
+        Returns:
+            Tuple ``(z, s)``: ``z`` is the L2-normalized float32 embedding
+            (identical to :meth:`forward`), ``s`` is the raw pre-normalization
+            float32 projector output of the same shape.
+        """
+        s = self.projector(self.input_dropout(features)).float()
+        z = F.normalize(s, dim=-1)
+        return z, s
+
+
+def epps_pulley_sigreg(
+    embeddings: Tensor,
+    num_slices: int = 1024,
+    num_knots: int = 17,
+    t_max: float = 3.0,
+    generator: torch.Generator | None = None,
+) -> Tensor:
+    """SIGReg: sketched Epps–Pulley distance between the embedding distribution and N(0, I).
+
+    The LeJEPA regularizer: by the Cramér–Wold theorem, multivariate
+    standard-Gaussianity reduces to standard normality of 1-D projections,
+    so the statistic averages the Epps–Pulley functional (weighted L2
+    distance between empirical and target characteristic functions) over
+    ``num_slices`` random unit directions. No whitening or centering: the
+    target is the standard Gaussian itself. Gradients are bounded and the
+    cost is linear in the sample count.
+
+    Args:
+        embeddings: Raw (pre-normalization) embeddings of shape ``(N, K)``, float32.
+        num_slices: Number of random unit directions, resampled every call.
+        num_knots: Trapezoidal quadrature knots on ``[0, t_max]``.
+        t_max: Upper integration bound.
+        generator: Optional RNG so callers can keep directions consistent
+            across DDP ranks.
+
+    Returns:
+        Scalar statistic (>= 0); an autograd-connected zero when fewer than
+        two samples are given.
+    """
+    if embeddings.ndim != 2:
+        raise ValueError(
+            f"Expected a 2-D (N, K) embedding tensor, got shape {tuple(embeddings.shape)}."
+        )
+    n = embeddings.shape[0]
+    if n < 2:
+        return embeddings.sum() * 0.0
+    k = embeddings.shape[1]
+    samples = embeddings.float()
+    directions = F.normalize(
+        torch.randn(num_slices, k, generator=generator, device=samples.device), dim=-1
+    )
+    projections = samples @ directions.T  # (N, num_slices)
+    t = torch.linspace(
+        0.0, t_max, num_knots, device=samples.device, dtype=torch.float32
+    )
+    # Empirical characteristic function of each projection on the grid: (num_slices, num_knots).
+    angles = projections.T.unsqueeze(-1) * t
+    phi = angles.cos().mean(dim=0) + 1j * angles.sin().mean(dim=0)
+    target = torch.exp(-0.5 * t**2)
+    integrand = (phi - target).abs().square() * torch.exp(-0.5 * t**2)
+    return torch.trapezoid(integrand, t, dim=-1).mean()
 
 
 class PaddedGather(NamedTuple):
@@ -247,19 +327,28 @@ def simcse_infonce_loss(
             objective degenerates for ``N == 1``; callers guard the pool
             size beforehand), or mismatched masks.
     """
-    if z1.ndim != 2 or z2.ndim != 2 or z2.shape[0] < z1.shape[0] or z2.shape[1] != z1.shape[1]:
+    if (
+        z1.ndim != 2
+        or z2.ndim != 2
+        or z2.shape[0] < z1.shape[0]
+        or z2.shape[1] != z1.shape[1]
+    ):
         raise ValueError(
             f"Expected 2-D views with z2 rows >= z1 rows and matching dims, "
             f"got {tuple(z1.shape)} and {tuple(z2.shape)}."
         )
     if z1.shape[0] < 2:
-        raise ValueError(f"Contrastive pool needs at least 2 anchors, got {z1.shape[0]}.")
+        raise ValueError(
+            f"Contrastive pool needs at least 2 anchors, got {z1.shape[0]}."
+        )
     if logits is None:
         logits = cosine_logits(z1, z2, temp)
     else:
         expected = (z1.shape[0], z2.shape[0])
         if logits.shape != expected:
-            raise ValueError(f"logits {tuple(logits.shape)} must be {expected}-shaped (N, C).")
+            raise ValueError(
+                f"logits {tuple(logits.shape)} must be {expected}-shaped (N, C)."
+            )
 
     anchor_rows = torch.arange(z1.shape[0], device=z1.device)
     if valid_rows is not None:
@@ -307,7 +396,12 @@ def supervised_contrastive_loss(
     positive mask so a real class-0 anchor can never adopt a pad column as
     a positive.
     """
-    if z1.ndim != 2 or z2.ndim != 2 or z2.shape[0] < z1.shape[0] or z2.shape[1] != z1.shape[1]:
+    if (
+        z1.ndim != 2
+        or z2.ndim != 2
+        or z2.shape[0] < z1.shape[0]
+        or z2.shape[1] != z1.shape[1]
+    ):
         raise ValueError(
             f"Expected 2-D views with z2 rows >= z1 rows and matching dims, "
             f"got {tuple(z1.shape)} and {tuple(z2.shape)}."
@@ -318,18 +412,24 @@ def supervised_contrastive_loss(
             f"got {tuple(labels1.shape)} and {tuple(labels2.shape)}."
         )
     if z1.shape[0] < 2:
-        raise ValueError(f"Contrastive pool needs at least 2 anchors, got {z1.shape[0]}.")
+        raise ValueError(
+            f"Contrastive pool needs at least 2 anchors, got {z1.shape[0]}."
+        )
     if logits is None:
         logits = cosine_logits(z1, z2, temp)
     else:
         expected = (z1.shape[0], z2.shape[0])
         if logits.shape != expected:
-            raise ValueError(f"logits {tuple(logits.shape)} must be {expected}-shaped (N, C).")
+            raise ValueError(
+                f"logits {tuple(logits.shape)} must be {expected}-shaped (N, C)."
+            )
 
     positive_mask = labels1[:, None] == labels2[None, :]
     if same_image_positive_only:
         if image_ids1 is None or image_ids2 is None:
-            raise ValueError("same_image_positive_only=True requires image_ids1 and image_ids2.")
+            raise ValueError(
+                "same_image_positive_only=True requires image_ids1 and image_ids2."
+            )
         positive_mask &= image_ids1[:, None] == image_ids2[None, :]
     # The paired candidate of anchor i is column i — always a positive
     # (rectangular-safe diagonal fill; extras have no forced diagonal).
@@ -353,7 +453,9 @@ def supervised_contrastive_loss(
     positive_counts = positive_mask.sum(dim=1)
     # masked_fill, not a multiply: masked pad columns hold -inf log-probs
     # and -inf * 0 = NaN (design doc 14, M2 hard constraint (c)).
-    per_anchor = -(log_probs.masked_fill(~positive_mask, 0.0)).sum(dim=1) / positive_counts
+    per_anchor = (
+        -(log_probs.masked_fill(~positive_mask, 0.0)).sum(dim=1) / positive_counts
+    )
     if valid_rows is not None:
         per_anchor = per_anchor[valid_rows]
     return per_anchor.mean()
@@ -379,10 +481,14 @@ def positive_logit_bias(
             f"logits {tuple(logits.shape)} and positive_mask {tuple(positive_mask.shape)} must match."
         )
     if iou is not None and iou.shape != logits.shape:
-        raise ValueError(f"iou {tuple(iou.shape)} must match logits {tuple(logits.shape)}.")
+        raise ValueError(
+            f"iou {tuple(iou.shape)} must match logits {tuple(logits.shape)}."
+        )
     weight = torch.ones_like(logits)
     if iou is not None:
-        weight = torch.where(positive_mask, iou.float().clamp(min=_EPS).pow(gamma), weight)
+        weight = torch.where(
+            positive_mask, iou.float().clamp(min=_EPS).pow(gamma), weight
+        )
     return logits + bias * weight.log()
 
 
@@ -422,7 +528,12 @@ def match_cross_view(
     is unspecified; callers must not rely on a specific assignment for
     degenerate (tied) inputs.
     """
-    if boxes1.ndim != 2 or boxes1.shape[-1] != 4 or boxes2.ndim != 2 or boxes2.shape[-1] != 4:
+    if (
+        boxes1.ndim != 2
+        or boxes1.shape[-1] != 4
+        or boxes2.ndim != 2
+        or boxes2.shape[-1] != 4
+    ):
         raise ValueError(
             f"Expected (N, 4) xyxy boxes, got {tuple(boxes1.shape)} and {tuple(boxes2.shape)}."
         )
@@ -431,7 +542,9 @@ def match_cross_view(
     device = boxes1.device
     if boxes1.shape[0] == 0 or boxes2.shape[0] == 0:
         empty_idx = torch.empty(0, dtype=torch.long, device=device)
-        return CrossViewMatch(row_idx=empty_idx, col_idx=empty_idx, iou=torch.empty(0, device=device))
+        return CrossViewMatch(
+            row_idx=empty_idx, col_idx=empty_idx, iou=torch.empty(0, device=device)
+        )
     boxes1 = boxes1.float()
     boxes2 = boxes2.float()
     iou = box_iou(boxes1, boxes2)
@@ -440,7 +553,9 @@ def match_cross_view(
     rows, cols = linear_sum_assignment(iou.detach().cpu().numpy(), maximize=True)
     row_idx = torch.as_tensor(rows, dtype=torch.long, device=device)
     col_idx = torch.as_tensor(cols, dtype=torch.long, device=device)
-    keep = (iou[row_idx, col_idx] >= iou_threshold) & (labels1[row_idx] == labels2[col_idx])
+    keep = (iou[row_idx, col_idx] >= iou_threshold) & (
+        labels1[row_idx] == labels2[col_idx]
+    )
     return CrossViewMatch(
         row_idx=row_idx[keep],
         col_idx=col_idx[keep],
@@ -506,11 +621,15 @@ def _ssl_candidates_loss(
         stats_sink["pool_size"] = float(view1.shape[0])
         stats_sink["paired_size"] = float(view1.shape[0])
 
-    use_distributed = dist.is_available() and dist.is_initialized() and params.gather_distributed
+    use_distributed = (
+        dist.is_available() and dist.is_initialized() and params.gather_distributed
+    )
     if use_distributed:
         # Same global enter/skip consensus as the matched pool: ranks must
         # never diverge inside the collectives.
-        has_pool = torch.tensor([int(view1.shape[0] >= 2)], device=device, dtype=torch.int64)
+        has_pool = torch.tensor(
+            [int(view1.shape[0] >= 2)], device=device, dtype=torch.int64
+        )
         dist.all_reduce(has_pool, op=dist.ReduceOp.MAX)
         if int(has_pool.item()) == 0:
             return _connected_zero(z1)
@@ -523,7 +642,9 @@ def _ssl_candidates_loss(
         valid_rows = valid_cols = None
     if view1.shape[0] < 2:
         return _connected_zero(z1)
-    return simcse_infonce_loss(view1, view2, params.temp, valid_rows=valid_rows, valid_cols=valid_cols)
+    return simcse_infonce_loss(
+        view1, view2, params.temp, valid_rows=valid_rows, valid_cols=valid_cols
+    )
 
 
 def _pair_two_crop(
@@ -550,14 +671,17 @@ def _pair_two_crop(
     Grouping is segment-based (one stable sort + searchsorted boundaries,
     O(pool)) instead of a per-image boolean-mask scan (O(images × pool)).
     The whole loop runs on the CPU: pools are tiny (matched instances only)
-    and one host transfer per STEP beats several per IMAGE. scipy's
-    assignment runs per image deliberately — a block-diagonal batched
-    assignment would be asymptotically worse, O((Σn)³) vs Σ O(n³) (design
-    doc 14, R8).
+    and one host transfer per STEP beats several per IMAGE — the int64
+    tensors ride one transfer and the float boxes another, so the CUDA
+    pipeline drains twice, not four times. scipy's assignment runs per
+    image deliberately — a block-diagonal batched assignment would be
+    asymptotically worse, O((Σn)³) vs Σ O(n³) (design doc 14, R8).
     """
-    batch_sel = batch_sel.detach().cpu()
-    src_sel = src_sel.detach().cpu()
-    labels_all = labels_all.detach().cpu()
+    packed_int = torch.cat([batch_sel, src_sel, labels_all]).detach().cpu()
+    n_pool = batch_sel.numel()
+    batch_sel = packed_int[:n_pool]
+    src_sel = packed_int[n_pool : 2 * n_pool]
+    labels_all = packed_int[2 * n_pool :]
     boxes_xyxy = boxes_xyxy.detach().cpu()
 
     # Segment the pool by image row (stable sort keeps pool order per image).
@@ -571,7 +695,7 @@ def _pair_two_crop(
         idx = torch.searchsorted(uniq, torch.tensor(image_id, dtype=uniq.dtype))
         if idx >= uniq.numel() or uniq[idx].item() != image_id:
             return None
-        return slice(int(starts[idx]), int(ends[idx])), order[starts[idx]:ends[idx]]
+        return slice(int(starts[idx]), int(ends[idx])), order[starts[idx] : ends[idx]]
 
     rows1_list: list[Tensor] = []
     srcs1_list: list[Tensor] = []
@@ -682,21 +806,24 @@ def ssl_contrastive_loss(
     if query_mask is not None:
         keep &= query_mask[batch_sel, src_sel]
     batch_sel, src_sel = batch_sel[keep], src_sel[keep]
-    labels_all = (
-        torch.cat([t["labels"][tgt_idx] for t, (_, tgt_idx) in zip(targets, indices)])[keep]
-        .to(device)
-    )
+    labels_all = torch.cat(
+        [t["labels"][tgt_idx] for t, (_, tgt_idx) in zip(targets, indices)]
+    )[keep].to(device)
     boxes_all: Tensor | None = None
     if two_crop:
         boxes_all = box_cxcywh_to_xyxy(
-            torch.cat([t["boxes"][tgt_idx] for t, (_, tgt_idx) in zip(targets, indices)])[keep]
+            torch.cat(
+                [t["boxes"][tgt_idx] for t, (_, tgt_idx) in zip(targets, indices)]
+            )[keep]
         ).to(device)
     if stats_sink is not None:
         stats_sink["pool_size"] = float(batch_sel.numel())
         stats_sink["paired_size"] = 0.0  # completed after pairing (0 on early exits)
 
     # ── distributed enter/skip consensus (never a per-rank decision) ────
-    use_distributed = dist.is_available() and dist.is_initialized() and params.gather_distributed
+    use_distributed = (
+        dist.is_available() and dist.is_initialized() and params.gather_distributed
+    )
     local_has_pool = batch_sel.numel() >= 2
     if use_distributed:
         has_pool = torch.tensor([int(local_has_pool)], device=device, dtype=torch.int64)
@@ -717,8 +844,13 @@ def ssl_contrastive_loss(
     if two_crop:
         assert boxes_all is not None
         paired = _pair_two_crop(
-            batch_sel, src_sel, labels_all, boxes_all, images_per_view,
-            params.iou_match, params.flip_invariant_pairing,
+            batch_sel,
+            src_sel,
+            labels_all,
+            boxes_all,
+            images_per_view,
+            params.iou_match,
+            params.flip_invariant_pairing,
         )
         if paired is not None:
             rows1, srcs1, rows2, srcs2, pair_ious_cpu, unpaired_cpu = paired
@@ -776,11 +908,14 @@ def ssl_contrastive_loss(
         if extras_is_view2 is not None:
             # Same fold-back for the extras, in candidate order.
             extras_rows = batch_sel[unpaired]
-            extras_ids = torch.where(
-                extras_is_view2,
-                extras_rows - images_per_view,
-                extras_rows,
-            ) + offset
+            extras_ids = (
+                torch.where(
+                    extras_is_view2,
+                    extras_rows - images_per_view,
+                    extras_rows,
+                )
+                + offset
+            )
             image_ids2 = torch.cat([image_ids2, extras_ids])
 
     # ── gather the pool (z / labels / boxes / ids in the same rank order) ─
@@ -853,8 +988,12 @@ def ssl_contrastive_loss(
     loss: Tensor | None = None
     if params.mode in ("unsup", "both"):
         loss = simcse_infonce_loss(
-            view1, cand_z, params.temp,
-            logits=biased_logits, valid_rows=valid_rows, valid_cols=valid_cols,
+            view1,
+            cand_z,
+            params.temp,
+            logits=biased_logits,
+            valid_rows=valid_rows,
+            valid_cols=valid_cols,
         )
     if params.mode in ("sup", "both"):
         sup_loss = supervised_contrastive_loss(

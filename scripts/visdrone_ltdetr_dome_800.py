@@ -46,13 +46,40 @@ flat-cosine(平坦 50% 后余弦衰减到 1% 尾部);Dome 的 EMA restart-on-aug
 - gradient_accumulation_steps=1(官方 batch 8 → 809 步/epoch;
   batch 16 × accum 4 只有 404 步);
 - hidden_dim=256(官方 Dome-S encoder/decoder 宽度);
-- EMA pilot 保持 0.995(160-epoch 全量跑回官方 0.9999/warmup 1000)。
-Launch:
+- EMA pilot 保持 0.995(全量跑回官方 0.9999/warmup 1000)。
+
+100-epoch 全量跑(本版本):STEPS=80,887 @ global batch 8,增广停用
+54,599 步(108/160 比例),EMA 恢复官方 0.9999/warmup 1000,scale 锁定
+800(SSL two_crop 前向翻倍,960 阶梯会 OOM)。三个消融开关:
+- ``--erase``  box-aware 背景擦除(设计文档 16,V2 约束模式);
+- ``--ssl``    per-object 对比 SSL,上游 M4 推荐起点 unsup/two_crop/
+               λ=0.1(设计文档 14 §8;two_crop 单步前向 = 2B 张图);
+- ``--siou``   box 回归 IoU 项 GIoU→SIoU(设计文档 15,D-FINE 专用,
+               loss 系数继承 loss_giou 权重,E0 探针 0.953 无需缩放)。
+显存探针(决定 --ssl 跑 batch 8 还是 4×accum2):
 
     cd /home/hdjs/Research/Project/AutoVision && \
-    .venv/bin/python scripts/visdrone_ltdetr_dome_800.py
+    .venv/bin/python scripts/visdrone_ltdetr_dome_800.py \
+        --probe-steps 20 --ssl --erase --siou
+
+显存注意(24GB 卡实测,前次 100ep 运行):20 步探针峰值 ~18.6GiB reserved,
+但长跑会因碎片化持续爬升——step ~550 曾触发 allocator OOM 警告(free 28MiB,
+靠清缓存自愈)。验证是 fp32 前向(与训练同 batch),是最可能硬 OOM 的时刻;
+engine 现在在验证前后 empty_cache 缓解。若重跑仍见 OOM 警告:
+    a) --micro-batch 2 --grad-accum 4(global batch 仍为 8,激活减半);
+    b) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,\
+garbage_collection_threshold:0.80(阈值以上主动回收缓存块);
+    c) 二者都不够时须砍 SSL two_crop(2B 前向是最大内存项)。
+Launch(全开):
+
+    cd /home/hdjs/Research/Project/AutoVision && \
+    AUTOVISION_MIRROR_URL=https://hf-mirror.com \
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+    .venv/bin/python scripts/visdrone_ltdetr_dome_800.py \
+        --ssl --erase --siou
 """
 
+import argparse
 import json
 import time
 from pathlib import Path
@@ -68,14 +95,17 @@ BACKBONE_WEIGHTS = Path(
     "/convnext-tiny-ltdetr-coco/model.safetensors"
 )
 
-# Dome-S-VisDrone: 160 epochs x 6471 train images. At global batch 16 the
-# same number of sample presentations is 6471*160/16 optimizer steps.
-EPOCHS = 10  # 10-epoch pilot (full Dome recipe: 160)
+# Dome-S-VisDrone: 160 epochs x 6471 train images. This run: 100 epochs at
+# the same global batch 8 → 6471*100/8 optimizer steps.
+EPOCHS = 100
 TRAIN_IMAGES = 6471
 # Pilot v4 trains at the OFFICIAL Dome-S global batch (8 = 809 optimizer
 # steps/epoch); bf16 + hidden 256 fits batch 8 at 800px on the 24GB card.
+# With --ssl the two_crop pipeline doubles the per-forward images (2B=16);
+# if the probe OOMs, drop to --micro-batch 4 --grad-accum 2 (identical
+# optimizer-step math: 8 pairs per optimizer step).
 GLOBAL_BATCH = 8
-STEPS = (TRAIN_IMAGES * EPOCHS) // GLOBAL_BATCH  # 8,088 @ 10 epochs
+STEPS = (TRAIN_IMAGES * EPOCHS) // GLOBAL_BATCH  # 80,887 @ 100 epochs
 # Dome stops photometric/zoom-out/IoU-crop and multiscale at epoch 108/160.
 AUG_STOP_FRACTION = 108 / 160
 AUG_STOP_STEP = round(STEPS * AUG_STOP_FRACTION)  # 43,679
@@ -97,7 +127,7 @@ MODEL_ARGS = {
     # Dome-faithful 4-level pyramid (strides 4/8/16/32) — design doc 13 D1.
     "pyramid_levels": 4,
     # --- Dome-S-VisDrone decoder/criterion params ---
-    "num_queries": 250,            # = Dome min_num_select
+    "num_queries": 250,  # = Dome min_num_select
     "num_top_queries": 500,
     "reg_max": 32,
     "num_denoising": 100,
@@ -131,20 +161,21 @@ MODEL_ARGS = {
     # epochs 2.5-3.7 and only recovered once the schedule decayed to
     # 1.58e-4). 1.4e-4 sqrt-scales to 9.9e-5 — the stable regime.
     "lr": 1.4e-4,
-    "backbone_lr_factor": 0.1,     # Dome backbone lr 2e-5 / 2e-4
+    "backbone_lr_factor": 0.1,  # Dome backbone lr 2e-5 / 2e-4
     "weight_decay": 6.5e-5,
     "gradient_clip_val": 0.1,
-    "lr_warmup_steps": 500,        # Dome LinearWarmup warmup_duration 500
+    "lr_warmup_steps": 500,  # Dome LinearWarmup warmup_duration 500
     # Official Dome-S MultiStepLR (×0.8 at 80/120 of 160 epochs).
     "lr_scheduler": "multistep",
     "lr_milestones": LR_MILESTONES,
     "lr_gamma": LR_GAMMA,
-    # Dome ModelEMA decay 0.9999, warmups 1000 (include/optimizer.yml)
-    # Pilot: 0.995 — 0.999's ~1k-step EMA window averages in early
-    # weights, a measured +9.5% mAP drag at 4k steps. Restore 0.9999
-    # (official) for the 160-epoch run.
-    "ema_momentum": 0.995,
-    "ema_warmup_steps": 200,
+    # Dome ModelEMA decay 0.9999, warmups 1000 (include/optimizer.yml).
+    # Restored for the 100-epoch full run: 0.995's ~200-step EMA window
+    # was a pilot-only setting — at 80k steps the official 10k-step
+    # window tracks the converged weights instead of averaging in the
+    # early ones.
+    "ema_momentum": 0.9999,
+    "ema_warmup_steps": 1000,
     # VisDrone official eval protocol (Dome maxDets=500).
     "eval_max_dets": 500,
 }
@@ -159,6 +190,11 @@ TRANSFORM_ARGS = {
     "photometric_step_stop": AUG_STOP_STEP,
     "zoom_out_step_stop": AUG_STOP_STEP,
     "iou_crop_step_stop": AUG_STOP_STEP,
+    # Erasure follows the Dome aug-stop cadence too (design doc 16 P1.5):
+    # constant ratio until 108/160, then off — the run ends on the dense
+    # distribution it deploys with. ("auto" would resolve to the generic
+    # epoch-88 stop, not the Dome cadence.)
+    "random_erase_step_stop": AUG_STOP_STEP,
     "scale_jitter": {
         # Pilot: locked at 800 — the 576-960 ladder sends ~43% of batches
         # below the val resolution and undersamples VisDrone's small
@@ -172,26 +208,138 @@ TRANSFORM_ARGS = {
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--erase",
+        action="store_true",
+        help="box-aware background erasure (V2 constrained mode: every "
+        "object keeps >= 2 patches; rf-detr-ssl-v2 design doc 8)",
+    )
+    parser.add_argument(
+        "--ssl",
+        action="store_true",
+        help="per-object contrastive SSL branch, upstream M4 recommended "
+        "start: unsup / two_crop / loss_coef=0.1 (design doc 14 §8); "
+        "two_crop doubles the per-forward images to 2B",
+    )
+    parser.add_argument(
+        "--siou",
+        action="store_true",
+        help="swap the box loss IoU term GIoU -> SIoU (design doc 15; "
+        "D-FINE decoder only; loss weight inherits loss_giou)",
+    )
+    parser.add_argument(
+        "--micro-batch",
+        type=int,
+        default=GLOBAL_BATCH,
+        help="per-forward batch (image pairs under --ssl two_crop); "
+        "grad-accum scales the optimizer step back to the Dome global "
+        "batch when this is halved",
+    )
+    parser.add_argument(
+        "--grad-accum",
+        type=int,
+        default=1,
+        help="gradient accumulation steps (micro_batch x accum should "
+        "equal GLOBAL_BATCH to keep the Dome optimizer recipe)",
+    )
+    parser.add_argument(
+        "--probe-steps",
+        type=int,
+        default=None,
+        help="run only this many steps into a scratch out dir and print "
+        "peak CUDA memory (launch-decision probe for --ssl)",
+    )
+    namespace = parser.parse_args()
+
+    transform_args = dict(TRANSFORM_ARGS)
+    if namespace.erase:
+        transform_args.update(
+            {
+                "random_erase_prob": 0.5,
+                "random_erase_ratio": 0.4,
+                "random_erase_interior": True,
+                "random_erase_min_keep": 2,
+            }
+        )
+
+    model_args = dict(MODEL_ARGS)
+    if namespace.ssl:
+        # Upstream M4 recommended start (design doc 14 §8): unsup /
+        # two_crop / λ=0.1 — λ∈0.1–0.25 is the measured-robust band.
+        model_args["ssl"] = {
+            "mode": "unsup",
+            "view": "two_crop",
+            "loss_coef": 0.1,
+        }
+    if namespace.siou:
+        # Design doc 15: siou_loss_coef=None inherits the loss_giou weight
+        # (E0 probe: loss-scale ratio 0.953 — no down-scaling needed);
+        # siou_theta keeps the paper default 4.
+        model_args["box_regression_iou"] = "siou"
+
+    flags = [
+        name
+        for name, on in (
+            ("ssl", namespace.ssl),
+            ("erase", namespace.erase),
+            ("siou", namespace.siou),
+        )
+        if on
+    ]
+    if namespace.probe_steps is not None:
+        out = "runs/probe_dome_mem"
+        steps = namespace.probe_steps
+        checkpoint_args = None
+    else:
+        out = "runs/visdrone_ltdetr_convnextt_dome_800_100ep" + (
+            "-" + "-".join(flags) if flags else ""
+        )
+        steps = STEPS
+        # Aligned with the 1000-step validation cadence: the previous run
+        # was interrupted at step ~1005 with save_every 2000 — no last.ckpt
+        # existed yet, so 1000 steps of training were unrecoverable. A
+        # 1000-step checkpoint bounds the loss to one interval for the cost
+        # of one ~0.6GB atomic write per 1000 steps (<1% overhead at
+        # 2.5 s/step).
+        checkpoint_args = {"save_every_num_steps": 1000}
+
     start = time.perf_counter()
     result = train_object_detection(
-        out="runs/visdrone_ltdetr_convnextt_dome_800",
+        out=out,
         data={
             "format": "coco",
-            "train": {"annotations": str(VISDRONE / "annotations/visdrone_train.json"),
-                      "images": str(VISDRONE / "VisDrone2019-DET-train/images")},
-            "val": {"annotations": str(VISDRONE / "annotations/visdrone_val.json"),
-                    "images": str(VISDRONE / "VisDrone2019-DET-val/images")},
+            "train": {
+                "annotations": str(VISDRONE / "annotations/visdrone_train.json"),
+                "images": str(VISDRONE / "VisDrone2019-DET-train/images"),
+            },
+            "val": {
+                "annotations": str(VISDRONE / "annotations/visdrone_val.json"),
+                "images": str(VISDRONE / "VisDrone2019-DET-val/images"),
+            },
         },
         model="ltdetr/dinov3-convnext-tiny",
-        steps=STEPS,
-        batch_size=8,
-        gradient_accumulation_steps=1,
+        steps=steps,
+        batch_size=namespace.micro_batch,
+        gradient_accumulation_steps=namespace.grad_accum,
         num_workers=8,
-        model_args=MODEL_ARGS,
-        transform_args=TRANSFORM_ARGS,
+        model_args=model_args,
+        transform_args=transform_args,
         trainer_args={"val_every_num_steps": 1000, "log_every_n_steps": 500},
-        save_checkpoint_args={"save_every_num_steps": 2000},
+        save_checkpoint_args=checkpoint_args,
     )
+    if namespace.probe_steps is not None:
+        import torch
+
+        peak_alloc = torch.cuda.max_memory_allocated() / 2**30
+        peak_reserved = torch.cuda.max_memory_reserved() / 2**30
+        print("\n" + "=" * 60)
+        print(f"probe: {namespace.probe_steps} steps, flags={flags or ['none']}")
+        print(f"micro_batch={namespace.micro_batch} grad_accum={namespace.grad_accum}")
+        print(f"peak allocated: {peak_alloc:.1f} GiB")
+        print(f"peak reserved:  {peak_reserved:.1f} GiB")
+        print("=" * 60)
+        return
     print("\n" + "=" * 60)
     print("VisDrone LT-DETR Dome 800px (dinov3-convnext-tiny) finished")
     print("=" * 60)

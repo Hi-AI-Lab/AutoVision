@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
-"""D-FINE criterion: RT-DETRv2 losses + FGL (0.15) + DDF (1.5) [+ SSL].
+"""D-FINE criterion: RT-DETRv2 losses + FGL (0.15) + DDF (1.5) [+ SSL] [+ SIoU].
 
 Runs ONE Hungarian matching pass per decoder layer (the D-FINE losses share
 the classification/box assignments) and extends the RT-DETRv2 loss set
@@ -16,12 +16,18 @@ the classification/box assignments) and extends the RT-DETRv2 loss set
   suffixes, but the ``if key in losses`` filter drops the never-produced
   suffixed SSL keys.
 
+``box_regression_iou="siou"`` (design doc 15) swaps the box loss's GIoU
+term for SIoU (``loss_siou``) across every branch — main, ``_pre``,
+``_dn_pre``, and the copied ``_aux_i`` / ``_dn_i`` / ``_enc_i`` suffixes.
+
 Auxiliary layers are deep-supervised with factor 1.0 through the ``*_aux_i``
 / ``*_dn_i`` suffixes like the baseline; the dn branch is normalized by
 ``num_boxes × dn_num_group``.
 """
 
 from __future__ import annotations
+
+from typing import Literal
 
 import torch
 from torch import nn
@@ -43,12 +49,16 @@ from autovision._task_models.object_detection_components.dfine_utils import (
     fg_loss_from_targets,
     matched_pair_iou,
 )
+from autovision._task_models.object_detection_components.matcher import (
+    indices_to_device,
+)
 from autovision._task_models.object_detection_components.rtdetrv2_criterion import (
     loss_boxes,
     loss_labels_vfl,
 )
 from autovision._task_models.object_detection_components.ssl_contrastive import (
     SSLParams,
+    epps_pulley_sigreg,
     ssl_contrastive_loss,
 )
 
@@ -76,6 +86,16 @@ class DFINECriterionV2(nn.Module):
             without converging; lower it there.
         ssl_params: per-object contrastive SSL contract (design doc 14); ``None``
             disables the objective entirely (no ``loss_ssl`` key, no head wiring).
+        box_regression_iou: IoU term of the supervised box loss (design doc 15).
+            ``"giou"`` (default) keeps the upstream ``loss_giou`` emission;
+            ``"siou"`` replaces it with ``loss_siou`` (Scylla-IoU,
+            arXiv:2205.12740) across every box-loss branch (main, ``_pre``,
+            ``_dn_pre``, ``_aux_i``, ``_dn_i``, ``_enc_i``) — mutually exclusive
+            emissions. The matcher's GIoU cost is intentionally untouched.
+        siou_loss_coef: weight of ``loss_siou`` in siou mode; ``None`` (default)
+            inherits the ``loss_giou`` weight so the swapped-in term keeps the
+            anchor weight (E0 probe: loss-scale ratio 0.953 on VisDrone).
+        siou_theta: shape-cost exponent of the SIoU loss (paper default 4).
     """
 
     def __init__(
@@ -92,8 +112,16 @@ class DFINECriterionV2(nn.Module):
         defe_underestimation_penalty: float = 0.3,
         defe_count_underestimation_weight: float = 2.0,
         ssl_params: SSLParams | None = None,
+        box_regression_iou: Literal["giou", "siou"] = "giou",
+        siou_loss_coef: float | None = None,
+        siou_theta: float = 4.0,
     ) -> None:
         super().__init__()
+        if box_regression_iou not in ("giou", "siou"):
+            raise ValueError(
+                f"Unknown box_regression_iou {box_regression_iou!r}; "
+                "expected 'giou' or 'siou'."
+            )
         self.matcher = matcher
         self.weight_dict = dict(
             weight_dict
@@ -119,17 +147,56 @@ class DFINECriterionV2(nn.Module):
         self.ssl_params = ssl_params
         if ssl_params is not None:
             self.weight_dict["loss_ssl"] = ssl_params.loss_coef
+        if ssl_params is not None and ssl_params.sigreg_coef > 0:
+            # SIGReg third leg (design doc 16, LeVJEPA R1-A1): own weight so
+            # the raw statistic is scaled exactly once, independent of
+            # loss_ssl.
+            self.weight_dict["loss_sigreg"] = ssl_params.sigreg_coef
+        # IoU term of the box loss (design doc 15): siou mode swaps the
+        # weight_dict entry — the inheritance base is the PRE-pop loss_giou
+        # weight (default dict: 2.0; an explicitly supplied weight_dict is
+        # the same source) — then retires loss_giou so the dict matches the
+        # mutually-exclusive emission set.
+        self.box_regression_iou = box_regression_iou
+        self.siou_theta = siou_theta
+        self._iou_loss_key = (
+            "loss_siou" if box_regression_iou == "siou" else "loss_giou"
+        )
+        if box_regression_iou == "siou":
+            inherited = self.weight_dict.get("loss_giou", 2.0)
+            self.weight_dict.pop("loss_giou", None)
+            self.weight_dict["loss_siou"] = (
+                inherited if siou_loss_coef is None else siou_loss_coef
+            )
         # Written by the training wrapper each step; drives the
         # every_n_steps gate of the SSL objective (state lives outside the
         # forward call, mirroring the RF-DETR-SSL contract).
         self.ssl_step: int = 0
         # DDF pos/neg normalization counts cached from the aux pass for the
-        # dn pass within the same forward (official semantics).
-        self._ddf_num_pos: float | None = None
-        self._ddf_num_neg: float | None = None
+        # dn pass within the same forward (official semantics). Kept as
+        # on-device scalars — float() here would sync the GPU every step.
+        self._ddf_num_pos: torch.Tensor | None = None
+        self._ddf_num_neg: torch.Tensor | None = None
         # Diagnostics from the most recent SSL evaluation (design doc 14
         # D10): matched-pool size and paired-pool size on this rank.
         self.last_ssl_stats: dict[str, float] | None = None
+
+    def _loss_boxes(
+        self,
+        outputs: dict[str, torch.Tensor],
+        targets: list[dict[str, torch.Tensor]],
+        indices: list[tuple[torch.Tensor, torch.Tensor]],
+        num_boxes: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        """Module-level box loss bound to this criterion's IoU term (doc 15)."""
+        return loss_boxes(
+            outputs,
+            targets,
+            indices,
+            num_boxes,
+            iou_term=self.box_regression_iou,
+            siou_theta=self.siou_theta,
+        )
 
     def forward(
         self,
@@ -150,6 +217,8 @@ class DFINECriterionV2(nn.Module):
         defe_info: dict | None = None,
         ssl_z1: torch.Tensor | None = None,
         ssl_z2: torch.Tensor | None = None,
+        ssl_s1: torch.Tensor | None = None,
+        ssl_s2: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         # Route B (design doc 14 §4.10): label-free SSL-only pretraining.
         # The candidate pool needs no Hungarian match and no targets, so
@@ -162,7 +231,9 @@ class DFINECriterionV2(nn.Module):
             self.ssl_params is not None
             and self.ssl_params.instance_source == "encoder_candidates"
         ):
-            if not (isinstance(ssl_z1, torch.Tensor) and isinstance(ssl_z2, torch.Tensor)):
+            if not (
+                isinstance(ssl_z1, torch.Tensor) and isinstance(ssl_z2, torch.Tensor)
+            ):
                 raise ValueError(
                     "ssl instance_source='encoder_candidates' requires the model "
                     "outputs to carry ssl_z1/ssl_z2 candidate features; build the "
@@ -197,8 +268,9 @@ class DFINECriterionV2(nn.Module):
         losses: dict[str, torch.Tensor] = {}
         num_entries = len(outputs_list)
         layer_indices: list[list[tuple[torch.Tensor, torch.Tensor]]] = []
+        device = outputs_list[-1]["pred_logits"].device
         for output_index, outputs in enumerate(outputs_list):
-            indices = self.matcher(outputs, targets)
+            indices = indices_to_device(self.matcher(outputs, targets), device)
             layer_indices.append(indices)
             suffix = "" if output_index == num_entries - 1 else f"_aux_{output_index}"
             # VFL keeps each layer's own Hungarian assignment (official).
@@ -214,7 +286,7 @@ class DFINECriterionV2(nn.Module):
         aux_indices = layer_indices[:-1]
         pre_indices: list[tuple[torch.Tensor, torch.Tensor]] | None = None
         if pre_outputs is not None:
-            pre_indices = self.matcher(pre_outputs, targets)
+            pre_indices = indices_to_device(self.matcher(pre_outputs, targets), device)
         enc_indices_list: list[list[tuple[torch.Tensor, torch.Tensor]]] = []
         if enc_aux_outputs:
             class_agnostic = bool(enc_meta.get("class_agnostic", False))
@@ -227,12 +299,12 @@ class DFINECriterionV2(nn.Module):
                 else targets
             )
             for enc_outputs in enc_aux_outputs:
-                enc_indices_list.append(self.matcher(enc_outputs, enc_targets_list))
+                enc_indices_list.append(
+                    indices_to_device(self.matcher(enc_outputs, enc_targets_list), device)
+                )
         indices_go = self._get_go_indices(
             layer_indices[-1],
-            aux_indices
-            + ([pre_indices] if pre_indices else [])
-            + enc_indices_list,
+            aux_indices + ([pre_indices] if pre_indices else []) + enc_indices_list,
         )
         num_boxes_go = torch.tensor(
             float(sum(int(src.numel()) for src, _ in indices_go)),
@@ -245,13 +317,13 @@ class DFINECriterionV2(nn.Module):
             )
             # Box losses ride the union assignment (baseline: the pre head
             # is one more entry in the go-indices union for "boxes").
-            for name, value in loss_boxes(
+            for name, value in self._loss_boxes(
                 pre_outputs, targets, indices_go, num_boxes_go
             ).items():
                 losses[f"{name}_pre"] = value
 
         final_outputs = outputs_list[-1]
-        for name, value in loss_boxes(
+        for name, value in self._loss_boxes(
             final_outputs, targets, indices_go, num_boxes_go
         ).items():
             losses[name] = value
@@ -269,13 +341,18 @@ class DFINECriterionV2(nn.Module):
                     targets[batch_index]["boxes"][dst].to(anchor.device)
                 )
                 lab, w_r, w_l = bbox2distance(
-                    anchor[batch_index, src].detach(), gt_xyxy, self.reg_max, self.reg_scale
+                    anchor[batch_index, src].detach(),
+                    gt_xyxy,
+                    self.reg_max,
+                    self.reg_scale,
                 )
                 fgl_targets[batch_index] = (src, dst, lab, w_r, w_l)
 
         if fgl_targets is not None:
             for output_index in range(num_entries):
-                suffix = "" if output_index == num_entries - 1 else f"_aux_{output_index}"
+                suffix = (
+                    "" if output_index == num_entries - 1 else f"_aux_{output_index}"
+                )
                 layer_corners = corners_list[output_index]
                 layer_boxes = outputs_list[output_index]["pred_boxes"]
                 layer_loss = layer_corners.sum() * 0.0
@@ -305,7 +382,7 @@ class DFINECriterionV2(nn.Module):
             # ``dn_pre_outputs``) gets the same VFL + box pass as the
             # matched pre head, over the CDN assignment.
             if dn_pre_outputs is not None:
-                for name, value in loss_boxes(
+                for name, value in self._loss_boxes(
                     dn_pre_outputs, targets, dn_indices, dn_num_boxes
                 ).items():
                     losses[f"{name}_dn_pre"] = value
@@ -317,7 +394,7 @@ class DFINECriterionV2(nn.Module):
                 losses[f"loss_vfl{suffix}"] = loss_labels_vfl(
                     dn_layer, targets, dn_indices, dn_num_boxes
                 )
-                for name, value in loss_boxes(
+                for name, value in self._loss_boxes(
                     dn_layer, targets, dn_indices, dn_num_boxes
                 ).items():
                     losses[f"{name}{suffix}"] = value
@@ -337,7 +414,11 @@ class DFINECriterionV2(nn.Module):
         # layer over ALL queries (official full form — matched weight IoU,
         # unmatched weight teacher max prob; the num_pos/num_neg counts are
         # computed on this pass and reused by the dn branch).
-        if corners_list is not None and len(corners_list) >= 2 and self.ddf_loss_weight > 0:
+        if (
+            corners_list is not None
+            and len(corners_list) >= 2
+            and self.ddf_loss_weight > 0
+        ):
             for output_index in range(num_entries - 1):
                 loss_ddf, num_pos, num_neg = ddf_loss(
                     corners_list[output_index],
@@ -395,7 +476,9 @@ class DFINECriterionV2(nn.Module):
         # ssl_params but missing features is a head/criterion configuration
         # mismatch — fail loud instead of silently training without SSL.
         if self.ssl_params is not None and self.training:
-            if not (isinstance(ssl_z1, torch.Tensor) and isinstance(ssl_z2, torch.Tensor)):
+            if not (
+                isinstance(ssl_z1, torch.Tensor) and isinstance(ssl_z2, torch.Tensor)
+            ):
                 raise ValueError(
                     "ssl_params is set but the model outputs carry no "
                     "ssl_z1/ssl_z2 features; build the task model with the "
@@ -415,12 +498,46 @@ class DFINECriterionV2(nn.Module):
                     query_mask=query_mask,
                     stats_sink=ssl_stats,
                 )
+                if self.ssl_params.sigreg_coef > 0:
+                    if not (
+                        isinstance(ssl_s1, torch.Tensor)
+                        and isinstance(ssl_s2, torch.Tensor)
+                    ):
+                        raise ValueError(
+                            "ssl sigreg_coef>0 requires the model outputs to "
+                            "carry ssl_s1/ssl_s2 raw projector taps; build the "
+                            "task model with the same ssl sigreg config "
+                            "(design doc 16 R1-A1)."
+                        )
+                    # Per-view halves of the query pool, batch-flattened to
+                    # (B*Q, D). The reference pools the group-0 match per
+                    # view; here the regularizer covers the full query
+                    # embedding distribution (keeps the unmatched-query
+                    # half of the cloud Gaussian too). Each half is a
+                    # per-sample mean, so no pairing and no gather.
+                    losses["loss_sigreg"] = 0.5 * (
+                        epps_pulley_sigreg(
+                            ssl_s1.reshape(-1, ssl_s1.shape[-1]),
+                            num_slices=self.ssl_params.sigreg_slices,
+                            num_knots=self.ssl_params.sigreg_knots,
+                        )
+                        + epps_pulley_sigreg(
+                            ssl_s2.reshape(-1, ssl_s2.shape[-1]),
+                            num_slices=self.ssl_params.sigreg_slices,
+                            num_knots=self.ssl_params.sigreg_knots,
+                        )
+                    )
                 self.last_ssl_stats = ssl_stats
             else:
                 # Stride miss: don't let the previous hit's diagnostics
                 # leak into this step's log.
                 self.last_ssl_stats = None
 
+        # Zero-fill any NaN term (degenerate empty-GT / zero-area-box paths)
+        # so one poisoned branch cannot NaN the total: nan_to_num's backward
+        # routes zero gradient to the NaN input, so the term drops out of
+        # the step instead of corrupting it. The engine's non-finite guard
+        # still catches a NaN TOTAL — the failure mode this must not mask.
         losses = {
             key: torch.nan_to_num(value, nan=0.0) for key, value in losses.items()
         }
@@ -448,20 +565,21 @@ class DFINECriterionV2(nn.Module):
                     enc_indices_list[enc_index],
                     num_boxes,
                 )
-                for name, value in loss_boxes(
+                for name, value in self._loss_boxes(
                     enc_outputs, enc_targets, indices_go, num_boxes_go
                 ).items():
                     losses[f"{name}{suffix}"] = value
 
         weights = dict(self.weight_dict)
+        iou_key = self._iou_loss_key
         if pre_outputs is not None:
             weights["loss_vfl_pre"] = self.weight_dict["loss_vfl"]
             weights["loss_bbox_pre"] = self.weight_dict["loss_bbox"]
-            weights["loss_giou_pre"] = self.weight_dict["loss_giou"]
+            weights[f"{iou_key}_pre"] = self.weight_dict[iou_key]
         if dn_pre_outputs is not None:
             weights["loss_vfl_dn_pre"] = self.weight_dict["loss_vfl"]
             weights["loss_bbox_dn_pre"] = self.weight_dict["loss_bbox"]
-            weights["loss_giou_dn_pre"] = self.weight_dict["loss_giou"]
+            weights[f"{iou_key}_dn_pre"] = self.weight_dict[iou_key]
         for enc_index in range(len(enc_aux_outputs or [])):
             for key, value in self.weight_dict.items():
                 weights[f"{key}_enc_{enc_index}"] = value
@@ -489,7 +607,17 @@ class DFINECriterionV2(nn.Module):
 
         Accumulates every layer's (query, gt) pairs, keeps pairs seen in
         multiple layers first, and de-duplicates per query so each query
-        appears once with its most-frequent GT."""
+        appears once with its most-frequent GT.
+
+        Vectorized form of the official sequential loop: unique rows sorted
+        by count (descending, STABLE so equal counts keep the lexicographic
+        order of ``torch.unique``), then the first occurrence of each query
+        row — its highest-count assignment (earliest-lexicographic on
+        ties). Rows are emitted in first-appearance order, matching the
+        official dict-insertion order. No ``.item()`` round-trips: the
+        per-row Python loop cost grew with VisDrone's union size (hundreds
+        of rows per image, twice per training step).
+        """
         results = []
         for indices_aux in indices_aux_list:
             indices = [
@@ -500,14 +628,27 @@ class DFINECriterionV2(nn.Module):
             torch.cat([idx[0][:, None], idx[1][:, None]], 1) for idx in indices
         ]:
             unique, counts = torch.unique(ind, return_counts=True, dim=0)
-            count_sort_indices = torch.argsort(counts, descending=True)
-            unique_sorted = unique[count_sort_indices]
-            column_to_row: dict[int, int] = {}
-            for idx in unique_sorted:
-                row_idx, col_idx = idx[0].item(), idx[1].item()
-                if row_idx not in column_to_row:
-                    column_to_row[row_idx] = col_idx
-            final_rows = torch.tensor(list(column_to_row.keys()), device=ind.device)
-            final_cols = torch.tensor(list(column_to_row.values()), device=ind.device)
-            results.append((final_rows.long(), final_cols.long()))
+            # Stable count-descending sort: equal counts keep torch.unique's
+            # lexicographic order. A query row's pairs are NOT contiguous in
+            # this order, so group by row first (stable keeps the
+            # count-desc order within a row) — each group's first entry is
+            # that row's highest-count assignment (earliest-lexicographic
+            # on ties), exactly what the old sequential dict loop kept.
+            unique_sorted = unique[torch.argsort(counts, descending=True, stable=True)]
+            row_order = torch.argsort(unique_sorted[:, 0], stable=True)
+            grouped_rows = unique_sorted[row_order, 0]
+            group_mask = torch.ones(
+                grouped_rows.shape[0], dtype=torch.bool, device=grouped_rows.device
+            )
+            group_mask[1:] = grouped_rows[1:] != grouped_rows[:-1]
+            positions = row_order[group_mask.nonzero(as_tuple=True)[0]]
+            # Ascending positions reproduce the old loop's visit (and
+            # dict-insertion) order.
+            positions = positions.sort().values
+            results.append(
+                (
+                    unique_sorted[positions, 0].long(),
+                    unique_sorted[positions, 1].long(),
+                )
+            )
         return results
