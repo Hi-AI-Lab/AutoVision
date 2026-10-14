@@ -44,8 +44,8 @@ from autovision.tasks.detection.avdetr.task_model import (
 from autovision.tasks.detection.components.dfine_criterion import (
     DFINECriterionV2,
 )
-from autovision.tasks.detection.components.ema import ModelEMA
-from autovision.tasks.detection.components.flat_cosine import (
+from autovision.tasks.shared.ema import ModelEMA
+from autovision.tasks.shared.flat_cosine import (
     FlatCosineLRScheduler,
 )
 from autovision.tasks.detection.components.matcher import (

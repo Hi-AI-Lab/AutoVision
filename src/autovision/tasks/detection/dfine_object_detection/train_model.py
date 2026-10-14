@@ -60,7 +60,7 @@ class DFINEObjectDetectionTrain(RTDETRObjectDetectionTrain):
             fgl_loss_weight=model_args.fgl_loss_weight,
             ddf_loss_weight=model_args.ddf_loss_weight,
         )
-        from autovision.tasks.detection.components.ema import ModelEMA
+        from autovision.tasks.shared.ema import ModelEMA
 
         self.ema_model: ModelEMA | None = (
             ModelEMA(

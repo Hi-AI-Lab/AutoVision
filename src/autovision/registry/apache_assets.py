@@ -56,6 +56,15 @@ def register_apache_assets() -> None:
         mirrors=(f"{_HF_MIRROR}/dfine_l_coco.pth", f"{_GH_STORAGE}/dfine_l_coco.pth"),
     )
     register_downloadable(
+        "edgecrafter/ecvits",
+        url=(
+            "https://github.com/capsule2077/edgecrafter/releases/download/"
+            "edgecrafterv1/ecvits.pth"
+        ),
+        sha256="c7e31349336539cca3c5f7f67ad397bd297621d6e6fabc3da49c3c6f21a5057b",
+        license=_EDGECRAFTER_LICENSE,
+    )
+    register_downloadable(
         "edgecrafter/ecvitt",
         url=(
             "https://github.com/capsule2077/edgecrafter/releases/download/"

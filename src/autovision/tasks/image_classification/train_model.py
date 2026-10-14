@@ -141,7 +141,7 @@ class ImageClassificationTrain(TrainModel):
                 max_epochs=total_steps,
             )
         else:  # pragma: no cover - flat-cosine path exercised via detection
-            from autovision.tasks.detection.components.flat_cosine import (
+            from autovision.tasks.shared.flat_cosine import (
                 FlatCosineLRScheduler,
             )
 

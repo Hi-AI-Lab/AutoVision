@@ -24,7 +24,7 @@ from autovision.augment.detection.box_aware_eraser import (
     erase_background,
 )
 from autovision.metrics.map_evaluator import COCOMAPEvaluator
-from autovision.tasks.detection.components.ema import ModelEMA
+from autovision.tasks.shared.ema import ModelEMA
 from autovision.tasks.detection.components.ssl_contrastive import (
     SSLParams,
     ssl_contrastive_loss,

@@ -15,7 +15,7 @@ from autovision.tasks import (
     TaskNetwork,
     TrainModel,
 )
-from autovision.tasks.detection.components import ModelEMA
+from autovision.tasks.shared.ema import ModelEMA
 from autovision.tasks.task_model_io import ModelInputSpec, TensorSpec
 
 

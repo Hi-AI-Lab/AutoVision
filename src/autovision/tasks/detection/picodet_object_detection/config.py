@@ -57,7 +57,7 @@ class PicoDetObjectDetectionTrainArgs(TrainModelArgs, PydanticConfig):
     def resolve_auto(
         self, total_steps: int, train_num_batches: int, gradient_accumulation_steps: int
     ) -> None:
-        from autovision.tasks.detection.components.flat_cosine import (
+        from autovision.tasks.shared.flat_cosine import (
             resolve_flat_cosine_windows,
         )
 

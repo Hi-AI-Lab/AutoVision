@@ -8,7 +8,7 @@ import torch
 from autovision.metrics.oriented_detection import (
     OrientedDetectionMetricCollector,
 )
-from autovision.tasks.detection.components.ema import ModelEMA
+from autovision.tasks.shared.ema import ModelEMA
 from autovision.tasks.detection.components.obb import (
     xyxyxyxy_to_xywhr,
 )

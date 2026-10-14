@@ -361,7 +361,7 @@ class TestOptimizerGroups:
         assert sta_ids <= detector_ids
 
     def test_scheduler_is_flat_cosine(self):
-        from autovision.tasks.detection.components.flat_cosine import (
+        from autovision.tasks.shared.flat_cosine import (
             FlatCosineLRScheduler,
         )
 

@@ -10,8 +10,8 @@ import torch
 
 from autovision.metrics.map_evaluator import COCOMAPEvaluator
 from autovision.optim import get_weight_decay_parameters
-from autovision.tasks.detection.components.ema import ModelEMA
-from autovision.tasks.detection.components.flat_cosine import (
+from autovision.tasks.shared.ema import ModelEMA
+from autovision.tasks.shared.flat_cosine import (
     FlatCosineLRScheduler,
 )
 from autovision.tasks.detection.picodet_object_detection.config import (

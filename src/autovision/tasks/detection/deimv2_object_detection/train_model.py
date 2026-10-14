@@ -20,7 +20,7 @@ import torch
 
 from autovision.metrics.map_evaluator import COCOMAPEvaluator
 from autovision.optim import build_adamw
-from autovision.tasks.detection.components.ema import ModelEMA
+from autovision.tasks.shared.ema import ModelEMA
 from autovision.tasks.detection.deimv2_object_detection.config import (
     Deimv2ObjectDetectionTrainArgs,
 )

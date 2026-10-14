@@ -94,18 +94,7 @@ ALLOWED_UPWARD: dict[tuple[str, str], str] = {
     ),
 }
 
-#: Compat shim packages (pre-migration aliases) are exempt entirely.
-SHIM_PACKAGES = {
-    "_commands", "_configs", "_data", "_transforms", "_methods", "_models",
-    "_task_models", "_engine", "_optim", "_metrics", "_embedding",
-    "_registry", "_export", "_observability", "_loggers", "_events",
-    "_debug", "_visualize",
-}
-
-
 def layer_of(top_segment: str) -> int | None:
-    if top_segment in SHIM_PACKAGES:
-        return None
     return LAYERS.get(top_segment, _TOP_LEVEL_RANK)
 
 
@@ -141,8 +130,6 @@ def check() -> list[str]:
             if parts[0] == "_model_wrappers":
                 continue
         source_pkg = parts[0]
-        if source_pkg in SHIM_PACKAGES:
-            continue
         source_rank = layer_of(source_pkg)
         source_mod = ".".join(parts[:-1]) if parts[-1] == "__init__" else ".".join(parts)
         try:

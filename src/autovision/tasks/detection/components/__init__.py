@@ -6,10 +6,6 @@ from autovision.tasks.detection.components.box_ops import (
     box_xyxy_to_cxcywh_norm,
     generalized_box_iou_loss,
 )
-from autovision.tasks.detection.components.ema import ModelEMA
-from autovision.tasks.detection.components.flat_cosine import (
-    FlatCosineLRScheduler,
-)
 from autovision.tasks.detection.components.hybrid_encoder import (
     HybridEncoder,
 )
@@ -29,10 +25,8 @@ from autovision.tasks.detection.components.sahi import (
 )
 
 __all__ = [
-    "FlatCosineLRScheduler",
     "HungarianMatcher",
     "HybridEncoder",
-    "ModelEMA",
     "RTDETRCriterionV2",
     "RTDETRv2Decoder",
     "combine_object_detection_tiles",

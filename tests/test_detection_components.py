@@ -5,11 +5,11 @@ import pytest
 import torch
 from torch import nn
 
+from autovision.tasks.shared.ema import ModelEMA
+from autovision.tasks.shared.flat_cosine import FlatCosineLRScheduler
 from autovision.tasks.detection.components import (
-    FlatCosineLRScheduler,
     HungarianMatcher,
     HybridEncoder,
-    ModelEMA,
     RTDETRCriterionV2,
     RTDETRv2Decoder,
     box_cxcywh_norm_to_xyxy,
