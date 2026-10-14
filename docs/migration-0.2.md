@@ -7,7 +7,7 @@ list_models / list_methods / load_*` 及全部参数键名）；变化的只有�
 
 ## 旧 → 新 import 路径速查
 
-| 旧（0.1，带弃用 shim） | 新（0.2） |
+| 旧（0.1） | 新（0.2） |
 |---|---|
 | `autovision._commands` | `autovision.cli` |
 | `autovision._configs` | `autovision.config` |
@@ -38,10 +38,11 @@ _system / _torch_compile / types / errors / _version`。
 
 ## 兼容性承诺（一个版本周期）
 
-1. **顶层 shim**：所有旧包名保留为弃用 shim（`import autovision._methods`
-   可用，发 `DeprecationWarning`，直接 re-export 新包公开名）。深层子模块
-   路径（如 `autovision._methods.dino.dino`）**不在 shim 范围**——它们从来
-   不是公开 API。
+1. **顶层 shim**：迁移完成初期旧包名曾以弃用 shim 过渡（发
+   `DeprecationWarning`，re-export 新包公开名）。**已于 2026-10-14 移除**：
+   仓库内外均无引用，shim 未随任何版本发布，0.2 起旧顶层包名不再可用，
+   请直接按上表改为新路径。深层子模块路径（如 `autovision._methods.dino.dino`）
+   从来不是公开 API，始终不在兼容范围。
 2. **`embed` 格式名**：`format="lightly_csv"` 改名 `"csv_features"`（输出
    布局不变）；旧值保留一个版本，发 `DeprecationWarning`（R15）。
 3. **checkpoint**：state-dict 键与张量布局不变；旧 payload 的
