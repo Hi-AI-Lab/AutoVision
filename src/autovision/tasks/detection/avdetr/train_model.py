@@ -44,10 +44,6 @@ from autovision.tasks.detection.avdetr.task_model import (
 from autovision.tasks.detection.components.dfine_criterion import (
     DFINECriterionV2,
 )
-from autovision.tasks.shared.ema import ModelEMA
-from autovision.tasks.shared.flat_cosine import (
-    FlatCosineLRScheduler,
-)
 from autovision.tasks.detection.components.matcher import (
     HungarianMatcher,
 )
@@ -59,6 +55,10 @@ from autovision.tasks.detection.components.open_vocab import (
 )
 from autovision.tasks.detection.components.rtdetrv2_criterion import (
     RTDETRCriterionV2,
+)
+from autovision.tasks.shared.ema import ModelEMA
+from autovision.tasks.shared.flat_cosine import (
+    FlatCosineLRScheduler,
 )
 from autovision.tasks.train_model import TaskStepResult, TrainModel
 

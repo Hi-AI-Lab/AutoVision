@@ -24,7 +24,6 @@ from autovision.augment.detection.box_aware_eraser import (
     erase_background,
 )
 from autovision.metrics.map_evaluator import COCOMAPEvaluator
-from autovision.tasks.shared.ema import ModelEMA
 from autovision.tasks.detection.components.ssl_contrastive import (
     SSLParams,
     ssl_contrastive_loss,
@@ -35,6 +34,7 @@ from autovision.tasks.detection.rfdetr_object_detection.config import (
 from autovision.tasks.detection.rfdetr_object_detection.task_model import (
     RFDETRObjectDetection,
 )
+from autovision.tasks.shared.ema import ModelEMA
 from autovision.tasks.train_model import TaskStepResult, TrainModel
 
 logger = logging.getLogger("autovision")

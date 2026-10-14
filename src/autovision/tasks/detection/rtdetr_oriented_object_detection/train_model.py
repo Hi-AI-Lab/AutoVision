@@ -8,7 +8,6 @@ import torch
 from autovision.metrics.oriented_detection import (
     OrientedDetectionMetricCollector,
 )
-from autovision.tasks.shared.ema import ModelEMA
 from autovision.tasks.detection.components.obb import (
     xyxyxyxy_to_xywhr,
 )
@@ -26,6 +25,7 @@ from autovision.tasks.detection.rtdetr_oriented_object_detection.config import (
 from autovision.tasks.detection.rtdetr_oriented_object_detection.task_model import (
     RTDETROrientedObjectDetection,
 )
+from autovision.tasks.shared.ema import ModelEMA
 from autovision.tasks.train_model import TaskStepResult, TrainModel
 
 __all__ = ["RTDETROrientedObjectDetectionTrain"]

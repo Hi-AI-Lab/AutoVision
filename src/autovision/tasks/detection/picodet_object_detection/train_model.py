@@ -10,16 +10,16 @@ import torch
 
 from autovision.metrics.map_evaluator import COCOMAPEvaluator
 from autovision.optim import get_weight_decay_parameters
-from autovision.tasks.shared.ema import ModelEMA
-from autovision.tasks.shared.flat_cosine import (
-    FlatCosineLRScheduler,
-)
 from autovision.tasks.detection.picodet_object_detection.config import (
     PicoDetObjectDetectionTrainArgs,
 )
 from autovision.tasks.detection.picodet_object_detection.losses import PicoCriterion
 from autovision.tasks.detection.picodet_object_detection.task_model import (
     PicoDetObjectDetection,
+)
+from autovision.tasks.shared.ema import ModelEMA
+from autovision.tasks.shared.flat_cosine import (
+    FlatCosineLRScheduler,
 )
 from autovision.tasks.train_model import TaskStepResult, TrainModel
 

@@ -5,8 +5,6 @@ import pytest
 import torch
 from torch import nn
 
-from autovision.tasks.shared.ema import ModelEMA
-from autovision.tasks.shared.flat_cosine import FlatCosineLRScheduler
 from autovision.tasks.detection.components import (
     HungarianMatcher,
     HybridEncoder,
@@ -25,6 +23,8 @@ from autovision.tasks.detection.components.dfine_criterion import (
 from autovision.tasks.detection.components.multistep_schedule import (
     MultiStepWarmupScheduler,
 )
+from autovision.tasks.shared.ema import ModelEMA
+from autovision.tasks.shared.flat_cosine import FlatCosineLRScheduler
 
 
 def fake_targets(batch_size: int = 2, device="cpu"):
