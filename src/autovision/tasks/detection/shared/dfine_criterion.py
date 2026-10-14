@@ -37,7 +37,7 @@ from typing import Literal
 import torch
 from torch import nn
 
-from autovision._distributed import reduce_dict
+from autovision.runtime.distributed import reduce_dict
 from autovision.tasks.detection.shared.defe import (
     defe_count_loss,
     defe_density_loss,

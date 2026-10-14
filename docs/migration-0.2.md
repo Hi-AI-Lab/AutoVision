@@ -123,6 +123,10 @@ docs/ 历史分册中的 LT-DETR 表述（历史名，新文档首行已注）�
 | `tasks.detection.components.{tiling_utils,sahi}` | `tasks.shared.{tiling_utils,sahi}` |
 | `tasks.detection.components.{sfs_ff,dbfsaf,wavelet_downsample}` | `tasks.detection.fsdc.<同名>` |
 | `tasks.eomt`（跨三分割任务架构核，2026-10-15 并入） | `tasks.shared.eomt` |
+| `autovision.optimizer_type` | `autovision.optim.optimizer_type`（3 个消费者全在 optim） |
+| `autovision._plot` / `autovision._system` | `autovision.cli.plot` / `autovision.cli.system_info`（唯一消费者是 cli/train） |
+| `autovision._model_wrappers`（6 行 legacy shim） | **已删除**；`RTDETRModelWrapper` 走 `autovision.encoders.rtdetr` |
+| `autovision._{_accelerator,_distributed,_env,_logging,_checkpoint,_torch_compile}` | `autovision.runtime.{accelerator,distributed,env,logging,checkpoint,torch_compile}`（runtime/ 新包，去下划线前缀） |
 | `autovision.tasks.depth_estimation` / `pose_estimation` | 新建脚手架（无家族，见包 docstring 模板） |
 
 不变：`tasks.detection.avdetr`、`tasks.eomt`（跨三任务架构核）、

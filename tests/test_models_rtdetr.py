@@ -67,12 +67,10 @@ class TestRTDETRModelWrapper:
         model = FakeRTDETRModel()
         assert RTDETRModelWrapper(model).get_model() is model
 
-    def test_legacy_public_module(self):
-        import autovision._model_wrappers
+    def test_public_module(self):
+        import autovision.encoders.rtdetr as package
 
-        assert (
-            autovision._model_wrappers.RTDETRModelWrapper is RTDETRModelWrapper
-        )
+        assert package.RTDETRModelWrapper is RTDETRModelWrapper
 
 
 class TestCustomPackageExport:

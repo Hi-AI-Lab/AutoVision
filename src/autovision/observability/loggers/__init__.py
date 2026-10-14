@@ -18,8 +18,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from autovision._distributed import is_global_rank_zero
 from autovision.observability.loggers.jsonl import JSONLLogger
+from autovision.runtime.distributed import is_global_rank_zero
 
 __all__ = [
     "JSONLLogger",

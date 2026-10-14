@@ -4,7 +4,7 @@
 This is an *internal* adapter (no package, no model list): it wraps a bare
 detection module whose ``backbone`` returns a list of multi-scale feature
 maps and exposes ``out_channels``. Used by task-model components and
-available to users via ``autovision._model_wrappers.RTDETRModelWrapper``.
+available to users as ``autovision.encoders.rtdetr.RTDETRModelWrapper``.
 """
 
 from __future__ import annotations

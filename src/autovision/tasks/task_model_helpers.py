@@ -12,9 +12,9 @@ from typing import Any
 
 import torch
 
-from autovision._accelerator import npu_available
-from autovision._env import Env  # noqa: F401  (cache dir contract)
 from autovision.errors import CheckpointError
+from autovision.runtime.accelerator import npu_available
+from autovision.runtime.env import Env  # noqa: F401  (cache dir contract)
 from autovision.tasks.task_model import TaskNetwork
 from autovision.types import PathLike
 
@@ -56,6 +56,8 @@ _MODULE_PATH_MIGRATIONS: tuple[tuple[str, str], ...] = (
      "autovision.tasks.detection.detr."),
     ("autovision.tasks.eomt.",
      "autovision.tasks.shared.eomt."),
+    ("autovision.optimizer_type.",
+     "autovision.optim.optimizer_type."),
     ("autovision.tasks.detection.dfine_object_detection.",
      "autovision.tasks.detection.dfine."),
     ("autovision.tasks.detection.deimv2_object_detection.",

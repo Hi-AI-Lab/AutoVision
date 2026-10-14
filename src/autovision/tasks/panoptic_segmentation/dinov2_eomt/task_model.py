@@ -7,10 +7,10 @@ from typing import Any
 
 import torch
 
-from autovision.tasks.shared.eomt.postprocess import panoptic_segmentation_decode
 from autovision.tasks.semantic_segmentation.dinov2_eomt.task_model import (
     Dinov2EomtSemanticSegmentation,
 )
+from autovision.tasks.shared.eomt.postprocess import panoptic_segmentation_decode
 
 __all__ = ["Dinov2EomtPanopticSegmentation"]
 

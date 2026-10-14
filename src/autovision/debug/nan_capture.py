@@ -18,8 +18,8 @@ import numpy as np
 import torch
 from torch import nn
 
-from autovision._accelerator import npu_available
 from autovision.errors import AutovisionError
+from autovision.runtime.accelerator import npu_available
 
 __all__ = ["NaNCaptureMonitor", "NaNDetectedError", "load_nan_capture"]
 

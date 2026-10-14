@@ -8,7 +8,6 @@ from typing import Any
 import torch
 
 from autovision.metrics.panoptic_segmentation import PanopticMetricCollector
-from autovision.tasks.shared.eomt.postprocess import panoptic_segmentation_decode
 from autovision.tasks.panoptic_segmentation.dinov2_eomt.config import (
     Dinov2EomtPanopticSegmentationTrainArgs,
 )
@@ -18,6 +17,7 @@ from autovision.tasks.panoptic_segmentation.dinov2_eomt.task_model import (
 from autovision.tasks.semantic_segmentation.dinov2_eomt.train_model import (
     Dinov2EomtSemanticSegmentationTrain,
 )
+from autovision.tasks.shared.eomt.postprocess import panoptic_segmentation_decode
 from autovision.tasks.train_model import TaskStepResult, TrainModel
 
 __all__ = ["Dinov2EomtPanopticSegmentationTrain"]

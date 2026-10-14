@@ -18,7 +18,7 @@ import logging
 from contextlib import nullcontext
 from typing import Any
 
-from autovision._env import Env
+from autovision.runtime.env import Env
 
 __all__ = ["end_span", "get_tracer", "is_otel_enabled", "otel_span", "start_span"]
 

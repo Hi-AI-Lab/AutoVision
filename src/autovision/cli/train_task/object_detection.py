@@ -11,8 +11,6 @@ from typing import Any
 
 import yaml
 
-from autovision._accelerator import accelerator_supports_bf16
-from autovision._logging import set_up_console_logging, set_up_file_logging
 from autovision.augment.detection import (
     RTDETRDetectionCollateFunction,
     RTDETRDetectionTransform,
@@ -37,6 +35,8 @@ from autovision.data.yolo_object_detection_dataset import (
     YOLOObjectDetectionDataArgs,
 )
 from autovision.engine import TaskEngine
+from autovision.runtime.accelerator import accelerator_supports_bf16
+from autovision.runtime.logging import set_up_console_logging, set_up_file_logging
 from autovision.tasks.detection.rtdetr import (
     RTDETRObjectDetectionTrain,
     RTDETRObjectDetectionTrainArgs,

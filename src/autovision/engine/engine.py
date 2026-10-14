@@ -25,15 +25,15 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
-from autovision._accelerator import (
+from autovision.observability.otel import end_span, otel_span, start_span
+from autovision.runtime.accelerator import (
     ddp_backend_for,
     npu_available,
     supports_amp,
 )
-from autovision._checkpoint import Checkpoint, CheckpointMetadata
-from autovision._distributed import get_local_rank
-from autovision._env import Env
-from autovision.observability.otel import end_span, otel_span, start_span
+from autovision.runtime.checkpoint import Checkpoint, CheckpointMetadata
+from autovision.runtime.distributed import get_local_rank
+from autovision.runtime.env import Env
 
 __all__ = ["Engine", "FitResult"]
 
@@ -41,7 +41,7 @@ logger = logging.getLogger("autovision")
 
 
 def _is_rank_zero_internal() -> bool:
-    from autovision._distributed import is_global_rank_zero
+    from autovision.runtime.distributed import is_global_rank_zero
 
     return is_global_rank_zero()
 

@@ -12,8 +12,8 @@ from pathlib import Path
 
 import torch
 
-from autovision._accelerator import npu_available
 from autovision._version import __version__
+from autovision.runtime.accelerator import npu_available
 
 __all__ = ["GitInformation", "SystemInformation", "get_system_information"]
 

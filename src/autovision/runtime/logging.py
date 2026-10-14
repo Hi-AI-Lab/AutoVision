@@ -8,8 +8,8 @@ from collections.abc import Sequence
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from autovision._distributed import is_global_rank_zero
-from autovision._env import Env
+from autovision.runtime.distributed import is_global_rank_zero
+from autovision.runtime.env import Env
 
 __all__ = ["set_up_console_logging", "set_up_file_logging"]
 

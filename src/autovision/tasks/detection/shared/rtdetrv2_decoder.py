@@ -41,7 +41,7 @@ import torch.nn.functional as F
 import torch.nn.init as init
 from torch import Tensor
 
-from autovision._env import Env
+from autovision.runtime.env import Env
 from autovision.tasks.detection.shared.denoising import (
     get_contrastive_denoising_training_group,
 )

@@ -18,7 +18,7 @@ class AdamW8bitArgs(AdamWArgs):
     betas: tuple[float, float] = Field(default=(0.9, 0.999), strict=False)
 
     def type(self):
-        from autovision.optimizer_type import OptimizerType
+        from autovision.optim.optimizer_type import OptimizerType
 
         return OptimizerType.ADAMW8BIT
 

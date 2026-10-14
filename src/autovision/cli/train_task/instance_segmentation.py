@@ -11,8 +11,6 @@ from typing import Any
 import torch
 import yaml
 
-from autovision._accelerator import accelerator_supports_bf16
-from autovision._logging import set_up_file_logging
 from autovision.cli import common_helpers
 from autovision.cli.train import _is_rank_zero
 from autovision.cli.train_task.task_helpers import (
@@ -21,6 +19,8 @@ from autovision.cli.train_task.task_helpers import (
 )
 from autovision.config.validate import pydantic_model_validate
 from autovision.engine import TaskEngine
+from autovision.runtime.accelerator import accelerator_supports_bf16
+from autovision.runtime.logging import set_up_file_logging
 from autovision.types import PathLike
 
 logger = logging.getLogger("autovision")

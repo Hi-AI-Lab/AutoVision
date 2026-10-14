@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
 
-from autovision import _distributed as dist
+from autovision.runtime import distributed as dist
 
 
 class TestRankDetection:

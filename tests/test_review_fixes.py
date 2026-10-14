@@ -71,8 +71,8 @@ class TestP1MmapRefcount:
 
         assert json.loads(ref_file.read_text()) == 2
         # First consumer exits -> file survives for the second.
-        from autovision._env import Env
         from autovision.data.mmap_helpers import _decrement_and_cleanup_if_zero
+        from autovision.runtime.env import Env
 
         _decrement_and_cleanup_if_zero(seq1.path, reuse=Env.MMAP_REUSE_FILE.value)
         assert seq2.path.exists()

@@ -22,7 +22,6 @@ from autovision import (
     train_panoptic_segmentation,
     train_semantic_segmentation,
 )
-from autovision.tasks.shared.eomt.modeling import build_eomt_model
 from autovision.tasks.instance_segmentation.dinov2_eomt import (
     Dinov2EomtInstanceSegmentation,
     Dinov2EomtInstanceSegmentationTrain,
@@ -51,6 +50,7 @@ from autovision.tasks.semantic_segmentation.dinov3_eomt import (
     Dinov3EomtSemanticSegmentationTrain,
     Dinov3EomtSemanticSegmentationTrainArgs,
 )
+from autovision.tasks.shared.eomt.modeling import build_eomt_model
 
 # Small HF-compatible EOMT layout (hidden 16 / queries 4 / blocks 3 crash).
 MODEL_KWARGS = {

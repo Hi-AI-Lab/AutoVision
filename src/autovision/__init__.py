@@ -16,7 +16,6 @@ from typing import Any
 import torch
 
 from autovision import errors
-from autovision._checkpoint import CHECKPOINT_AUTOVISION_KEY
 from autovision._compat import install_graphmodule_deepcopy_fix
 from autovision._version import __version__
 from autovision.cli import (
@@ -37,6 +36,7 @@ from autovision.errors import AutovisionError
 from autovision.export import benchmark
 from autovision.features import embed
 from autovision.pretext import list_methods
+from autovision.runtime.checkpoint import CHECKPOINT_AUTOVISION_KEY
 from autovision.tasks.task_model_helpers import load_task_model
 
 # Third-party defect shims must be installed before any model construction.

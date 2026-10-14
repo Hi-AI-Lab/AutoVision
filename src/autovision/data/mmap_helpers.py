@@ -14,12 +14,12 @@ from typing import Any, Iterator
 
 from filelock import FileLock
 
-from autovision._distributed import is_local_rank_zero
-from autovision._env import Env
 from autovision.data.serialize.memory_mapped_sequence import (
     MemoryMappedSequence,
     write_items_to_file,
 )
+from autovision.runtime.distributed import is_local_rank_zero
+from autovision.runtime.env import Env
 
 __all__ = [
     "dataset_mmap_context",

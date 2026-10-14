@@ -11,8 +11,8 @@ from pathlib import Path
 
 import torch
 
-from autovision._distributed import is_global_rank_zero
-from autovision._env import Env
+from autovision.runtime.distributed import is_global_rank_zero
+from autovision.runtime.env import Env
 from autovision.types import PathLike
 
 __all__ = [
@@ -108,7 +108,7 @@ def build_task_dataloader(dataset, batch_size: int, num_workers: int, train: boo
     """Train/val task dataloaders (global batch already split per device)."""
     from torch.utils.data import DataLoader
 
-    from autovision._env import Env
+    from autovision.runtime.env import Env
 
     return DataLoader(
         dataset,

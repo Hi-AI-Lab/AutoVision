@@ -12,13 +12,9 @@ from typing import Annotated, Any, Literal
 import torch
 from pydantic import BeforeValidator, ConfigDict
 
-from autovision._accelerator import accelerator_supports_bf16
-from autovision._checkpoint import CheckpointMetadata
-from autovision._distributed import is_global_rank_zero
 from autovision._license import LICENSE_INFO
-from autovision._logging import set_up_file_logging
-from autovision._system import get_system_information
 from autovision.cli import common_helpers, train_helpers
+from autovision.cli.system_info import get_system_information
 from autovision.config.base import PydanticConfig
 from autovision.config.validate import no_auto, pydantic_model_validate
 from autovision.data import ImageDataset
@@ -27,6 +23,10 @@ from autovision.data.mmap_helpers import dataset_mmap_context
 from autovision.encoders import FeatureExtractor, get_wrapped_model
 from autovision.engine import Engine
 from autovision.pretext.teachers import get_method_cls
+from autovision.runtime.accelerator import accelerator_supports_bf16
+from autovision.runtime.checkpoint import CheckpointMetadata
+from autovision.runtime.distributed import is_global_rank_zero
+from autovision.runtime.logging import set_up_file_logging
 from autovision.types import PathLike
 
 __all__ = ["PretrainConfig", "PretrainResult", "pretrain", "train_from_config"]
@@ -289,7 +289,7 @@ def train_from_config(config: PretrainConfig) -> PretrainResult:
             )
         if _is_rank_zero():
             try:
-                from autovision._plot import save_example_augmentations
+                from autovision.cli.plot import save_example_augmentations
 
                 example_batch = next(iter(dataloader))
                 save_example_augmentations(

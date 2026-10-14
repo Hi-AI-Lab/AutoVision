@@ -12,11 +12,11 @@ from autovision.data.coco_instance_segmentation_dataset import (
     COCOInstanceSegmentationDataset,
 )
 from autovision.metrics.instance_segmentation import COCOMaskAPEvaluator
-from autovision.tasks.shared.eomt.postprocess import instance_segmentation_decode
 from autovision.tasks.instance_segmentation.dinov2_eomt import (
     Dinov2EomtInstanceSegmentationTrain,
     Dinov2EomtInstanceSegmentationTrainArgs,
 )
+from autovision.tasks.shared.eomt.postprocess import instance_segmentation_decode
 
 MODEL_KWARGS = {
     "image_size": 64,

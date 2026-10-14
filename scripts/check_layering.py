@@ -74,7 +74,7 @@ ALLOWED_UPWARD: dict[tuple[str, str], str] = {
     ("registry", "encoders.weight_verification"): (
         "sha256 utility currently lives under encoders; relocate later"
     ),
-    ("_torch_compile", "config"): (
+    ("runtime.torch_compile", "config"): (
         "runtime torch.compile helpers read the shared config base"
     ),
     ("visualize", "augment"): (
@@ -120,10 +120,6 @@ def check() -> list[str]:
         parts = rel.with_suffix("").parts
         if len(parts) == 1 and parts[0] == "__init__":
             continue  # package composition root: imports every layer
-        if len(parts) == 1:
-            # Top-level module; the legacy re-export shim is exempt.
-            if parts[0] == "_model_wrappers":
-                continue
         source_pkg = parts[0]
         source_rank = layer_of(source_pkg)
         source_mod = ".".join(parts[:-1]) if parts[-1] == "__init__" else ".".join(parts)

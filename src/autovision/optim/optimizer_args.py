@@ -9,7 +9,7 @@ import torch
 from pydantic import Field
 
 from autovision.config.base import PydanticConfig
-from autovision.optimizer_type import OptimizerType
+from autovision.optim.optimizer_type import OptimizerType
 
 __all__ = [
     "AdamWArgs",

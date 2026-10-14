@@ -116,7 +116,7 @@ class TestTrainObjectDetection:
             model_args=model_args(), transform_args=transform_args(),
         )
         train_object_detection(out=tmp_path / "det3", steps=2, **common)
-        from autovision._checkpoint import Checkpoint
+        from autovision.runtime.checkpoint import Checkpoint
 
         # The best-metric baseline rides in every checkpoint AND in a
         # sidecar written at each best improvement (regression: a resume

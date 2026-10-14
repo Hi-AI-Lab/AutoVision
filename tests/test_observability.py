@@ -19,18 +19,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-import autovision._accelerator as accelerator
 import autovision.engine.engine as engine_module
+import autovision.runtime.accelerator as accelerator
 from autovision import pretrain, train_object_detection
-from autovision._accelerator import (
-    accelerator_device_count,
-    accelerator_device_name,
-    accelerator_supports_bf16,
-    ddp_backend_for,
-    import_torch_npu,
-    npu_available,
-    supports_amp,
-)
 from autovision.engine.engine import resolve_device
 from autovision.observability import otel as otel_module
 from autovision.observability.otel import (
@@ -40,6 +31,15 @@ from autovision.observability.otel import (
     is_otel_enabled,
     otel_span,
     start_span,
+)
+from autovision.runtime.accelerator import (
+    accelerator_device_count,
+    accelerator_device_name,
+    accelerator_supports_bf16,
+    ddp_backend_for,
+    import_torch_npu,
+    npu_available,
+    supports_amp,
 )
 
 pytestmark = pytest.mark.filterwarnings("ignore::UserWarning")

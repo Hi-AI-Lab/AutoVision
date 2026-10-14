@@ -37,8 +37,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from autovision._env import Env
 from autovision.errors import AutovisionError, CheckpointError
+from autovision.runtime.env import Env
 
 __all__ = [
     "WeightArtifact",

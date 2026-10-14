@@ -13,9 +13,9 @@ from autovision.optim.optimizer_helpers import (
     get_optimizer,
     get_weight_decay_parameters,
 )
+from autovision.optim.optimizer_type import OptimizerType
 from autovision.optim.schedulers import CosineWarmupScheduler
 from autovision.optim.trainable_modules import TrainableModules
-from autovision.optimizer_type import OptimizerType
 
 __all__ = [
     "AdamWArgs",

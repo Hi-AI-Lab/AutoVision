@@ -113,3 +113,13 @@ wavelet_downsample）、`fsdc/*` registry 键与 CLI 分派、
 满足 shared/ 契约；六个公开类路径不变，仅 17 处导入改写 + 一条
 `tasks.eomt. → tasks.shared.eomt.` 前缀迁移作保险。顶层自此为
 8 个任务目录 + 1 个 `shared/`。
+
+## 9. 附记：顶层散装模块整理（2026-10-15）
+
+错位归位（`optimizer_type → optim/`、`_plot/_system → cli/`）并删除
+`_model_wrappers` legacy shim（溯源整改收尾，layering 脚本豁免特例随之
+移除）；运行时设施收拢为 `autovision/runtime/`（accelerator/distributed/
+env/logging/checkpoint/torch_compile，去前缀）。`types/errors/scaling/
+_version/_license/_compat` 保留顶层：公共基座、跨层共享与元信息各有
+明确身份。`_torch_compile→config` 分层债务条目随迁改为
+`runtime.torch_compile→config`。

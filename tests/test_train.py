@@ -97,7 +97,7 @@ class TestPretrainEndToEnd:
         assert result.epochs_run == 1  # only the remaining epoch ran
         second_ckpt = (out / "checkpoints" / "last.ckpt").read_bytes()
         assert first_ckpt != second_ckpt  # checkpoint updated
-        from autovision._checkpoint import Checkpoint
+        from autovision.runtime.checkpoint import Checkpoint
 
         metadata = Checkpoint.from_path(out / "checkpoints" / "last.ckpt").autovision
         assert metadata.epoch == 1  # completed epoch 1 (0-indexed)

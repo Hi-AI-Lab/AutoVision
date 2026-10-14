@@ -308,7 +308,7 @@ class TestDebug:
 
 class TestVisualization:
     def test_plot_example_augmentations(self, tmp_path):
-        from autovision._plot import save_example_augmentations
+        from autovision.cli.plot import save_example_augmentations
 
         batch = {"views": [torch.rand(2, 3, 64, 64), torch.rand(2, 3, 128, 128)]}
         path = save_example_augmentations(batch, tmp_path / "aug.jpg")
@@ -431,7 +431,7 @@ class TestExtractVideoFrames:
 
 class TestTorchCompile:
     def test_disabled_by_default(self):
-        from autovision._torch_compile import TorchCompileArgs, try_compile
+        from autovision.runtime.torch_compile import TorchCompileArgs, try_compile
 
         def fn(x):
             return x + 1
@@ -439,7 +439,7 @@ class TestTorchCompile:
         assert try_compile(fn, "test", TorchCompileArgs()) is fn
 
     def test_extra_kwargs_forwarded(self):
-        from autovision._torch_compile import TorchCompileArgs
+        from autovision.runtime.torch_compile import TorchCompileArgs
 
         args = TorchCompileArgs(disable=False, mode="reduce-overhead")
         assert args.mode == "reduce-overhead"
@@ -532,7 +532,7 @@ class TestFileLogging:
         # file bug seen in real runs).
         import logging as logging_module
 
-        from autovision._logging import set_up_file_logging
+        from autovision.runtime.logging import set_up_file_logging
 
         log_file = tmp_path / "train.log"
         logger = logging_module.getLogger("autovision")
@@ -567,7 +567,10 @@ class TestFileLogging:
         # train.log handler (0-byte train.log, real pilot run).
         import logging as logging_module
 
-        from autovision._logging import set_up_console_logging, set_up_file_logging
+        from autovision.runtime.logging import (
+            set_up_console_logging,
+            set_up_file_logging,
+        )
 
         logger = logging_module.getLogger("autovision")
         previous_level = logger.level

@@ -165,6 +165,6 @@ def get_dataloader(
 
 
 def _dataloader_timeout() -> float:
-    from autovision._env import Env
+    from autovision.runtime.env import Env
 
     return Env.DATALOADER_TIMEOUT_SEC.value

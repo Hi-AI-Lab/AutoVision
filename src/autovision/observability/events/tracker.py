@@ -19,10 +19,10 @@ import uuid
 from collections import deque
 from typing import Any
 
-from autovision._accelerator import npu_available
-from autovision._distributed import is_global_rank_zero
-from autovision._env import Env
 from autovision._version import __version__
+from autovision.runtime.accelerator import npu_available
+from autovision.runtime.distributed import is_global_rank_zero
+from autovision.runtime.env import Env
 
 __all__ = ["track_event", "track_inference_started", "track_training_started"]
 

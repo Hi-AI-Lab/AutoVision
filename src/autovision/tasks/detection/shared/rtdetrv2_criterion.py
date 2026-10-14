@@ -19,11 +19,11 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from autovision._distributed import reduce_dict
 from autovision.geometry.box_ops import (
     elementwise_siou,
     generalized_box_iou_loss,
 )
+from autovision.runtime.distributed import reduce_dict
 from autovision.tasks.detection.shared.denoising import (
     get_cdn_matched_indices,
 )
