@@ -13,14 +13,14 @@ import sys
 import pytest
 import torch
 
-import autovision._models.ultralytics.ultralytics_package as ultralytics_package_module
-from autovision._models import EmbeddingModel, get_package, get_wrapped_model
-from autovision._models.model_wrapper import ModelWrapper
-from autovision._models.package_helpers import (
+import autovision.encoders.ultralytics.ultralytics_package as ultralytics_package_module
+from autovision.encoders import FeatureExtractor, get_package, get_wrapped_model
+from autovision.encoders.model_wrapper import EncoderProtocol
+from autovision.encoders.package_helpers import (
     get_package_from_model,
     list_base_packages,
 )
-from autovision._models.ultralytics import ULTRALYTICS_PACKAGE, UltralyticsModelWrapper
+from autovision.encoders.ultralytics import ULTRALYTICS_PACKAGE, UltralyticsModelWrapper
 
 ultralytics = pytest.importorskip(
     "ultralytics", reason="ultralytics package not installed"
@@ -123,7 +123,7 @@ class TestGetModelReal:
 
 class TestWrapperReal:
     def test_is_model_wrapper(self):
-        assert isinstance(make_wrapper(), ModelWrapper)
+        assert isinstance(make_wrapper(), EncoderProtocol)
 
     def test_backbone_end_v8(self):
         wrapper = make_wrapper("yolov8n.yaml")
@@ -189,7 +189,7 @@ class TestWrapperReal:
 
     def test_embedding_model_roundtrip(self):
         wrapper = make_wrapper()
-        embedding_model = EmbeddingModel(wrapped_model=wrapper, embed_dim=64)
+        embedding_model = FeatureExtractor(wrapped_model=wrapper, embed_dim=64)
         state = embedding_model.state_dict()
         assert any(k.startswith("wrapped_model.") for k in state)
         assert any(k.startswith("embed_head.") for k in state)

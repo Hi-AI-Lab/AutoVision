@@ -9,7 +9,7 @@ R² > 0.6 = geometry memorisation).
 import pytest
 import torch
 
-from autovision._metrics.ssl_probes import (
+from autovision.metrics.ssl_probes import (
     alignment_uniformity,
     cross_view_nn_accuracy,
     linear_probe_accuracy,

@@ -1,9 +1,10 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
 import pytest
 import torch
+from tests.conftest import create_images
 from torch.utils.data import DataLoader
 
-from autovision._transforms import (
+from autovision.augment import (
     GaussianBlurArgs,
     MethodTransformArgs,
     MultiViewTransform,
@@ -12,11 +13,10 @@ from autovision._transforms import (
     RandomResizeArgs,
     ViewTransform,
 )
-from autovision._transforms.transform_args import (
+from autovision.augment.transform_args import (
     IMAGENET_NORMALIZE_MEAN,
     IMAGENET_NORMALIZE_STD,
 )
-from tests.conftest import create_images
 
 
 @pytest.fixture
@@ -131,7 +131,7 @@ class TestViewTransform:
 class TestImageDataset:
     def test_dataset_and_collate(self, create_images_fixture):
         paths, args = create_images_fixture
-        from autovision._data import ImageDataset
+        from autovision.data import ImageDataset
 
         multi = MultiViewTransform(
             [ViewTransform(args), ViewTransform(args)], transform_args=args

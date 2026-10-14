@@ -13,8 +13,15 @@ import pytest
 import torch
 from torch import Tensor
 
-from autovision._task_models.ltdetr_object_detection.config import LTDETRSSLArgs
-from autovision._task_models.object_detection_components.ssl_contrastive import (
+from autovision.tasks.detection.avdetr.config import AVDETRSSLArgs
+from autovision.tasks.detection.components.dfine_criterion import (
+    DFINECriterionV2,
+)
+from autovision.tasks.detection.components.matcher import (
+    HungarianMatcher,
+)
+from autovision.tasks.detection.components.ssl_contrastive import (
+    SSLParams,
     SSLProjectionHead,
     epps_pulley_sigreg,
 )
@@ -110,12 +117,17 @@ class TestConfigSurface:
     """SIGReg config contracts (design doc 16 §4.2)."""
 
     def test_defaults_are_off(self):
-        args = LTDETRSSLArgs()
+        args = AVDETRSSLArgs()
         assert args.sigreg_coef == 0.0
         assert args.to_ssl_params().sigreg_coef == 0.0
 
     def test_params_mapping(self):
-        args = LTDETRSSLArgs(sigreg_coef=0.3, sigreg_slices=512, sigreg_knots=21)
+        args = AVDETRSSLArgs(
+            sigreg_coef=0.3,
+            sigreg_slices=512,
+            sigreg_knots=21,
+            projector="mlp2",  # SIGReg requires the unbounded head
+        )
         params = args.to_ssl_params()
         assert params.sigreg_coef == 0.3
         assert params.sigreg_slices == 512
@@ -123,18 +135,112 @@ class TestConfigSurface:
 
     def test_sigreg_requires_active_mode(self):
         with pytest.raises(ValueError, match="active mode"):
-            LTDETRSSLArgs(mode="off", sigreg_coef=0.3)
+            AVDETRSSLArgs(mode="off", sigreg_coef=0.3)
 
     def test_sigreg_requires_two_crop(self):
         with pytest.raises(ValueError, match="two_crop"):
-            LTDETRSSLArgs(view="dropout", sigreg_coef=0.3)
+            AVDETRSSLArgs(view="dropout", sigreg_coef=0.3)
 
     def test_sigreg_requires_matched_gt_pool(self):
         # encoder_candidates forces view="dropout" first, so pass it to
         # reach the SIGReg-specific constraint.
         with pytest.raises(ValueError, match="matched_gt"):
-            LTDETRSSLArgs(
+            AVDETRSSLArgs(
                 instance_source="encoder_candidates",
                 view="dropout",
                 sigreg_coef=0.3,
             )
+
+    def test_sigreg_rejects_tanh_projector(self):
+        """The default 'simcse' head's raw tap is post-Tanh, bounded to
+        (-1, 1)^K — the N(0, I) target is unreachable there and the gradient
+        saturates the Tanh. Fail loud at config time."""
+        with pytest.raises(ValueError, match="mlp2"):
+            AVDETRSSLArgs(sigreg_coef=0.3)  # projector defaults to "simcse"
+
+    def test_sigreg_allows_mlp2_projector(self):
+        args = AVDETRSSLArgs(
+            sigreg_coef=0.3,
+            projector="mlp2",
+            mode="unsup",
+            view="two_crop",
+        )
+        assert args.to_ssl_params().sigreg_coef == 0.3
+
+
+def _criterion_outputs(num_queries: int = 6):
+    outputs = {
+        "pred_logits": torch.randn(2, num_queries, 3),
+        "pred_boxes": torch.rand(2, num_queries, 4) * 0.5 + 0.25,
+    }
+    targets = [
+        {"boxes": torch.rand(2, 4) * 0.3 + 0.3, "labels": torch.tensor([0, 1])},
+        {"boxes": torch.rand(1, 4) * 0.3 + 0.3, "labels": torch.tensor([1])},
+    ]
+    return outputs, targets
+
+
+class TestCriterionSigregPool:
+    """The criterion-side SIGReg wiring."""
+
+    def test_pool_covers_all_queries_without_mask(self, monkeypatch):
+        import autovision.tasks.detection.components.dfine_criterion as dc
+
+        captured: list[int] = []
+        real = dc.epps_pulley_sigreg
+
+        def spy(embeddings, **kwargs):
+            captured.append(int(embeddings.shape[0]))
+            return real(embeddings, **kwargs)
+
+        monkeypatch.setattr(dc, "epps_pulley_sigreg", spy)
+        criterion = DFINECriterionV2(
+            HungarianMatcher(),
+            ssl_params=SSLParams(mode="unsup", view="dropout", sigreg_coef=0.5),
+        )
+        criterion.train()
+        outputs, targets = _criterion_outputs()
+        losses = criterion(
+            [dict(outputs), dict(outputs)],
+            targets,
+            ssl_z1=torch.randn(2, 6, 8),
+            ssl_z2=torch.randn(2, 6, 8),
+            ssl_s1=torch.randn(2, 6, 8),
+            ssl_s2=torch.randn(2, 6, 8),
+        )
+        assert "loss_sigreg" in losses
+        assert captured == [12, 12]  # both draws, full 2×6 pool
+
+    def test_pool_excludes_padding_queries(self, monkeypatch):
+        """Dynamic-query padding rows are decoder computations on zero
+        content queries — they must not enter the distribution target (the
+        matched-pool contrastive already filters the same rows)."""
+        import autovision.tasks.detection.components.dfine_criterion as dc
+
+        captured: list[int] = []
+        real = dc.epps_pulley_sigreg
+
+        def spy(embeddings, **kwargs):
+            captured.append(int(embeddings.shape[0]))
+            return real(embeddings, **kwargs)
+
+        monkeypatch.setattr(dc, "epps_pulley_sigreg", spy)
+        criterion = DFINECriterionV2(
+            HungarianMatcher(),
+            ssl_params=SSLParams(mode="unsup", view="dropout", sigreg_coef=0.5),
+        )
+        criterion.train()
+        outputs, targets = _criterion_outputs()
+        query_mask = torch.ones(2, 6, dtype=torch.bool)
+        query_mask[:, ::2] = False  # 3 valid queries per image
+        losses = criterion(
+            [dict(outputs), dict(outputs)],
+            targets,
+            ssl_z1=torch.randn(2, 6, 8),
+            ssl_z2=torch.randn(2, 6, 8),
+            ssl_s1=torch.randn(2, 6, 8),
+            ssl_s2=torch.randn(2, 6, 8),
+            query_mask=query_mask,
+        )
+        assert "loss_sigreg" in losses
+        assert captured == [6, 6]  # 2 images × 3 valid queries, per draw

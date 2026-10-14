@@ -1,7 +1,19 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
-"""Data layer: datasets, file helpers, and mmap serialization."""
+"""Deprecated alias of :mod:`autovision.data` (compat shim).
 
-from autovision._data.file_helpers import list_image_filenames_from_dir, open_image
-from autovision._data.image_dataset import ImageDataset
+Removed in the next minor release; import from the new location.
+"""
 
-__all__ = ["ImageDataset", "list_image_filenames_from_dir", "open_image"]
+from __future__ import annotations
+
+import warnings
+
+warnings.warn(
+    "autovision._data is a deprecated alias; import from "
+    "autovision.data instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
+from autovision.data import *  # noqa: E402,F401,F403
+from autovision.data import __all__ as _exported  # noqa: E402,F401

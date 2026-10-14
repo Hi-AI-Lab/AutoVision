@@ -5,15 +5,15 @@ import pytest
 import torch
 from torch import nn
 
-from autovision._methods import get_method_cls, list_methods
-from autovision._methods.dinov2 import DINOv2, DINOv2AdamWArgs, DINOv2Args
-from autovision._methods.dinov2.dinov2 import (
+from autovision.encoders import FeatureExtractor
+from autovision.pretext import get_method_cls, list_methods
+from autovision.pretext.dinov2 import DINOv2, DINOv2AdamWArgs, DINOv2Args
+from autovision.pretext.dinov2.dinov2 import (
     _dino_pair_loss,
     _koleo_loss,
     _MaskGenerator,
 )
-from autovision._models import EmbeddingModel
-from autovision._scaling import ScalingInfo
+from autovision.scaling import ScalingInfo
 
 pytestmark = pytest.mark.filterwarnings("ignore::UserWarning")
 
@@ -84,7 +84,7 @@ def make_method(**args_overrides) -> DINOv2:
     args.resolve_auto(scaling_info=ScalingInfo(dataset_size=64, epochs=10))
     optimizer_args = DINOv2AdamWArgs()
     optimizer_args.resolve_auto(wrapped_model=None)
-    student = EmbeddingModel(
+    student = FeatureExtractor(
         wrapped_model=TinyMaskedViTWrapper(grid=4),
         embed_dim=8,
     )

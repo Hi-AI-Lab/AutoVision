@@ -1,0 +1,317 @@
+# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+"""Acceptance tests for the clean-provenance P0 rewrites (design doc 28).
+
+Each rewritten unit is checked against an *independently constructed*
+oracle (naive loops / closed-form math), not against the previous
+implementation. Specs: docs/provenance/specs/S{1,2,3,4}-*.md.
+"""
+
+import math
+import random
+
+import pytest
+import torch
+
+from autovision.encoders.ecvit.ecvit import (
+    RopePositionEmbedding,
+    VisionTransformer,
+    rotate_half,
+)
+from autovision.pretext.dinov3 import DINOv3
+from autovision.pretext.dinov3.constrained_crop import sample_high_overlap_box
+from autovision.pretext.dinov3.dinov3 import _restore_orientation
+from autovision.pretext.dinov3.paika import _roi_resample_to_grid
+
+# ── S-1: sample_high_overlap_box ────────────────────────────────────────
+
+
+class TestSampleBox:
+    def test_containment_and_area_band_both_parent_aspects(self):
+        # Wide (aspect 0.5) and tall (aspect 2.0) parents: the width/height
+        # clamping path must keep every draw inside the acceptance band.
+        parents = [(10, 20, 110, 220), (0, 0, 200, 100)]
+        for parent in parents:
+            rng = random.Random(1234)
+            parent_area = (parent[2] - parent[0]) * (parent[3] - parent[1])
+            for _ in range(1000):
+                x0, y0, x1, y1 = sample_high_overlap_box(parent, 0.9, rng)
+                assert parent[0] <= x0 < x1 <= parent[2]
+                assert parent[1] <= y0 < y1 <= parent[3]
+                ratio = (x1 - x0) * (y1 - y0) / parent_area
+                assert 0.04 < ratio <= 0.41, f"{parent}: draw {ratio:.3f}"
+
+    def test_degenerate_parent_returned_as_is(self):
+        assert sample_high_overlap_box((5, 5, 6, 6), 0.9, random.Random(0)) == (5, 5, 6, 6)
+
+    def test_deterministic_given_rng_only(self):
+        boxes_a = [sample_high_overlap_box((0, 0, 50, 50), 0.9, random.Random(7)) for _ in range(20)]
+        boxes_b = [sample_high_overlap_box((0, 0, 50, 50), 0.9, random.Random(7)) for _ in range(20)]
+        assert boxes_a == boxes_b
+
+
+# ── S-2: _roi_align_view + resample oracle ──────────────────────────────
+
+
+def naive_resample(feat: torch.Tensor, box, out_h: int, out_w: int) -> torch.Tensor:
+    """Slow per-cell bilinear oracle (corner coords, center sampling,
+    zero padding) — an independent construction of the grid_sample path."""
+    channels, height, width = feat.shape
+    x0, y0, x1, y1 = (float(value) for value in box)
+    padded = torch.zeros(channels, height + 2, width + 2, dtype=torch.float64)
+    padded[:, 1:-1, 1:-1] = feat.double()
+    out = torch.zeros(channels, out_h, out_w, dtype=torch.float64)
+    for row in range(out_h):
+        for col in range(out_w):
+            # Cell-center sampling in corner coordinates…
+            x = x0 + (col + 0.5) / out_w * (x1 - x0)
+            y = y0 + (row + 0.5) / out_h * (y1 - y0)
+            # …which grid_sample(align_corners=False) reads at pixel-center
+            # coordinate x - 0.5; shift by +1 into the zero-padded array.
+            px = x + 0.5
+            py = y + 0.5
+            xl, yl = math.floor(px), math.floor(py)
+            fx, fy = px - xl, py - yl
+            for c in range(channels):
+                top = padded[c, yl, xl] * (1 - fx) + padded[c, yl, xl + 1] * fx
+                bottom = padded[c, yl + 1, xl] * (1 - fx) + padded[c, yl + 1, xl + 1] * fx
+                out[c, row, col] = top * (1 - fy) + bottom * fy
+    return out
+
+
+class TestRoiResampleOracle:
+    def test_matches_naive_bilinear_oracle(self):
+        torch.manual_seed(0)
+        feat = torch.randn(1, 3, 6, 5, dtype=torch.float64)
+        boxes = torch.tensor(
+            [
+                [0.0, 0.0, 5.0, 6.0],  # identity
+                [1.5, 0.75, 4.25, 5.5],  # sub-box, non-divisible grid
+                [0.0, 0.0, 2.5, 3.0],  # quarter map
+            ],
+            dtype=torch.float64,
+        )
+        for box in boxes:
+            got = _roi_resample_to_grid(feat, box[None], out_h=4, out_w=7)
+            want = naive_resample(feat[0], box, out_h=4, out_w=7)
+            assert torch.allclose(got[0], want, atol=1e-8), box
+
+
+class TestRoiAlignView:
+    @staticmethod
+    def call(tokens, geom, region, in_h, in_w, out_h, out_w):
+        return DINOv3._roi_align_view(
+            tokens, geom, region, in_h=in_h, in_w=in_w, out_h=out_h, out_w=out_w
+        )
+
+    def test_matches_oracle_with_flips(self):
+        torch.manual_seed(1)
+        batch, channels, grid = 3, 2, 4
+        tokens = torch.randn(batch, channels, grid, grid, dtype=torch.float64)
+        # Mixed flip flags across the batch; crops cover distinct sub-boxes
+        # of a 100x100 image.
+        geom = torch.tensor(
+            [
+                [0.0, 0.0, 100.0, 100.0, 100.0, 100.0, 0.0, 0.0],
+                [10.0, 20.0, 90.0, 100.0, 100.0, 100.0, 1.0, 0.0],
+                [0.0, 0.0, 50.0, 60.0, 100.0, 100.0, 1.0, 1.0],
+            ],
+            dtype=torch.float64,
+        )
+        region = torch.tensor(
+            [
+                [25.0, 25.0, 75.0, 75.0],
+                [20.0, 30.0, 90.0, 100.0],
+                [10.0, 15.0, 50.0, 60.0],
+            ],
+            dtype=torch.float64,
+        )
+        got = self.call(tokens, geom, region, in_h=grid, in_w=grid, out_h=3, out_w=5)
+        for b in range(batch):
+            x0, y0, x1, y1 = region[b]
+            crop_x0, crop_y0, crop_x1, crop_y1 = geom[b, :4]
+            gx0 = (x0 - crop_x0) / (crop_x1 - crop_x0) * grid
+            gx1 = (x1 - crop_x0) / (crop_x1 - crop_x0) * grid
+            gy0 = (y0 - crop_y0) / (crop_y1 - crop_y0) * grid
+            gy1 = (y1 - crop_y0) / (crop_y1 - crop_y0) * grid
+            unflipped = tokens[b]
+            if geom[b, 6] > 0.5:
+                unflipped = unflipped.flip(-1)
+            if geom[b, 7] > 0.5:
+                unflipped = unflipped.flip(-2)
+            want = naive_resample(
+                unflipped, (gx0, gy0, gx1, gy1), out_h=3, out_w=5
+            )
+            assert torch.allclose(got[b], want, atol=1e-8), b
+
+    def test_restore_orientation_groups(self):
+        tokens = torch.arange(2 * 1 * 2 * 2, dtype=torch.float64).reshape(2, 1, 2, 2)
+        hflip = torch.tensor([True, False])
+        vflip = torch.tensor([False, True])
+        out = _restore_orientation(tokens, hflip, vflip)
+        assert torch.equal(out[0], tokens[0].flip(-1))
+        assert torch.equal(out[1], tokens[1].flip(-2))
+
+    def test_restore_orientation_keeps_grad(self):
+        tokens = torch.randn(2, 1, 2, 2, requires_grad=True)
+        out = _restore_orientation(
+            tokens, torch.tensor([True, True]), torch.tensor([False, True])
+        )
+        out.sum().backward()
+        assert tokens.grad is not None
+        assert torch.isfinite(tokens.grad).all()
+
+
+# ── S-3: _align_cross_view_pair ─────────────────────────────────────────
+
+
+def geom_row(x0, y0, x1, y1, hflip=0.0, vflip=0.0):
+    return torch.tensor([[x0, y0, x1, y1, 100.0, 100.0, hflip, vflip]])
+
+
+class TestAlignCrossViewPair:
+    @staticmethod
+    def run(student_geom, teacher_geom, s_grid=4, t_grid=6, out=4):
+        tokens_s = torch.randn(1, 3, s_grid, s_grid, requires_grad=True)
+        tokens_t = torch.randn(1, 3, t_grid, t_grid)
+        method = object.__new__(DINOv3)  # the pair aligner is self-free
+        student_al, teacher_al, valid = method._align_cross_view_pair(
+            student_tokens=tokens_s,
+            student_geom=student_geom,
+            student_h=s_grid,
+            student_w=s_grid,
+            teacher_tokens=tokens_t,
+            teacher_geom=teacher_geom,
+            teacher_h=t_grid,
+            teacher_w=t_grid,
+            out_h=out,
+            out_w=out,
+        )
+        return tokens_s, tokens_t, student_al, teacher_al, valid
+
+    def test_contained_local_overlaps_fully(self):
+        s, t, s_al, t_al, valid = self.run(
+            geom_row(10, 10, 40, 40), geom_row(0, 0, 100, 100)
+        )
+        assert s_al.shape == (1, 3, 4, 4)
+        assert t_al.shape == (1, 3, 4, 4)
+        assert valid.all()
+        assert s_al.requires_grad and not t_al.requires_grad
+
+    def test_disjoint_crops_marked_invalid(self):
+        _, _, _, _, valid = self.run(
+            geom_row(0, 0, 10, 10), geom_row(50, 50, 100, 100)
+        )
+        assert not valid.any()
+
+    def test_sliver_overlap_marked_invalid(self):
+        # Intersection height 0.5 px < one output cell (100/4 = 25 px).
+        _, _, _, _, valid = self.run(
+            geom_row(0, 0, 100, 4), geom_row(0, 3.5, 100, 100)
+        )
+        assert not valid.any()
+
+    def test_gradients_reach_student_tokens_only(self):
+        s, t, s_al, t_al, valid = self.run(
+            geom_row(10, 10, 40, 40, hflip=1.0), geom_row(0, 0, 100, 100)
+        )
+        spatial_valid = valid.view(1, 1, 4, 4)
+        (s_al * spatial_valid).sum().backward()
+        assert s.grad is not None
+        assert float(s.grad.abs().sum()) > 0.0
+        assert not t.requires_grad
+
+
+# ── S-4: ECViT axial RoPE ───────────────────────────────────────────────
+
+
+class TestEcvitRoPE:
+    def test_periods_buffer_persistent_and_matches_formula(self):
+        rope = RopePositionEmbedding(embed_dim=192, num_heads=3)
+        assert "periods" in rope.state_dict()  # persistent → rides checkpoints
+        expected = 100.0 ** (2 * torch.arange(16, dtype=torch.float32) / 32)
+        assert torch.allclose(rope.periods, expected)
+
+    def test_periods_roundtrip_not_recomputed(self):
+        rope = RopePositionEmbedding(embed_dim=64, num_heads=2)
+        with torch.no_grad():
+            rope.periods.add_(1e-4)  # simulate a checkpoint's drifted value
+        clone = RopePositionEmbedding(embed_dim=64, num_heads=2)
+        clone.load_state_dict(rope.state_dict())
+        assert torch.equal(clone.periods, rope.periods)
+
+    def test_tables_match_independent_closed_form(self):
+        rope = RopePositionEmbedding(embed_dim=64, num_heads=2)
+        height, width = 5, 7
+        sin, cos = rope(H=height, W=width)
+        rows = (torch.arange(height, dtype=torch.float64) + 0.5) / height
+        cols = (torch.arange(width, dtype=torch.float64) + 0.5) / width
+        grid_rows, grid_cols = torch.meshgrid(rows, cols, indexing="ij")
+        coords = (
+            torch.stack([grid_rows.reshape(-1), grid_cols.reshape(-1)], dim=-1) * 2 - 1
+        )
+        angles = 2 * math.pi * coords[:, :, None] / rope.periods.double()[None, None, :]
+        expected = torch.cat([angles.flatten(1, 2)] * 2, dim=-1)
+        assert sin.shape == (height * width, 32)  # head_dim tables
+        assert torch.allclose(sin.double(), expected.sin(), atol=1e-6)
+        assert torch.allclose(cos.double(), expected.cos(), atol=1e-6)
+
+    def test_unknown_normalize_mode_raises(self):
+        rope = RopePositionEmbedding(embed_dim=64, num_heads=2)
+        rope.normalize_coords = "diagonal"
+        with pytest.raises(ValueError, match="normalize_coords"):
+            rope(H=4, W=4)
+
+    def test_rotate_half(self):
+        x = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
+        assert torch.equal(rotate_half(x), torch.tensor([[-3.0, -4.0, 1.0, 2.0]]))
+
+    def test_tiny_vit_forward(self):
+        vit = VisionTransformer(embed_dim=64, num_heads=2, depth=4, return_layers=[1, 3])
+        outputs, (grid_h, grid_w) = vit.forward_with_grid(torch.randn(2, 3, 64, 64))
+        assert (grid_h, grid_w) == (4, 4)
+        assert len(outputs) == 2
+        assert all(out.shape == (2, 16, 64) for out in outputs)
+
+
+class TestLegacyWeightsWithoutPeriods:
+    """Pre-persistent-buffer self-trained weights lack rope_embed.periods;
+    the loader must tolerate exactly that key and reject genuine holes."""
+
+    @staticmethod
+    def save_backbone_weights(path, drop_periods: bool) -> None:
+        vit = VisionTransformer(embed_dim=64, num_heads=2, depth=4)
+        state = {key: value.clone() for key, value in vit.state_dict().items()}
+        if drop_periods:
+            state.pop("rope_embed.periods")
+        torch.save(state, path)
+
+    def test_legacy_weights_load_with_fresh_periods(self, tmp_path):
+        from autovision.encoders.ecvit.ecvit import ECViTModelWrapper
+
+        weights = tmp_path / "legacy.pt"
+        self.save_backbone_weights(weights, drop_periods=True)
+        wrapper = ECViTModelWrapper(
+            name="ecvitt", embed_dim=64, num_heads=2, depth=4,
+            weights_path=str(weights),
+        )
+        expected = 100.0 ** (2 * torch.arange(8, dtype=torch.float32) / 16)
+        assert torch.allclose(wrapper.backbone.rope_embed.periods, expected)
+
+    def test_genuinely_incomplete_weights_still_rejected(self, tmp_path):
+        from autovision.encoders.ecvit.ecvit import ECViTModelWrapper
+        from autovision.errors import CheckpointError
+
+        vit = VisionTransformer(embed_dim=64, num_heads=2, depth=4)
+        state = {
+            key: value.clone()
+            for key, value in vit.state_dict().items()
+            if not key.startswith("blocks.3.")
+        }
+        state.pop("rope_embed.periods")
+        weights = tmp_path / "hole.pt"
+        torch.save(state, weights)
+        with pytest.raises(CheckpointError, match="blocks.3"):
+            ECViTModelWrapper(
+                name="ecvitt", embed_dim=64, num_heads=2, depth=4,
+                weights_path=str(weights),
+            )

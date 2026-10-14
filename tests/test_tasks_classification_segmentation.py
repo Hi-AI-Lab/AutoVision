@@ -15,16 +15,16 @@ from autovision import (
     train_image_classification,
     train_semantic_segmentation,
 )
-from autovision._data.image_classification_dataset import (
+from autovision.data.image_classification_dataset import (
     ImageClassificationDataset,
     list_classification_files,
 )
-from autovision._data.semantic_segmentation_dataset import (
+from autovision.data.semantic_segmentation_dataset import (
     SemanticSegmentationDataset,
     list_segmentation_pairs,
 )
-from autovision._metrics.classification import ClassificationMetricCollector
-from autovision._metrics.segmentation import SegmentationMetricCollector
+from autovision.metrics.classification import ClassificationMetricCollector
+from autovision.metrics.segmentation import SegmentationMetricCollector
 
 pytestmark = pytest.mark.filterwarnings("ignore::UserWarning")
 
@@ -287,8 +287,8 @@ class TestReviewFixes:
         assert num_classes_detected == 1
 
     def test_parity_requires_torch_backend(self, tmp_path: Path):
-        from autovision._export import benchmark
-        from autovision._export.benchmark import ONNXBackendArgs
+        from autovision.export import benchmark
+        from autovision.export.benchmark import ONNXBackendArgs
 
         with pytest.raises(ValueError, match="requires the 'torch' backend"):
             benchmark(

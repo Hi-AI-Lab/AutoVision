@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from autovision import list_methods, list_models, pretrain
-from autovision._commands.train import PretrainConfig
+from autovision.cli.train import PretrainConfig
 
 pytestmark = pytest.mark.filterwarnings("ignore::UserWarning")
 

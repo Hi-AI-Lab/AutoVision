@@ -16,6 +16,20 @@ jobs:
       - run: pip install ruff
       - run: ruff check src tests
 
+  provenance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # Banned-marker scan over src/tests/scripts (design doc 28 §7.2).
+      # Time-boxed exemptions live in provenance_allowlist.txt; a stale
+      # entry (matching no file) also fails the run.
+      - run: python scripts/check_provenance.py
+      # One-way layering contract (design doc 28 §4.2, rule R4).
+      - run: python scripts/check_layering.py
+
   test:
     runs-on: ubuntu-latest
     env:

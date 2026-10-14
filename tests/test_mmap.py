@@ -3,13 +3,13 @@ import pickle
 
 import pytest
 
-from autovision._data._serialize.memory_mapped_sequence import (
-    MemoryMappedSequence,
-    write_items_to_file,
-)
-from autovision._data.mmap_helpers import (
+from autovision.data.mmap_helpers import (
     dataset_mmap_context,
     get_dataset_temp_mmap_path,
+)
+from autovision.data.serialize.memory_mapped_sequence import (
+    MemoryMappedSequence,
+    write_items_to_file,
 )
 
 

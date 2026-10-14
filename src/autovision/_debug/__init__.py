@@ -1,24 +1,19 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
-"""Debugging utilities for training-instability diagnostics."""
+"""Deprecated alias of :mod:`autovision.debug` (compat shim).
 
-from autovision._debug.debug_args import (
-    DebugArgs,
-    DebugUnderflowOverflowArgs,
-    NaNCaptureArgs,
-)
-from autovision._debug.nan_capture import (
-    NaNCaptureMonitor,
-    NaNDetectedError,
-    load_nan_capture,
-)
-from autovision._debug.underflow_overflow import DebugUnderflowOverflow
+Removed in the next minor release; import from the new location.
+"""
 
-__all__ = [
-    "DebugArgs",
-    "DebugUnderflowOverflow",
-    "DebugUnderflowOverflowArgs",
-    "NaNCaptureArgs",
-    "NaNCaptureMonitor",
-    "NaNDetectedError",
-    "load_nan_capture",
-]
+from __future__ import annotations
+
+import warnings
+
+warnings.warn(
+    "autovision._debug is a deprecated alias; import from "
+    "autovision.debug instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
+from autovision.debug import *  # noqa: E402,F401,F403
+from autovision.debug import __all__ as _exported  # noqa: E402,F401

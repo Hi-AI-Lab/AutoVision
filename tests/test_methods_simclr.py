@@ -3,9 +3,12 @@
 
 import pytest
 import torch
+from tests.helpers_models import TinyWrapper
 
-from autovision._methods import get_method_cls, list_methods
-from autovision._methods.simclr import (
+from autovision.encoders import FeatureExtractor
+from autovision.optim import AdamWArgs
+from autovision.pretext import get_method_cls, list_methods
+from autovision.pretext.simclr import (
     NTXentLoss,
     SimCLR,
     SimCLRArgs,
@@ -13,10 +16,7 @@ from autovision._methods.simclr import (
     SimCLRTransform,
     SimCLRTransformArgs,
 )
-from autovision._models import EmbeddingModel
-from autovision._optim import AdamWArgs
-from autovision._scaling import ScalingInfo
-from tests.helpers_models import TinyWrapper
+from autovision.scaling import ScalingInfo
 
 pytestmark = pytest.mark.filterwarnings("ignore::UserWarning")
 
@@ -26,7 +26,7 @@ def make_simclr(embed_dim: int = 8, **args_overrides) -> SimCLR:
     method_args.resolve_auto(scaling_info=ScalingInfo(dataset_size=64, epochs=10))
     optimizer_args = SimCLR.optimizer_args_cls("auto")()
     optimizer_args.resolve_auto(wrapped_model=None)
-    embedding_model = EmbeddingModel(
+    embedding_model = FeatureExtractor(
         wrapped_model=TinyWrapper(dim=embed_dim), embed_dim=None
     )
     return SimCLR(

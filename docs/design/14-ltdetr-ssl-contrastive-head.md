@@ -2,7 +2,7 @@
 
 | 文档属性 | 内容 |
 |---|---|
-| 版本 | v1.3（已实施，含 Route B、D14 未配对负例、评测探针；实施记录与审查修复见 §6） |
+| 版本 | v1.4（已实施，含 Route B、D14 未配对负例、评测探针；实施记录与审查修复见 §6，v1.4 = D14×DDP 对角线错位修复 / R11 拆分 / Route B 验证语义） |
 | 状态 | 已实现并通过 `tests/test_ltdetr_ssl.py`（70 例）+ `tests/test_ssl_probes.py`（6 例）+ `tests/test_ltdetr_ssl_command.py`（3 例）与全部受影响回归 |
 | 上游方法 | RF-DETR 分类头 SSL v2.1：逐物体、与 box 匹配对齐的 SimCSE 式对比学习（`L = L_det + λ·L_ssl`） |
 | 参考实现 | `/home/hdjs/Research/Software/rf-detr-ssl`（RF-DETR v1.9.4 + SSL 扩展；权威设计文档 `docs/learn/train/ssl-per-object-classification-head.md` v2.1，M1–M5 已实施并带 VisDrone-mini 消融） |
@@ -476,6 +476,7 @@ model_args = {
 ## 6. 实施计划（三个 PR，每个独立可合入）
 
 > **实施记录（v1.1）**：三个阶段已合并实现（单分支交付）。验收：`tests/test_ltdetr_ssl.py` 57 例全绿（含 2-rank gloo 池不均衡共识/padded gather 测试、EMA 往返、checkpoint 容错加载）；受影响回归全绿（test_ltdetr_dome 43 + test_ltdetr_object_detection 42 + dfine/组件/checkpoint 90）。独立代码审查（对照上游实现 + 2-rank gloo 行为探针）结论：无 P0；已修复——P1① `ssl_paired_ratio` 分母改为 pool/2（原定义上限 0.5，无法达到 §6 验收阈值）；P1② criterion 训练态 ssl_params 置但特征缺失改为**响亮 raise**（对齐上游与 §7 测试计划，消除静默整跑无 SSL 的浪费）；P2③ D9 改为保留导出键（严格加载器要求）；P2④ rtdetrv2 边界收紧为 `ssl is not None`（含 mode="off"）；P2⑤ 步门控 miss 步重置统计；P2⑥ 组件层防御校验 `same_image_positive_only`×dropout；P2⑦ IoU NaN→0 守卫（零面积框）；P2⑧ 逐比特断言改 `torch.equal`；P2⑨ 补 EMA/gloo 测试。
+> **实施记录（v1.4，2026-10-08，审查修复：D14×DDP 对角线错位 / R11 拆分 / Route B 验证语义）**：①**P0——D14 extras 的 DDP 布局错误**：`use_unpaired_as_negatives` 开启时，per-rank 候选块 `[paired; extras]` 经 padded gather 后按秩交错，而 `positive_mask`/InfoNCE target/`pair_ious` 覆写仍假设"前 N 列为配对候选"，且 `cand_boxes` 的新旧拼接次序与 `cand_z` 不一致——任一 rank 出现未配对实例即触发 `positive_logit_bias` 形状断言崩溃（2-rank gloo 最小复现实证），形状侥幸一致时正对静默错位。修复：**paired 与 extras 分别 padded gather 后按 paired-first 拼接**（paired 块与 anchor 行块结构逐位相同 → arange 对角线对每个 rank 恒正确），`_pair_two_crop` 改为恒返回 6 元组（零配对时 unpaired = 全池，extras-only 列仍进分布式候选池）；新增 `test_ddp_asymmetric_extras_keep_diagonal_pairing`（物体身份基嵌入，错位即损失 ≈19、正确即 ≈0，已验证旧实现失败/新实现通过）。②**R11 修复**：`both` 模式下两项改用**独立 logits**——InfoNCE 保持 IoU 偏置矩阵、SupCon 改用无偏余弦 logits（`sup` 单模式契约不变）；测试改为零偏置下 `both == unsup + sup` 精确分解 + 有偏置下不共矩阵断言。③**Route B 验证语义修正**：`validation_step` 前向期间 `ssl_head` 保持 train 模式（eval 下 dropout 关闭 → z1≡z2，验证损失退化为 uniformity 探针而非训练目标的留出估计），前向后立即恢复 eval；新增 `test_route_b_validation_keeps_head_dropout_active`。回归：test_ltdetr_ssl 75 例全绿。
 > **实施记录（v1.3，遗留项清偿）**：①**D14 未配对负例**——两个对比损失推广到矩形 logits（valid_rows/valid_cols 拆分），`_pair_two_crop` 返回未配对实例，extras 按自身视图嵌入加入候选列（sup 下同标签 extras 自动升级软正对），config `use_unpaired_as_negatives`（默认开），日志新增 `ssl_candidate_size`；②**探针移植**——`_metrics/ssl_probes.py` 5 项纯函数 + 6 例 hermetic 测试；③**R8 了结**——段式分组 + CPU 化，块对角 batched 指派经渐近分析否决（O((Σn)³) vs ΣO(n³)）。测试 70+6+3 例全绿，全量回归 260 例，ruff 干净。
 > **实施记录（v1.2，Route B 追加）**：`instance_source="encoder_candidates"` SSL-only 预训练已实现——decoder 候选特征 stash（`rtdetrv2_decoder.py` 惰性属性，基线零影响）、`DFINEv2Decoder.ssl_candidate_features` 发射开关（train+eval）、criterion SSL-only 分支（跳过匹配与全部检测损失）、`watch_metric` 动态切换（经引擎 `-val_loss` 兜底）、stage-2 加载容忍（丢弃 stage-1 的 `ssl_head.*` 键）。测试 64 例全绿（新增 Route B 组：组件池/拒绝矩阵/损失集纯度/编码器-检测头梯度隔离/验证路径/watch 切换/stage-2 加载/密度互斥）；回归 243 例全绿；ruff 干净。
 

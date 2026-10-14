@@ -1,9 +1,19 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
-"""Pretraining method layer."""
+"""Deprecated alias of :mod:`autovision.pretext` (compat shim).
 
-from autovision._methods import method_helpers  # noqa: F401  (registers methods)
-from autovision._methods.method import Method, TrainingStepResult
-from autovision._methods.method_args import MethodArgs
-from autovision._methods.method_helpers import get_method_cls, list_methods
+Removed in the next minor release; import from the new location.
+"""
 
-__all__ = ["Method", "MethodArgs", "TrainingStepResult", "get_method_cls", "list_methods"]
+from __future__ import annotations
+
+import warnings
+
+warnings.warn(
+    "autovision._methods is a deprecated alias; import from "
+    "autovision.pretext instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
+from autovision.pretext import *  # noqa: E402,F401,F403
+from autovision.pretext import __all__ as _exported  # noqa: E402,F401

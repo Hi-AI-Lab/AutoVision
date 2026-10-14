@@ -17,20 +17,25 @@ import torchvision.transforms.v2.functional as TF
 from torchvision import tv_tensors
 from torchvision.ops import box_iou
 
-from autovision._configs.validate import pydantic_model_validate
-from autovision._data.two_view import TwoViewObjectDetectionDataset
-from autovision._task_models.ltdetr_object_detection import (
-    LTDETRObjectDetectionTrain,
-    LTDETRObjectDetectionTrainArgs,
-    LTDETRSSLArgs,
+from autovision.augment.detection import (
+    RTDETRDetectionCollateFunction,
+    RTDETRDetectionTransformArgs,
+    TwoViewDetectionCollateFunction,
 )
-from autovision._task_models.object_detection_components.dfine_criterion import (
+from autovision.config.validate import pydantic_model_validate
+from autovision.data.two_view import TwoViewObjectDetectionDataset
+from autovision.tasks.detection.avdetr import (
+    AVDETRObjectDetectionTrain,
+    AVDETRObjectDetectionTrainArgs,
+    AVDETRSSLArgs,
+)
+from autovision.tasks.detection.components.dfine_criterion import (
     DFINECriterionV2,
 )
-from autovision._task_models.object_detection_components.matcher import (
+from autovision.tasks.detection.components.matcher import (
     HungarianMatcher,
 )
-from autovision._task_models.object_detection_components.ssl_contrastive import (
+from autovision.tasks.detection.components.ssl_contrastive import (
     SSLParams,
     SSLProjectionHead,
     cosine_logits,
@@ -41,11 +46,6 @@ from autovision._task_models.object_detection_components.ssl_contrastive import 
     simcse_infonce_loss,
     ssl_contrastive_loss,
     supervised_contrastive_loss,
-)
-from autovision._transforms.detection_transforms import (
-    RTDETRDetectionCollateFunction,
-    RTDETRDetectionTransformArgs,
-    TwoViewDetectionCollateFunction,
 )
 
 VARIANT_ARGS = dict(
@@ -59,25 +59,25 @@ VARIANT_ARGS = dict(
 
 
 # ── fixtures ────────────────────────────────────────────────────────────
-def make_ssl_train_model(**ssl_overrides) -> LTDETRObjectDetectionTrain:
+def make_ssl_train_model(**ssl_overrides) -> AVDETRObjectDetectionTrain:
     ssl = dict(mode="unsup", view="two_crop", loss_coef=0.1)
     ssl.update(ssl_overrides)
-    args = LTDETRObjectDetectionTrainArgs(**VARIANT_ARGS, ssl=ssl)
-    return LTDETRObjectDetectionTrain(args)
+    args = AVDETRObjectDetectionTrainArgs(**VARIANT_ARGS, ssl=ssl)
+    return AVDETRObjectDetectionTrain(args)
 
 
-def make_baseline_train_model() -> LTDETRObjectDetectionTrain:
-    args = LTDETRObjectDetectionTrainArgs(**VARIANT_ARGS)
-    return LTDETRObjectDetectionTrain(args)
+def make_baseline_train_model() -> AVDETRObjectDetectionTrain:
+    args = AVDETRObjectDetectionTrainArgs(**VARIANT_ARGS)
+    return AVDETRObjectDetectionTrain(args)
 
 
 @pytest.fixture(scope="module")
-def ssl_train_model() -> LTDETRObjectDetectionTrain:
+def ssl_train_model() -> AVDETRObjectDetectionTrain:
     return make_ssl_train_model()
 
 
 @pytest.fixture(scope="module")
-def baseline_train_model() -> LTDETRObjectDetectionTrain:
+def baseline_train_model() -> AVDETRObjectDetectionTrain:
     return make_baseline_train_model()
 
 
@@ -439,6 +439,7 @@ def test_ssl_loss_two_crop_all_pairs_dropped_is_connected_zero():
 
 def test_ssl_loss_sup_and_both_modes():
     indices, targets = _pool_fixture(num_views=2, matching=True)
+    torch.manual_seed(0)
     z1 = torch.randn(4, 6, 16, requires_grad=True)
     z2 = torch.randn(4, 6, 16, requires_grad=True)
     outputs = {"pred_logits": torch.zeros(4, 6, 3)}
@@ -446,13 +447,36 @@ def test_ssl_loss_sup_and_both_modes():
     both = ssl_contrastive_loss(z1, z2, outputs, targets, indices, SSLParams(mode="both", view="two_crop"))
     unsup = ssl_contrastive_loss(z1, z2, outputs, targets, indices, SSLParams(mode="unsup", view="two_crop"))
     assert torch.isfinite(sup) and torch.isfinite(both) and torch.isfinite(unsup)
-    # "both" shares ONE biased-logit matrix between the two terms, and its
-    # InfoNCE sees the label-equality bias positions that the standalone
-    # unsup term (diagonal-only bias) does not — so it is the sup term plus
-    # a differently-biased InfoNCE, not sup + standalone-unsup. The sup term
-    # itself is identical across modes.
-    assert both > sup  # the added InfoNCE term is non-negative
-    assert not torch.equal(unsup, both - sup)  # bias composition differs
+
+
+def test_ssl_both_mode_sup_leg_is_unbiased():
+    """R11: in "both" mode the two objectives consume SEPARATE logit
+    matrices — the IoU alignment bias stays on the InfoNCE leg (its diagonal
+    positives), while the SupCon leg gets plain cosine logits so same-label
+    soft positives on low-IoU pairs are not suppressed. With the bias zeroed
+    the biased and unbiased matrices coincide, so the mode decomposition must
+    be exact: both == unsup + sup."""
+    indices, targets = _pool_fixture(num_views=2, matching=True)
+    torch.manual_seed(0)
+    z1 = torch.randn(4, 6, 16, requires_grad=True)
+    z2 = torch.randn(4, 6, 16, requires_grad=True)
+    outputs = {"pred_logits": torch.zeros(4, 6, 3)}
+
+    def run(mode: str, iou_bias: float):
+        return ssl_contrastive_loss(
+            z1, z2, outputs, targets, indices,
+            SSLParams(mode=mode, view="two_crop", iou_bias=iou_bias),
+        )
+
+    # sup-ALONE keeps its biased-logits contract (documented behavior).
+    assert not torch.equal(run("sup", 0.5), run("sup", 0.0))
+    # With the bias zeroed, "both" decomposes exactly into its two legs.
+    torch.testing.assert_close(
+        run("both", 0.0), run("unsup", 0.0) + run("sup", 0.0)
+    )
+    # With the bias active the legs no longer share one matrix: "both" is
+    # NOT sup-alone plus a re-run of the shared-bias InfoNCE.
+    assert not torch.equal(run("both", 0.5), run("sup", 0.5) + run("unsup", 0.5))
 
 
 def test_ssl_loss_sup_same_image_positive_only():
@@ -690,12 +714,12 @@ def test_ssl_off_dropout_view_integration():
 
 
 def test_dome_and_ssl_combined():
-    args = LTDETRObjectDetectionTrainArgs(
+    args = AVDETRObjectDetectionTrainArgs(
         **VARIANT_ARGS,
         density={"max_num_select": 50, "mwas_window_size": 5},
         ssl={"mode": "unsup", "view": "two_crop", "loss_coef": 0.1},
     )
-    model = LTDETRObjectDetectionTrain(args)
+    model = AVDETRObjectDetectionTrain(args)
     batch = make_two_crop_batch(pairs=2, matching=True, seed=5)
     result = model.training_step(batch, step=0)
     assert torch.isfinite(result.loss)
@@ -706,34 +730,34 @@ def test_dome_and_ssl_combined():
 # ── config validation ───────────────────────────────────────────────────
 def test_config_zero_coef_with_active_mode_raises():
     with pytest.raises(ValueError, match="loss_coef"):
-        LTDETRSSLArgs(mode="unsup", loss_coef=0.0)
+        AVDETRSSLArgs(mode="unsup", loss_coef=0.0)
 
 
 def test_config_zero_coef_with_off_mode_is_the_baseline():
-    args = LTDETRSSLArgs(mode="off", loss_coef=0.0, view="two_crop")
+    args = AVDETRSSLArgs(mode="off", loss_coef=0.0, view="two_crop")
     assert args.view == "two_crop"
 
 
 def test_config_same_image_requires_two_crop():
     with pytest.raises(ValueError, match="two_crop"):
-        LTDETRSSLArgs(mode="sup", view="dropout", same_image_positive_only=True)
+        AVDETRSSLArgs(mode="sup", view="dropout", same_image_positive_only=True)
 
 
 def test_config_route_b_requires_unsup_and_dropout():
     """Route B (encoder_candidates) is label-free: unsup + dropout only."""
-    args = LTDETRSSLArgs(
+    args = AVDETRSSLArgs(
         mode="unsup", view="dropout", instance_source="encoder_candidates"
     )
     assert args.instance_source == "encoder_candidates"
     assert args.to_ssl_params().instance_source == "encoder_candidates"
     with pytest.raises(ValueError, match="unsup"):
-        LTDETRSSLArgs(mode="sup", view="dropout", instance_source="encoder_candidates")
+        AVDETRSSLArgs(mode="sup", view="dropout", instance_source="encoder_candidates")
     with pytest.raises(ValueError, match="dropout"):
-        LTDETRSSLArgs(mode="unsup", view="two_crop", instance_source="encoder_candidates")
+        AVDETRSSLArgs(mode="unsup", view="two_crop", instance_source="encoder_candidates")
     # The stride gate interleaves SSL with the detection losses — there is
     # nothing to interleave with in SSL-only mode, so reject a silent no-op.
     with pytest.raises(ValueError, match="every_n_steps"):
-        LTDETRSSLArgs(
+        AVDETRSSLArgs(
             mode="unsup", view="dropout", instance_source="encoder_candidates",
             every_n_steps=3,
         )
@@ -741,16 +765,16 @@ def test_config_route_b_requires_unsup_and_dropout():
 
 def test_config_unknown_key_rejected():
     with pytest.raises(Exception):
-        pydantic_model_validate(LTDETRSSLArgs, {"mode": "unsup", "bogus": 1})
+        pydantic_model_validate(AVDETRSSLArgs, {"mode": "unsup", "bogus": 1})
 
 
 def test_task_model_rejects_ssl_with_rtdetrv2_decoder():
-    from autovision._task_models.ltdetr_object_detection.task_model import (
-        LTDETRObjectDetection,
+    from autovision.tasks.detection.avdetr.task_model import (
+        AVDETRObjectDetection,
     )
 
     with pytest.raises(ValueError, match="D-FINE"):
-        LTDETRObjectDetection(
+        AVDETRObjectDetection(
             num_classes=2,
             model_name="dinov2-vittest-notpretrained",
             image_size=(224, 224),
@@ -909,10 +933,10 @@ def test_gather_distributed_single_rank_gloo_keeps_grad():
 def _ssl_ddp_worker(rank: int, world_size: int, init_file: str, result_dir: str) -> None:
     import datetime
 
-    from autovision._task_models.object_detection_components.ssl_contrastive import (
+    from autovision.tasks.detection.components.ssl_contrastive import (
         SSLParams as WorkerSSLParams,
     )
-    from autovision._task_models.object_detection_components.ssl_contrastive import (
+    from autovision.tasks.detection.components.ssl_contrastive import (
         ssl_contrastive_loss as worker_ssl_contrastive_loss,
     )
 
@@ -997,6 +1021,145 @@ def test_ddp_unbalanced_pools_consensus_and_padded_gather(tmp_path):
     assert rank1["stats"]["paired_size"] == 2.0
 
 
+def _ssl_extras_worker(rank: int, world_size: int, init_file: str, result_dir: str) -> None:
+    """2-rank gloo with ASYMMETRIC D14 extras (rank 0: none, rank 1: two).
+
+    Embeddings encode object identity in disjoint basis vectors, so the
+    correctly aligned InfoNCE diagonal is the only high-logit column: the
+    loss must be ~0. Under the pre-fix layout (extras folded into each
+    rank's candidate block before the padded gather) the bias matrix shape
+    breaks loudly or the diagonal points at a wrong/pad column, which shows
+    up as a large loss.
+    """
+    import datetime
+
+    from autovision.tasks.detection.components.ssl_contrastive import (
+        SSLParams as WorkerSSLParams,
+    )
+    from autovision.tasks.detection.components.ssl_contrastive import (
+        ssl_contrastive_loss as worker_ssl_contrastive_loss,
+    )
+
+    dist.init_process_group(
+        backend="gloo",
+        init_method=f"file://{init_file}",
+        rank=rank,
+        world_size=world_size,
+        timeout=datetime.timedelta(seconds=60),
+    )
+    try:
+        q, d = 4, 32
+        eye = torch.eye(4, d) * 10.0
+
+        # Both draws carry BOTH batch rows (the loss pulls view-1 rows from
+        # z1 and view-2 rows from z2); rows 0/1 are the view-1/view-2 image
+        # of the single source image. Embeddings encode OBJECT identity in
+        # disjoint basis vectors, so a correctly aligned diagonal is the only
+        # high-logit column pair.
+        def identity_batch(objects):
+            # objects: [(query, object_id), ...] — identical content on both
+            # batch rows (view-1 and view-2 image of the same source image).
+            full = torch.zeros(2, q, d)
+            for row in range(2):
+                for query, object_id in objects:
+                    full[row, query] = eye[object_id]
+            return full
+
+        # A (label 1) pairs across views; B (label 2) fails cross-view
+        # validation (its view-2 box is mirrored into the far corner).
+        box_a = torch.tensor([[0.5, 0.5, 0.2, 0.2]])
+        box_b1 = torch.tensor([[0.1, 0.1, 0.2, 0.2]])
+        box_b2 = torch.tensor([[0.9, 0.9, 0.2, 0.2]])
+
+        if rank == 0:
+            z1 = identity_batch([(0, 0)])
+            z2 = identity_batch([(0, 0)])
+            targets = [
+                {"boxes": box_a, "labels": torch.tensor([1])},
+                {"boxes": box_a.clone(), "labels": torch.tensor([1])},
+            ]
+            indices = [
+                (torch.tensor([0]), torch.tensor([0])),
+                (torch.tensor([0]), torch.tensor([0])),
+            ]
+        else:
+            z1 = identity_batch([(0, 1), (1, 2)])
+            z2 = identity_batch([(0, 1), (1, 2)])
+            targets = [
+                {"boxes": torch.cat([box_a, box_b1]), "labels": torch.tensor([1, 2])},
+                {"boxes": torch.cat([box_a, box_b2]), "labels": torch.tensor([1, 2])},
+            ]
+            indices = [
+                (torch.tensor([0, 1]), torch.tensor([0, 1])),
+                (torch.tensor([0, 1]), torch.tensor([0, 1])),
+            ]
+
+        results = {}
+        for use_extras in (True, False):
+            params = WorkerSSLParams(
+                mode="unsup",
+                view="two_crop",
+                temp=0.05,
+                iou_bias=0.0,  # isolate the pairing geometry from the bias
+                use_unpaired_as_negatives=use_extras,
+            )
+            stats: dict[str, float] = {}
+            z1 = z1.detach().requires_grad_(True)
+            z2 = z2.detach().requires_grad_(True)
+            loss = worker_ssl_contrastive_loss(
+                z1,
+                z2,
+                {"pred_logits": torch.zeros(2, q, 3)},
+                targets,
+                indices,
+                params,
+                stats_sink=stats,
+            )
+            loss.backward()
+            results[f"extras={use_extras}"] = {
+                "ok": bool(torch.isfinite(loss).item()) and z1.grad is not None,
+                # Correct pairing: each anchor's ONLY high-logit column is its
+                # own partner → loss ≈ log(1 + k·e^-20) ≈ 0. Any misaligned
+                # diagonal lands on a zero logit → loss ≈ 19+.
+                "loss": float(loss.detach()),
+                **stats,
+            }
+        Path(result_dir, f"rank{rank}.json").write_text(
+            json.dumps(results)
+        )
+    finally:
+        dist.destroy_process_group()
+
+
+def test_ddp_asymmetric_extras_keep_diagonal_pairing(tmp_path):
+    """P0 regression (design doc 14 D14 × DDP): extras must be padded-gathered
+    SEPARATELY from the paired candidates so the paired block stays
+    block-aligned with the anchor rows. Pre-concatenating them per rank broke
+    the arange diagonal as soon as any rank had extras (loud shape error in
+    the bias matrix, or a silently wrong InfoNCE target)."""
+    import torch.multiprocessing as mp
+
+    init_file = str(tmp_path / "extras_store")
+    mp.spawn(
+        _ssl_extras_worker,
+        args=(2, init_file, str(tmp_path)),
+        nprocs=2,
+        join=True,
+    )
+    for rank in (0, 1):
+        results = json.loads((tmp_path / f"rank{rank}.json").read_text())
+        with_extras = results["extras=True"]
+        without = results["extras=False"]
+        assert with_extras["ok"] and without["ok"]
+        assert with_extras["loss"] < 0.5, with_extras
+        assert without["loss"] < 0.5, without
+    # Rank 1 owns the unpaired instances; its candidate column count grows
+    # from 1 paired to 1 + 2 extras.
+    rank1 = json.loads((tmp_path / "rank1.json").read_text())
+    assert rank1["extras=True"]["candidate_size"] == 3.0
+    assert rank1["extras=False"]["candidate_size"] == 1.0
+
+
 # ── EMA round-trip ──────────────────────────────────────────────────────
 def test_ema_checkpoint_roundtrip_covers_ssl_head():
     model = make_ssl_train_model()
@@ -1030,8 +1193,8 @@ def test_ema_checkpoint_roundtrip_covers_ssl_head():
 
 
 # ── Route B: label-free SSL-only pretraining (design doc 14 §4.10) ──────
-def make_route_b_train_model() -> LTDETRObjectDetectionTrain:
-    args = LTDETRObjectDetectionTrainArgs(
+def make_route_b_train_model() -> AVDETRObjectDetectionTrain:
+    args = AVDETRObjectDetectionTrainArgs(
         **VARIANT_ARGS,
         ssl={
             "mode": "unsup",
@@ -1040,7 +1203,7 @@ def make_route_b_train_model() -> LTDETRObjectDetectionTrain:
             "instance_source": "encoder_candidates",
         },
     )
-    return LTDETRObjectDetectionTrain(args)
+    return AVDETRObjectDetectionTrain(args)
 
 
 def test_route_b_component_pool_is_all_candidates():
@@ -1126,6 +1289,47 @@ def test_route_b_watch_metric_switches():
     assert make_baseline_train_model().watch_metric == "val_metric/map"
 
 
+def test_route_b_validation_keeps_head_dropout_active():
+    """In eval mode the projection head's dropout is disabled and the two
+    draws coincide exactly, degrading the held-out loss to a uniformity
+    probe instead of the train objective's two-view estimate. The val step
+    must run the forward with the head in train mode (restored right after)
+    and the two stochastic draws must actually differ."""
+    args = AVDETRObjectDetectionTrainArgs(
+        **VARIANT_ARGS,
+        ssl={
+            "mode": "unsup",
+            "view": "dropout",
+            "loss_coef": 1.0,
+            "instance_source": "encoder_candidates",
+            "projector_dropout": 0.5,  # identical-draw probability 0.5^64 ≈ 0
+        },
+    )
+    model = AVDETRObjectDetectionTrain(args)
+    model.model.eval()
+    val_model = model.ema_model.model if model.ema_model is not None else model.model
+    batch = {
+        "image": torch.randn(2, 3, 224, 224),
+        "bboxes": [torch.rand(2, 4) * 0.3 + 0.3] * 2,
+        "classes": [torch.tensor([0, 1])] * 2,
+        "image_path": ["a.jpg", "b.jpg"],
+        "original_size": [(224, 224), (224, 224)],
+    }
+    with torch.no_grad():
+        first = model.validation_step(batch, step=0)
+        second = model.validation_step(batch, step=0)
+    assert math.isfinite(first.log_dict["loss_ssl"])
+    assert not math.isclose(
+        first.log_dict["loss_ssl"],
+        second.log_dict["loss_ssl"],
+        rel_tol=0.0,
+        abs_tol=0.0,
+    )
+    # The head is restored to eval after the forward — no state leaks into
+    # EMA evaluation or export paths.
+    assert not val_model.ssl_head.training
+
+
 def test_route_b_stage2_load_drops_pretraining_head():
     """Stage 2 (supervised finetune without the head) loads a stage-1
     checkpoint: the pretraining-only ssl_head keys are dropped, everything
@@ -1142,12 +1346,12 @@ def test_route_b_stage2_load_drops_pretraining_head():
 
 
 def test_route_b_rejects_density():
-    from autovision._task_models.ltdetr_object_detection import (
-        LTDETRObjectDetectionTrainArgs as Args,
+    from autovision.tasks.detection.avdetr import (
+        AVDETRObjectDetectionTrainArgs as Args,
     )
 
     with pytest.raises(ValueError, match="density"):
-        LTDETRObjectDetectionTrain(
+        AVDETRObjectDetectionTrain(
             Args(
                 **VARIANT_ARGS,
                 density={"max_num_select": 50, "mwas_window_size": 5},
@@ -1340,7 +1544,7 @@ def test_two_crop_unpaired_negatives_keep_ratio_semantics():
 
 def test_sigreg_training_step_emits_and_backprops():
     """R1-A1 (design doc 16): loss_sigreg joins the total and reaches the head."""
-    model = make_ssl_train_model(sigreg_coef=0.2)
+    model = make_ssl_train_model(sigreg_coef=0.2, projector="mlp2")
     batch = make_two_crop_batch(pairs=2, matching=True, seed=3)
     result = model.training_step(batch, step=0)
     assert "loss_sigreg" in result.log_dict

@@ -5,7 +5,7 @@ import pytest
 import torch
 from torch import nn
 
-from autovision._task_models.object_detection_components import (
+from autovision.tasks.detection.components import (
     FlatCosineLRScheduler,
     HungarianMatcher,
     HybridEncoder,
@@ -15,14 +15,14 @@ from autovision._task_models.object_detection_components import (
     box_cxcywh_norm_to_xyxy,
     box_xyxy_to_cxcywh_norm,
 )
-from autovision._task_models.object_detection_components.box_ops import (
+from autovision.tasks.detection.components.box_ops import (
     elementwise_box_iou,
     elementwise_siou,
 )
-from autovision._task_models.object_detection_components.dfine_criterion import (
+from autovision.tasks.detection.components.dfine_criterion import (
     DFINECriterionV2,
 )
-from autovision._task_models.object_detection_components.multistep_schedule import (
+from autovision.tasks.detection.components.multistep_schedule import (
     MultiStepWarmupScheduler,
 )
 
@@ -51,7 +51,7 @@ class TestBoxOps:
         assert torch.allclose(back, boxes, atol=1e-6)
 
     def test_giou_self_zero(self):
-        from autovision._task_models.object_detection_components import (
+        from autovision.tasks.detection.components import (
             generalized_box_iou_loss,
         )
 
@@ -119,6 +119,41 @@ class TestModelEMA:
         ema2.load_state_dict(ema.state_dict())
         assert ema2.updates == ema.updates
         assert torch.allclose(ema2.model.weight, ema.model.weight)
+
+    def test_aliased_tensors_update_once(self):
+        # The AV-DETR task model exposes the backbone under two state_dict
+        # key paths (`backbone_wrapper.*` and `backbone.*`) sharing one
+        # storage. The foreach EMA update must land ONCE per unique
+        # tensor: applied per key, an aliased tensor follows
+        # t <- d^2*t + 2(1-d)*s and inflates uniformly toward 2/(1+d) times
+        # the model — invisible at decay 0.995 (factor 1.000025), fatal at
+        # 0.9999 whose long warmup lingers at d ~ 0.3-0.7 (factor up to
+        # ~1.2). A frozen model must converge to itself exactly.
+        class Inner(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.linear = nn.Linear(4, 3)
+
+        class Outer(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.inner = Inner()
+                self.backbone = self.inner.linear  # aliased exposure
+
+        torch.manual_seed(0)
+        model = Outer()
+        aliased_keys = [k for k in model.state_dict() if k.startswith("backbone.")]
+        assert len(aliased_keys) == 2, "expected the alias to show in state_dict"
+
+        ema = ModelEMA(model, decay=0.9, warmup_steps=2)
+        for _ in range(50):
+            ema.update(model)
+        state = model.state_dict()
+        ema_state = ema.model.state_dict()
+        for key, value in state.items():
+            torch.testing.assert_close(
+                ema_state[key], value, msg=f"EMA diverged on '{key}'"
+            )
 
 
 class TestFlatCosine:
@@ -244,10 +279,67 @@ class TestDecoderAndCriterion:
         ).detach()
         assert losses["loss"].detach() == pytest.approx(expected, rel=1e-5)
 
+    def test_vfl_survives_degenerate_pred_boxes(self):
+        # Baseline sanitizes the predicted side before the quality IoU: a
+        # degenerate (NaN) box must yield a computed VFL term, not a NaN
+        # that the trailing nan_to_num zeroes out.
+        decoder_out = {
+            "pred_logits": torch.randn(2, 10, 2, requires_grad=True),
+            "pred_boxes": torch.rand(2, 10, 4),
+        }
+        targets = fake_targets()
+        criterion = RTDETRCriterionV2(HungarianMatcher())
+        healthy = criterion(
+            [decoder_out], targets, world_size=1
+        )["loss_vfl"]
+        assert torch.isfinite(healthy).all()
+
+        poisoned_boxes = torch.rand(2, 10, 4)
+        poisoned_boxes[0, 0, 0] = float("nan")  # a matched degenerate box
+        poisoned = {"pred_logits": decoder_out["pred_logits"], "pred_boxes": poisoned_boxes}
+        degenerate = criterion([poisoned], targets, world_size=1)
+        assert torch.isfinite(degenerate["loss_vfl"])
+        assert degenerate["loss_vfl"].item() > 0
+
+    def test_matched_pair_iou_sanitizes_degenerate_boxes(self):
+        from autovision.tasks.detection.components.dfine_utils import (
+            matched_pair_iou,
+        )
+
+        pred = torch.tensor([[float("nan"), 0.5, 0.5, 0.5],
+                             [float("inf"), 2.0, -1.0, 0.5],
+                             [0.5, 0.5, 0.5, 0.5]])
+        target = torch.tensor([[0.5, 0.5, 0.5, 0.5]] * 3)
+        ious = matched_pair_iou(pred, target)
+        assert torch.isfinite(ious).all()
+        assert bool((ious >= 0).all()) and bool((ious <= 1).all())
+
+    def test_aux_layers_get_box_deep_supervision(self):
+        # Baseline rtdetrv2 aux loop (share_matched_indices defaults False):
+        # every intermediate layer re-runs the full loss set (VFL + L1 +
+        # GIoU) on its OWN Hungarian match — the v2 family has no union
+        # set. Lock the per-aux box keys and the weighted total they feed.
+        out = self._make_decoder()(self._feats(batch_size=2))
+        targets = fake_targets(batch_size=2)
+        criterion = RTDETRCriterionV2(HungarianMatcher())
+        outputs_list = out["aux_outputs"] + [
+            {"pred_logits": out["pred_logits"], "pred_boxes": out["pred_boxes"]}
+        ]
+        losses = criterion(outputs_list, targets, world_size=1)
+        for name in ("loss_vfl_aux_0", "loss_bbox_aux_0", "loss_giou_aux_0"):
+            assert name in losses, name
+            assert torch.isfinite(losses[name])
+        rebuilt = sum(
+            value.detach() * criterion.weight_dict[key.replace("_aux_0", "")]
+            for key, value in losses.items()
+            if key != "loss"
+        )
+        assert losses["loss"].detach() == pytest.approx(rebuilt, rel=1e-5)
+
 
 class TestTrainWindow:
     def test_means_over_window(self):
-        from autovision._engine.engine import _TrainWindow
+        from autovision.engine.engine import _TrainWindow
 
         window = _TrainWindow()
         for value in (2.0, 4.0, 6.0):
@@ -262,7 +354,7 @@ class TestTrainWindow:
     def test_seconds_per_step_positive(self):
         import time
 
-        from autovision._engine.engine import _TrainWindow
+        from autovision.engine.engine import _TrainWindow
 
         window = _TrainWindow()
         window.update({"loss": torch.tensor(1.0)})
@@ -272,7 +364,7 @@ class TestTrainWindow:
 
 class TestValidationReportTables:
     def test_detection_report_renders_overall_and_per_class(self):
-        from autovision._metrics.report import format_detection_validation_report
+        from autovision.metrics.report import format_detection_validation_report
 
         metrics = {
             "map": 0.0625, "map_50": 0.1030, "map_75": 0.05,
@@ -298,7 +390,7 @@ class TestValidationReportTables:
         assert lines[1].startswith("┏") and lines[-2].startswith("└")
 
     def test_metric_table_first_column_left_aligned(self):
-        from autovision._metrics.report import format_metric_table
+        from autovision.metrics.report import format_metric_table
 
         table = format_metric_table(
             "T", ("Name", "Val"), [["longer-name", "1.0"], ["x", "22"]]
@@ -512,13 +604,14 @@ class TestDFINESIoUCriterion:
         assert "loss_siou" in losses
         assert "loss_bbox" in losses
         assert not any("loss_giou" in key for key in losses)
-        # Box losses stay final-layer-only: the aux VFL keeps its suffix,
-        # the swapped IoU term never grows one.
+        # Every box-loss branch carries the swapped IoU term (docstring:
+        # main, _pre, _dn_pre, and the copied _aux_i/_dn_i/_enc_i), while
+        # the aux VFL keeps its own suffix shape.
         assert "loss_vfl_aux_0" in losses
-        assert not any(key.endswith("_aux_0") for key in losses if "siou" in key)
+        assert "loss_siou_aux_0" in losses
 
     def test_siou_value_matches_box_ops_on_matched_pairs(self):
-        from autovision._task_models.object_detection_components.rtdetrv2_criterion import (
+        from autovision.tasks.detection.components.rtdetrv2_criterion import (
             _cxcywh_to_xyxy_unit,
         )
 
@@ -608,9 +701,13 @@ class TestDFINESIoUCriterion:
             base[key] * weight for key, weight in siou_weights.items() if key in base
         )
         # The _pre weight is a forward-local copy of the main term's weight
-        # (the E4 line) — it must carry the same factor.
+        # (the E4 line) — it must carry the same factor. So is the aux-loop
+        # expansion (weights[f"{key}_aux_{i}"]) for the deep-supervised
+        # aux box branch.
         if "loss_siou_pre" in base:
             expected = expected + base["loss_siou_pre"] * siou_weights["loss_siou"]
+        if "loss_siou_aux_0" in base:
+            expected = expected + base["loss_siou_aux_0"] * siou_weights["loss_siou"]
         torch.testing.assert_close(base["loss"] - zeroed["loss"], expected)
 
     def test_ctor_rejects_unknown_iou_term(self):

@@ -7,11 +7,13 @@ from pathlib import Path
 import pytest
 import torch
 from PIL import Image
+from tests.helpers_models import TinyWrapper
 
-from autovision._data.file_helpers import open_mask
-from autovision._data.image_dataset import ImageDataset
-from autovision._methods import get_method_cls, list_methods
-from autovision._methods.detcon import (
+from autovision.data.file_helpers import open_mask
+from autovision.data.image_dataset import ImageDataset
+from autovision.encoders import FeatureExtractor
+from autovision.pretext import get_method_cls, list_methods
+from autovision.pretext.detcon import (
     DetConB,
     DetConBArgs,
     DetConBLoss,
@@ -21,20 +23,18 @@ from autovision._methods.detcon import (
     DetConSGDArgs,
     DetConSLoss,
 )
-from autovision._methods.detcon.detcon import (
+from autovision.pretext.detcon.detcon import (
     _region_pipeline,
     _subsample_mask_indices,
     _subsample_pooled_features,
     pool_masked,
 )
-from autovision._methods.detcon.detcon_transform import (
+from autovision.pretext.detcon.detcon_transform import (
     DetConBTransform,
     DetConBTransformArgs,
     DetConSTransform,
     DetConSTransformArgs,
 )
-from autovision._models import EmbeddingModel
-from tests.helpers_models import TinyWrapper
 
 pytestmark = pytest.mark.filterwarnings("ignore::UserWarning")
 
@@ -49,7 +49,7 @@ def make_s(**overrides) -> DetConS:
     return DetConS(
         method_args=args,
         optimizer_args=optimizer_args,
-        embedding_model=EmbeddingModel(wrapped_model=TinyWrapper(dim=8), embed_dim=8),
+        embedding_model=FeatureExtractor(wrapped_model=TinyWrapper(dim=8), embed_dim=8),
         global_batch_size=4,
         num_input_channels=3,
     )
@@ -71,7 +71,7 @@ def make_b(**overrides) -> DetConB:
     return DetConB(
         method_args=args,
         optimizer_args=optimizer_args,
-        embedding_model=EmbeddingModel(wrapped_model=TinyWrapper(dim=8), embed_dim=8),
+        embedding_model=FeatureExtractor(wrapped_model=TinyWrapper(dim=8), embed_dim=8),
         global_batch_size=4,
         num_input_channels=3,
     )
@@ -566,11 +566,11 @@ class TestTransforms:
         # Image pixel value encodes the mask id (x60): with all photometric
         # ops and normalization disabled, interior pixels of the transformed
         # image must decode to the transformed mask values.
-        from autovision._methods.detcon.detcon_transform import _MaskedViewTransform
-        from autovision._transforms.transform_args import (
+        from autovision.augment.transform_args import (
             RandomFlipArgs,
             RandomResizeArgs,
         )
+        from autovision.pretext.detcon.detcon_transform import _MaskedViewTransform
 
         torch.manual_seed(0)
         view = _MaskedViewTransform(
@@ -654,7 +654,7 @@ class TestMaskDataPipeline:
     def test_image_dataset_without_mask_dir(self, tmp_path: Path):
         # Regression: the plain image pipeline must not grow a masks key.
         image_path, _ = self._write_pair(tmp_path, "img1.png")
-        from autovision._methods.simclr import SimCLRTransform, SimCLRTransformArgs
+        from autovision.pretext.simclr import SimCLRTransform, SimCLRTransformArgs
 
         transform = SimCLRTransform(SimCLRTransformArgs(image_size=(32, 32)))
         dataset = ImageDataset(
@@ -679,8 +679,9 @@ class TestPretrainIntegration:
             )
 
     def test_pretrain_detcon_end_to_end(self, tmp_path: Path):
-        from autovision import pretrain
         from tests.conftest import create_images
+
+        from autovision import pretrain
 
         image_dir = tmp_path / "data"
         create_images(image_dir, num_images=4, size=(32, 32))
@@ -700,8 +701,9 @@ class TestPretrainIntegration:
         assert result.checkpoint_path.exists()
 
     def test_pretrain_detconb_end_to_end(self, tmp_path: Path):
-        from autovision import pretrain
         from tests.conftest import create_images
+
+        from autovision import pretrain
 
         image_dir = tmp_path / "data"
         create_images(image_dir, num_images=4, size=(32, 32))

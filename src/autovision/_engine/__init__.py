@@ -1,18 +1,19 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
-from autovision._engine.engine import (
-    Engine,
-    FitResult,
-    TaskEngine,
-    TaskFitResult,
-    resolve_device,
-    seed_everything,
+"""Deprecated alias of :mod:`autovision.engine` (compat shim).
+
+Removed in the next minor release; import from the new location.
+"""
+
+from __future__ import annotations
+
+import warnings
+
+warnings.warn(
+    "autovision._engine is a deprecated alias; import from "
+    "autovision.engine instead.",
+    DeprecationWarning,
+    stacklevel=2,
 )
 
-__all__ = [
-    "Engine",
-    "FitResult",
-    "TaskEngine",
-    "TaskFitResult",
-    "resolve_device",
-    "seed_everything",
-]
+from autovision.engine import *  # noqa: E402,F401,F403
+from autovision.engine import __all__ as _exported  # noqa: E402,F401

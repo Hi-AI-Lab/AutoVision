@@ -6,14 +6,14 @@ from __future__ import annotations
 import pytest
 import torch
 
-from autovision._task_models.object_detection_components.denoising import (
+from autovision.tasks.detection.components.denoising import (
     get_cdn_matched_indices,
     get_contrastive_denoising_training_group,
 )
-from autovision._task_models.object_detection_components.rtdetrv2_decoder import (
+from autovision.tasks.detection.components.rtdetrv2_decoder import (
     RTDETRv2Decoder,
 )
-from autovision._task_models.rtdetr_object_detection import (
+from autovision.tasks.detection.rtdetr_object_detection import (
     RTDETRObjectDetectionTrain,
     RTDETRObjectDetectionTrainArgs,
 )
@@ -295,7 +295,7 @@ class TestReviewFixes:
             }
         ]
         embed = torch.nn.Embedding(11, 32)
-        from autovision._task_models.object_detection_components.denoising import (
+        from autovision.tasks.detection.components.denoising import (
             box_cxcywh_to_xyxy,
         )
 

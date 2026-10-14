@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
 import pytest
 
-from autovision._scaling import (
+from autovision.scaling import (
     IMAGENET_SIZE,
     QUEUE_SIZE_BUCKETS,
     ScalingInfo,

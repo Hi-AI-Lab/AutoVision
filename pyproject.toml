@@ -24,7 +24,7 @@ dependencies = [
 ]
 
 [project.scripts]
-autovision-cli = "autovision._cli:cli_entrypoint"
+autovision-cli = "autovision.cli._app:cli_entrypoint"
 
 [project.optional-dependencies]
 tensorboard = ["tensorboard>=2.10"]
@@ -38,16 +38,19 @@ timm = ["timm>=1.0.3"]
 # the `export` extra — declared as an extra conflict in [tool.uv].
 super-gradients = ["super-gradients>=3.6.1"]
 # AGPL-3.0: extras-only by policy — never a core dependency, never imported
-# at module level (see src/autovision/_models/ultralytics/).
+# at module level (see src/autovision/encoders/ultralytics/).
 ultralytics = ["ultralytics>=8.1.0"]
 # DINOv2/DINOv3, RF-DETR and DEIMv2 backbones via HuggingFace transformers
 # (per framework policy: prefer transformers over third-party/vendored model
-# code; see src/autovision/_models/rfdetr/). The RF-DETR/DEIMv2 packages
+# code; see src/autovision/encoders/rfdetr/). The RF-DETR/DEIMv2 packages
 # gate on class presence at runtime; their floor is transformers 5.9.0
 # (2026-05), the first release shipping both the RfDetr and the Deimv2
 # classes — verified by wheel inspection (4.57–5.8 lack them), so only the
 # rfdetr/deimv2 extras can promise the classes are importable.
-transformers = ["transformers>=4.56"]
+# sentencepiece + protobuf ride the transformers extra: the SigLIP
+# tokenizer (open-vocab branch, design doc 27) requires both; CLIP-family
+# tokenizers are BPE and do not.
+transformers = ["transformers>=4.56", "sentencepiece>=0.2", "protobuf>=4"]
 rfdetr = ["transformers>=5.9"]
 deimv2 = ["transformers>=5.9"]
 # ONNX export pipeline (torch.export -> dynamo/legacy ONNX -> FP16 ->

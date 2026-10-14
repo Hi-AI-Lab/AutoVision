@@ -1,0 +1,76 @@
+Autovision
+Copyright 2026 Autovision contributors
+
+This product is licensed under the Apache License, Version 2.0 (the
+"License"); see the LICENSE file. Unless required by applicable law or
+agreed to in writing, software distributed under the License is distributed
+on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
+
+==========================================================================
+Third-party code contained in this repository
+==========================================================================
+
+Vendored or ported components (file-level ledger: docs/provenance/LEDGER.md,
+remediation plan: docs/design/28-clean-provenance-refactor.md):
+
+* DEIM / DEIMv2 (Apache License 2.0)
+  Source: https://github.com/Intellindust-AI-Lab/DEIMv2
+          https://github.com/Intellindust-AI-Lab/DEIM
+  Used for: the flat-cosine LR schedule
+  (src/autovision/tasks/detection/components/flat_cosine.py), the axial
+  rotary position embedding and the spatial-prior adapter logic
+  re-derived in src/autovision/encoders/ecvit/ and
+  src/autovision/tasks/detection/avdetr/backbone_wrappers.py.
+
+* EdgeCrafter / ECViT (Apache License 2.0)
+  Source: https://github.com/Intellindust-AI-Lab/EdgeCrafter (@ d7fdcb5;
+          capsule2077/edgecrafter hosts the weight releases)
+  Used for: the ECViT backbone architecture (conv-pyramid patch embed,
+  RoPE ViT blocks) in src/autovision/encoders/ecvit/ecvit.py.
+
+* D-FINE (Apache License 2.0)
+  Source: https://github.com/Peterande/D-FINE
+  Used for: distributional-box (FDR/gateway) decoder design and FGL/DDF
+  loss math in src/autovision/tasks/detection/components/.
+
+* RT-DETR (Apache License 2.0)
+  Source: https://github.com/lyuwenyu/RT-DETR
+  Used for: the RT-DETRv2 hybrid encoder / decoder / denoising / matcher /
+  EMA components in src/autovision/tasks/detection/components/.
+
+* Deformable-attention CUDA extension (Apache License 2.0, Detectron2
+  lineage)
+  Source: https://github.com/facebookresearch/detectron2
+  Used for: src/autovision/tasks/detection/components/_msda_src/.
+
+* D-FINE and RT-DETR pinned upstream snapshots used for the re-ports:
+  Peterande/D-FINE @ 956d170 and lyuwenyu/RT-DETR @ df2a96c
+  (local mirrors under ~/Research/Software/upstream/).
+
+* PyTorch and torchvision (BSD-style license)
+  Used for: tensor/ops foundations; RandomResizedCrop-family sampling math
+  and roi_align/grid_sample referenced by data-augmentation utilities.
+
+Algorithm references (ideas/papers, no code vendored): DINO (Apache-2.0,
+facebookresearch/dino), DetCon (Apache-2.0, google-deepmind/detcon),
+PaKA (arXiv 2509.05606), SimCLR, DINOv2 (Apache-2.0), DEIM schedulers.
+
+--------------------------------------------------------------------------
+DINOv3 weights policy (decision D1-a, design doc 28 section 6.1)
+--------------------------------------------------------------------------
+
+The DINOv3 backbone line is supported, but its pretrained weights are
+published by Meta under the DINOv3 License (NOT Apache-2.0). This
+framework never downloads those weights by default and does not
+redistribute them: loading a pretrained DINOv3 checkpoint requires the
+environment flag AUTOVISION_DINOV3_WEIGHTS=1, which asserts that the USER
+has accepted Meta's DINOv3 License terms on their own account. Any model
+trained from DINOv3-initial weights inherits those license obligations;
+prefer the Apache-2.0 lines (DINOv2, EdgeCrafter/ECViT) when the DINOv3
+distillation gains are not required.
+
+Runtime dependencies (not vendored) carry their own licenses; see
+pyproject.toml. Optional integrations with AGPL-licensed or custom-licensed
+software (e.g. Ultralytics, DINOv3 weights) are isolated behind optional
+extras and runtime downloads and must never have source or weights copied
+into this repository (docs/design/28-clean-provenance-refactor.md, rule R18).

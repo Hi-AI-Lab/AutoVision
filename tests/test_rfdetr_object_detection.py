@@ -10,6 +10,7 @@ same pattern as tests/test_models_rfdetr.py.
 
 from __future__ import annotations
 
+import copy
 import sys
 import types
 
@@ -17,15 +18,17 @@ import pytest
 import torch
 from torch import nn
 
-from autovision._task_models.rfdetr_object_detection.config import (
+from autovision.tasks.detection.rfdetr_object_detection.config import (
+    RFDETREvalEraseArgs,
     RFDETRObjectDetectionTrainArgs,
     resolve_rfdetr_variant,
 )
-from autovision._task_models.rfdetr_object_detection.task_model import (
+from autovision.tasks.detection.rfdetr_object_detection.task_model import (
     RFDETRObjectDetection,
+    _make_siou_box_loss_class,
     _reinitialize_class_head,
 )
-from autovision._task_models.rfdetr_object_detection.train_model import (
+from autovision.tasks.detection.rfdetr_object_detection.train_model import (
     RFDETRObjectDetectionTrain,
     _rfdetr_param_buckets,
 )
@@ -61,6 +64,10 @@ class FakeRfDetrConfig:
         self.group_detr = 13
         self.num_labels = 80
         self.decoder_layers = 3
+        # Matcher costs (the SSL branch rebuilds the HF matcher contract).
+        self.class_cost = 1.0
+        self.bbox_cost = 5.0
+        self.giou_cost = 2.0
         for key, value in kwargs.items():
             setattr(self, key, value)
 
@@ -122,6 +129,7 @@ class FakeRfDetrForObjectDetection(nn.Module):
             return {
                 "logits": logits,
                 "pred_boxes": boxes,
+                "last_hidden_state": hidden,
                 "loss": None,
                 "loss_dict": {},
             }
@@ -132,6 +140,7 @@ class FakeRfDetrForObjectDetection(nn.Module):
         return {
             "logits": logits,
             "pred_boxes": boxes,
+            "last_hidden_state": hidden,
             "loss": ce + l1,
             "loss_dict": {"loss_ce": ce.detach(), "loss_bbox": l1.detach()},
         }
@@ -143,6 +152,37 @@ def fake_rfdetr_transformers(monkeypatch):
     fake.RfDetrConfig = FakeRfDetrConfig
     fake.RfDetrForObjectDetection = FakeRfDetrForObjectDetection
     fake.RfDetrDinov2Config = FakeRfDetrDinov2Config
+    # The SSL branch rebuilds the HF matcher contract; hand the fake module
+    # the REAL matcher when transformers is installed, else a deterministic
+    # stub (plumbing tests never rely on optimal assignment).
+    try:
+        from transformers.loss.loss_lw_detr import (
+            LwDetrHungarianMatcher as _real_matcher,
+        )
+
+        matcher = _real_matcher(class_cost=1.0, bbox_cost=5.0, giou_cost=2.0)
+    except ImportError:
+
+        class _StubMatcher:
+            def __call__(self, outputs, targets, group_detr):
+                indices = []
+                for target in targets:
+                    n = min(
+                        outputs["pred_logits"].shape[1],
+                        target["boxes"].shape[0],
+                    )
+                    indices.append(
+                        (
+                            torch.arange(n, dtype=torch.int64),
+                            torch.arange(n, dtype=torch.int64),
+                        )
+                    )
+                return indices
+
+        matcher = _StubMatcher()
+    fake.loss = types.SimpleNamespace(
+        loss_lw_detr=types.SimpleNamespace(LwDetrHungarianMatcher=lambda **kw: matcher)
+    )
     monkeypatch.setitem(sys.modules, "transformers", fake)
     return fake
 
@@ -208,7 +248,7 @@ class TestConfig:
 
 class TestGating:
     def test_no_support_raises_informative(self, monkeypatch):
-        from autovision._task_models.rfdetr_object_detection import task_model
+        from autovision.tasks.detection.rfdetr_object_detection import task_model
 
         monkeypatch.setattr(task_model, "_od_classes", lambda: None)
         with pytest.raises(ImportError, match="transformers"):
@@ -350,3 +390,599 @@ class TestTrainModel:
         train_model.on_train_batch_end()
         export_state = train_model.get_export_state_dict()
         assert any(key.startswith("ema_model.") for key in export_state)
+
+
+# ── erased eval channel (design doc 16 P1.6, eval_erase) ─────────────────
+
+
+def make_val_batch(batch_size: int = 2, image_size: int = 224) -> dict:
+    batch = make_batch(batch_size, image_size)
+    batch["image_path"] = [f"/data/val_{index}.jpg" for index in range(batch_size)]
+    return batch
+
+
+def make_erased_train_model(**overrides) -> RFDETRObjectDetectionTrain:
+    train_model = RFDETRObjectDetectionTrain(
+        make_train_args(
+            eval_erase={"ratio": 0.4, "interior": True, "min_keep": 2}, **overrides
+        )
+    )
+    train_model.set_categories({0: "a", 1: "b", 2: "c"})
+    return train_model
+
+
+class TestEvalEraseConfig:
+    def test_default_off(self):
+        args = RFDETRObjectDetectionTrainArgs(model="rf-detr-nano")
+        assert args.eval_erase is None
+
+    def test_dict_payload_validates_with_v2_defaults(self):
+        args = RFDETRObjectDetectionTrainArgs(
+            model="rf-detr-nano", eval_erase={"ratio": 0.5}
+        )
+        assert args.eval_erase.ratio == 0.5
+        # Defaults mirror the --erase training recipe (V2 interior mode).
+        assert args.eval_erase.interior is True
+        assert args.eval_erase.min_keep == 2
+        assert args.eval_erase.padding == pytest.approx(0.15)
+        assert args.eval_erase.cell == 16
+
+    def test_invalid_ratio_rejected(self):
+        with pytest.raises(ValueError, match="ratio"):
+            RFDETRObjectDetectionTrainArgs(
+                model="rf-detr-nano", eval_erase={"ratio": 0.0}
+            )
+
+
+class TestErasedEvalChannel:
+    def test_default_off_keeps_single_channel(self, fake_rfdetr_transformers):
+        train_model = RFDETRObjectDetectionTrain(make_train_args())
+        train_model.set_categories({0: "a", 1: "b", 2: "c"})
+        train_model.validation_step(make_val_batch(), step=0)
+        metrics = train_model.compute_metrics("val")
+        assert metrics
+        assert all(key.startswith("val_metric/") for key in metrics)
+        state = train_model.export_metric_state("val")
+        assert state is not None and "dense" not in state
+
+    def test_erased_channel_reports_val_erased_metrics(self, fake_rfdetr_transformers):
+        train_model = make_erased_train_model()
+        train_model.validation_step(make_val_batch(), step=0)
+        metrics = train_model.compute_metrics("val")
+        dense = {k for k in metrics if k.startswith("val_metric/")}
+        erased = {k for k in metrics if k.startswith("val_erased_metric/")}
+        assert dense and erased
+        assert {k.removeprefix("val_metric/") for k in dense} == {
+            k.removeprefix("val_erased_metric/") for k in erased
+        }
+
+    def test_dense_channel_identical_with_channel_on(self, fake_rfdetr_transformers):
+        # Identical weights (deepcopy) + identical batch: enabling the
+        # erased channel must not move the dense metric by a bit.
+        base = RFDETRObjectDetectionTrain(make_train_args())
+        base.set_categories({0: "a", 1: "b", 2: "c"})
+        with_channel = copy.deepcopy(base)
+        with_channel.model_args.eval_erase = RFDETREvalEraseArgs()
+        batch = make_val_batch()
+        base.validation_step(batch, step=0)
+        with_channel.validation_step(batch, step=0)
+        dense_without = base.compute_metrics("val")
+        # The channel-on run also carries val_erased_metric/* — the dense
+        # keys must match the channel-off run bit for bit.
+        dense_with = {
+            key: value
+            for key, value in with_channel.compute_metrics("val").items()
+            if key.startswith("val_metric/")
+        }
+        assert dense_with == dense_without
+
+    def test_erased_forward_is_seeded_and_label_free(
+        self, fake_rfdetr_transformers, monkeypatch
+    ):
+        train_model = make_erased_train_model()
+        batch = make_val_batch()
+        task_model = train_model.ema_model.model
+        captured: list = []
+        original = task_model._forward_train
+
+        def spy(pixel_values, targets=None):
+            captured.append((pixel_values.clone(), targets))
+            return original(pixel_values, targets)
+
+        monkeypatch.setattr(task_model, "_forward_train", spy)
+        train_model.validation_step(batch, step=0)
+        assert len(captured) == 2  # dense + erased forwards
+        dense_x, dense_targets = captured[0]
+        erased_x, erased_targets = captured[1]
+        assert dense_targets is not None and erased_targets is None
+        assert erased_x.shape == dense_x.shape
+        assert not torch.equal(dense_x, erased_x)  # cells were zero-filled
+        # Same batch again: the path-seeded generator reproduces the exact
+        # same erased view (metrics comparable across checkpoints).
+        captured.clear()
+        train_model.validation_step(batch, step=0)
+        assert torch.equal(captured[1][0], erased_x)
+
+    def test_export_merge_roundtrip_carries_both_channels(
+        self, fake_rfdetr_transformers
+    ):
+        source = make_erased_train_model()
+        batch = make_val_batch()
+        source.validation_step(batch, step=0)
+        state = source.export_metric_state("val")
+        assert set(state) == {"dense", "erased"}
+        target = make_erased_train_model()
+        target.merge_metric_state("val", state)
+        assert source.compute_metrics("val") == target.compute_metrics("val")
+
+    def test_reset_clears_both_channels(self, fake_rfdetr_transformers):
+        train_model = make_erased_train_model()
+        train_model.validation_step(make_val_batch(), step=0)
+        train_model.reset_metrics("val")
+        # The evaluator answers the empty accumulation with all-zero
+        # metrics — what matters is that nothing from the previous round
+        # survives (the DDP merge path relies on starting clean).
+        metrics = train_model.compute_metrics("val")
+        assert metrics and set(metrics.values()) == {0.0}
+        # The reset also released the erased accumulation (DDP merge path
+        # relies on starting from a clean evaluator).
+        state = train_model.export_metric_state("val")
+        assert state["dense"]["predictions"] == []
+        assert state["erased"]["predictions"] == []
+
+
+# ── SIoU box-loss swap (design doc 15, box_regression_iou) ───────────────
+
+
+def _real_rfdetr_available() -> bool:
+    try:
+        import transformers
+
+        return getattr(transformers, "RfDetrConfig", None) is not None
+    except ImportError:
+        return False
+
+
+class TestSIoUBoxRegression:
+    def test_attachment_semantics(self, fake_rfdetr_transformers):
+        """siou mode binds a callable loss_function on the HF model; giou
+        (default) leaves the model untouched (the fake class has no such
+        attribute and the real one resolves its criterion lazily)."""
+        siou_model = make_task_model(box_regression_iou="siou")
+        assert callable(getattr(siou_model._model, "loss_function", None))
+        giou_model = make_task_model()
+        assert not hasattr(giou_model._model, "loss_function")
+
+    def test_invalid_mode_raises(self, fake_rfdetr_transformers):
+        with pytest.raises(ValueError, match="'giou' or 'siou'"):
+            make_task_model(box_regression_iou="focal")
+
+    def test_identical_boxes_yield_zero_siou(self):
+        """SIoU degenerates to 0 for perfectly matching pairs."""
+        from transformers.loss.loss_lw_detr import LwDetrHungarianMatcher
+
+        torch.manual_seed(0)
+        criterion = _make_siou_box_loss_class()(
+            matcher=LwDetrHungarianMatcher(class_cost=1, bbox_cost=5, giou_cost=2),
+            num_classes=3,
+            focal_alpha=0.25,
+            losses=["boxes"],
+            group_detr=1,
+            siou_theta=4.0,
+        )
+        boxes = torch.tensor([[0.5, 0.5, 0.2, 0.3], [0.1, 0.2, 0.1, 0.1]])
+        outputs = {"pred_boxes": boxes.unsqueeze(0)}
+        targets = [{"boxes": boxes.clone(), "class_labels": torch.tensor([0, 1])}]
+        indices = [(torch.arange(2), torch.arange(2))]
+        losses = criterion.loss_boxes(outputs, targets, indices, num_boxes=2)
+        assert losses["loss_siou"].item() == pytest.approx(0.0, abs=1e-6)
+        assert losses["loss_bbox"].item() == pytest.approx(0.0, abs=1e-6)
+
+    def test_siou_gradient_flows_to_boxes(self):
+        from transformers.loss.loss_lw_detr import LwDetrHungarianMatcher
+
+        torch.manual_seed(0)
+        criterion = _make_siou_box_loss_class()(
+            matcher=LwDetrHungarianMatcher(class_cost=1, bbox_cost=5, giou_cost=2),
+            num_classes=3,
+            focal_alpha=0.25,
+            losses=["boxes"],
+            group_detr=1,
+            siou_theta=4.0,
+        )
+        pred = torch.tensor([[0.48, 0.52, 0.22, 0.28]], requires_grad=True)
+        target = torch.tensor([[0.5, 0.5, 0.2, 0.3]])
+        outputs = {"pred_boxes": pred.unsqueeze(0)}
+        targets = [{"boxes": target, "class_labels": torch.tensor([0])}]
+        indices = [(torch.arange(1), torch.arange(1))]
+        losses = criterion.loss_boxes(outputs, targets, indices, num_boxes=1)
+        losses["loss_siou"].backward()
+        assert pred.grad is not None
+        assert torch.isfinite(pred.grad).all()
+        assert pred.grad.abs().sum() > 0
+
+    @pytest.mark.skipif(
+        not _real_rfdetr_available(), reason="transformers lacks RfDetr"
+    )
+    def test_forward_emits_siou_across_branches_and_backprops(self):
+        """The real HF forward with labels routes through the swapped loss:
+        loss_siou appears (main + aux + enc), loss_giou is gone."""
+        model = RFDETRObjectDetection(
+            num_classes=3,
+            model="rf-detr-nano",
+            image_size=(224, 224),
+            num_select=16,
+            load_weights=False,
+            box_regression_iou="siou",
+        )
+        x = torch.randn(1, 3, 224, 224)
+        targets = [
+            {
+                "boxes": torch.rand(2, 4) * 0.3 + 0.3,
+                "labels": torch.tensor([0, 1]),
+            }
+        ]
+        out = model._forward_train(x, targets=targets)
+        assert out["loss"] is not None
+        assert torch.isfinite(out["loss"]).all()
+        assert "loss_siou" in out["loss_dict"]
+        assert "loss_giou" not in out["loss_dict"]
+        assert any(key.endswith("_enc") for key in out["loss_dict"])
+        out["loss"].backward()
+
+    @pytest.mark.skipif(
+        not _real_rfdetr_available(), reason="transformers lacks RfDetr"
+    )
+    def test_giou_default_unchanged(self):
+        model = RFDETRObjectDetection(
+            num_classes=3,
+            model="rf-detr-nano",
+            image_size=(224, 224),
+            num_select=16,
+            load_weights=False,
+        )
+        x = torch.randn(1, 3, 224, 224)
+        targets = [
+            {
+                "boxes": torch.rand(2, 4) * 0.3 + 0.3,
+                "labels": torch.tensor([0, 1]),
+            }
+        ]
+        out = model._forward_train(x, targets=targets)
+        assert "loss_giou" in out["loss_dict"]
+        assert "loss_siou" not in out["loss_dict"]
+
+
+class TestExportRebuild:
+    """Exported-model rebuilds land in the hermetic branch
+    (load_task_model drops load_weights): the branch must reproduce the
+    pretrained parameter shapes, and checkpoints trained under the
+    transformers 5.9 overlay env must load under the renamed 5.19 layout.
+    """
+
+    @pytest.mark.skipif(
+        not _real_rfdetr_available(), reason="transformers lacks RfDetr"
+    )
+    def test_hermetic_rebuild_matches_native_geometry(self):
+        """The shape contract of a real export: native pos-embed geometry,
+        300 queries x 13 groups, 2 decoder layers."""
+        model = RFDETRObjectDetection(
+            num_classes=10,
+            model="rf-detr-nano",
+            image_size=(800, 800),
+            num_queries=300,
+            num_select=500,
+            load_weights=False,
+        )
+        state = model._model.state_dict()
+        pos_embed = state["model.backbone.backbone.embeddings.position_embeddings"]
+        assert tuple(pos_embed.shape) == (1, 577, 384)  # native 384px canvas
+        assert tuple(state["model.query_feat.weight"].shape) == (3900, 256)
+        decoder_layers = {
+            key.split(".")[3] for key in state if ".decoder.layers." in key
+        }
+        assert decoder_layers == {"0", "1"}  # nano decoder_layers=2
+
+    @pytest.mark.skipif(
+        not _real_rfdetr_available(), reason="transformers lacks RfDetr"
+    )
+    def test_legacy_attention_keys_are_remapped_on_load(self):
+        """A 5.9-layout state dict (nested attention naming, ema-prefixed)
+        loads cleanly into the 5.19-built model via load_train_state_dict;
+        a matching-layout dict is a no-op passthrough."""
+        from autovision.tasks.detection.rfdetr_object_detection.task_model import (
+            _remap_legacy_dinov2_attention_keys,
+        )
+
+        model = RFDETRObjectDetection(
+            num_classes=10,
+            model="rf-detr-nano",
+            image_size=(384, 384),
+            num_queries=300,
+            num_select=500,
+            load_weights=False,
+        )
+        # Keys relative to the whole task model (load_train_state_dict
+        # strips the ema prefix, then loads into `self`).
+        reference = {
+            f"_model.{key}": value for key, value in model._model.state_dict().items()
+        }
+
+        def legacy_key(key: str) -> str:
+            return (
+                key.replace(".attention.q_proj.", ".attention.attention.query.")
+                .replace(".attention.k_proj.", ".attention.attention.key.")
+                .replace(".attention.v_proj.", ".attention.attention.value.")
+                .replace(".attention.o_proj.", ".attention.output.dense.")
+            )
+
+        legacy_state = {legacy_key(k): v for k, v in reference.items()}
+        assert any(".attention.attention.query." in k for k in legacy_state)
+        # ema prefix exercises the full load_train_state_dict path.
+        prefixed = {f"ema_model.{k}": v for k, v in legacy_state.items()}
+        model.load_train_state_dict(prefixed)  # must not raise
+        loaded = model._model.state_dict()
+        for key, value in list(reference.items())[:8]:
+            inner_key = key.removeprefix("_model.")
+            assert torch.equal(loaded[inner_key], value)
+
+        # Matching layout: the remap is an exact no-op (identity return).
+        fresh = dict(reference)
+        assert _remap_legacy_dinov2_attention_keys(fresh, model._model) is fresh
+
+
+# ── per-object contrastive SSL branch (design doc 14, rfdetr port) ───────
+
+
+def make_ssl_args(**overrides):
+    from autovision.tasks.detection.rfdetr_object_detection.config import (
+        RFDETRSSLArgs,
+    )
+
+    return RFDETRSSLArgs(**overrides)
+
+
+class TestRFDETRSSLConfig:
+    def test_off_by_default(self):
+        assert RFDETRObjectDetectionTrainArgs().ssl is None
+
+    def test_off_mode_allows_zero_coef(self):
+        args = make_ssl_args(mode="off", loss_coef=0.0)
+        assert args.mode == "off"
+
+    def test_active_mode_requires_positive_coef(self):
+        with pytest.raises(ValueError, match="loss_coef > 0"):
+            make_ssl_args(mode="unsup", loss_coef=0.0)
+
+    def test_same_image_positive_only_requires_two_crop(self):
+        with pytest.raises(ValueError, match="two_crop"):
+            make_ssl_args(same_image_positive_only=True, view="dropout")
+
+    def test_sigreg_requires_two_crop(self):
+        with pytest.raises(ValueError, match="two_crop"):
+            make_ssl_args(sigreg_coef=0.1, view="dropout")
+
+    def test_to_ssl_params_roundtrip(self):
+        params = make_ssl_args(
+            mode="sup", loss_coef=0.2, temp=0.07, iou_match=0.6
+        ).to_ssl_params()
+        assert params.mode == "sup"
+        assert params.loss_coef == 0.2
+        assert params.temp == 0.07
+        assert params.iou_match == 0.6
+        assert params.instance_source == "matched_gt"
+
+    def test_task_model_builds_head_and_coerces_dict(self, fake_rfdetr_transformers):
+        model = make_task_model(ssl={"mode": "unsup", "view": "two_crop"})
+        assert model.ssl_head is not None
+        assert model._ssl_args.view == "two_crop"
+        assert isinstance(model._init_args["ssl"], dict)
+
+    def test_default_model_has_no_head(self, fake_rfdetr_transformers):
+        assert make_task_model().ssl_head is None
+
+
+class TestRFDETRSSLTraining:
+    def test_training_step_emits_ssl_loss(self, fake_rfdetr_transformers):
+        train_model = RFDETRObjectDetectionTrain(
+            make_train_args(ssl={"mode": "unsup", "view": "two_crop", "loss_coef": 0.1})
+        )
+        train_model.train()
+        batch = make_batch(batch_size=2)
+        # two_crop: view-2 rows duplicate view-1 targets (pairing needs
+        # both halves to carry the same GT set).
+        batch["image"] = torch.randn(4, 3, 224, 224)
+        batch["bboxes"] = batch["bboxes"] * 2
+        batch["classes"] = batch["classes"] * 2
+        result = train_model.training_step(batch, step=0)
+        assert "train_loss/loss_ssl" in result.log_dict
+        assert result.log_dict["train_loss/ssl_pool_size"] > 0
+        result.loss.backward()  # gradients reach head + HF loss paths
+
+    def test_every_n_steps_gate(self, fake_rfdetr_transformers):
+        train_model = RFDETRObjectDetectionTrain(
+            make_train_args(
+                ssl={
+                    "mode": "unsup",
+                    "view": "two_crop",
+                    "every_n_steps": 2,
+                }
+            )
+        )
+        train_model.train()
+        batch = make_batch(batch_size=2)
+        batch["image"] = torch.randn(4, 3, 224, 224)
+        batch["bboxes"] = batch["bboxes"] * 2
+        batch["classes"] = batch["classes"] * 2
+        off = train_model.training_step(batch, step=1)
+        assert "train_loss/loss_ssl" not in off.log_dict
+        on = train_model.training_step(batch, step=2)
+        assert "train_loss/loss_ssl" in on.log_dict
+
+    def test_mode_off_has_no_ssl_loss(self, fake_rfdetr_transformers):
+        train_model = RFDETRObjectDetectionTrain(
+            make_train_args(ssl={"mode": "off", "view": "two_crop"})
+        )
+        assert train_model.ssl_params is None
+        train_model.train()
+        result = train_model.training_step(make_batch(batch_size=2), step=0)
+        assert "train_loss/loss_ssl" not in result.log_dict
+
+    def test_ssl_head_travels_with_state_dict(self, fake_rfdetr_transformers):
+        train_model = RFDETRObjectDetectionTrain(
+            make_train_args(ssl={"mode": "unsup", "view": "two_crop"})
+        )
+        keys = list(train_model.state_dict().keys())
+        assert any("ssl_head" in key for key in keys)
+        export_state = train_model.get_export_state_dict()
+        assert any("ssl_head" in key for key in export_state)
+
+    @pytest.mark.skipif(
+        not _real_rfdetr_available(), reason="transformers lacks RfDetr"
+    )
+    def test_real_forward_two_crop_end_to_end(self):
+        """The full two_crop path on the real model: 2B images, HF loss +
+        matched-pool InfoNCE, gradients into backbone/decoder/head."""
+        model = RFDETRObjectDetection(
+            num_classes=4,
+            model="rf-detr-nano",
+            image_size=(224, 224),
+            num_queries=100,
+            num_select=16,
+            load_weights=False,
+            ssl={"mode": "unsup", "view": "two_crop", "loss_coef": 0.1},
+        )
+        model.train()
+        train_model = RFDETRObjectDetectionTrain(
+            make_train_args(ssl={"mode": "unsup", "view": "two_crop", "loss_coef": 0.1})
+        )
+        train_model.model = model  # share the real weights
+        boxes = torch.rand(2, 4) * 0.3 + 0.3
+        labels = torch.tensor([0, 1])
+        batch = {
+            "image": torch.randn(4, 3, 224, 224),
+            "bboxes": [boxes, boxes, boxes, boxes],
+            "classes": [labels, labels, labels, labels],
+        }
+        result = train_model.training_step(batch, step=0)
+        assert torch.isfinite(result.loss).all()
+        assert "train_loss/loss_ssl" in result.log_dict
+        assert result.log_dict["train_loss/ssl_pool_size"] > 0
+        result.loss.backward()
+        head_grad = any(
+            p.grad is not None and p.grad.abs().sum() > 0
+            for p in model.ssl_head.parameters()
+        )
+        assert head_grad, "gradients must reach the projection head"
+
+
+class TestRFDETRSSLSigReg:
+    """SIGReg distribution regularizer (doc 16 R1-A1) on the rfdetr SSL tap."""
+
+    def test_sigreg_loss_emitted_and_weighted(self, fake_rfdetr_transformers):
+        train_model = RFDETRObjectDetectionTrain(
+            make_train_args(
+                ssl={
+                    "mode": "unsup",
+                    "view": "two_crop",
+                    "sigreg_coef": 0.5,
+                }
+            )
+        )
+        train_model.train()
+        batch = make_batch(batch_size=2)
+        batch["image"] = torch.randn(4, 3, 224, 224)
+        batch["bboxes"] = batch["bboxes"] * 2
+        batch["classes"] = batch["classes"] * 2
+        result = train_model.training_step(batch, step=0)
+        assert "train_loss/loss_sigreg" in result.log_dict
+        assert result.log_dict["train_loss/loss_sigreg"] >= 0
+        result.loss.backward()
+
+    def test_no_sigreg_by_default(self, fake_rfdetr_transformers):
+        train_model = RFDETRObjectDetectionTrain(
+            make_train_args(ssl={"mode": "unsup", "view": "two_crop"})
+        )
+        train_model.train()
+        batch = make_batch(batch_size=2)
+        batch["image"] = torch.randn(4, 3, 224, 224)
+        batch["bboxes"] = batch["bboxes"] * 2
+        batch["classes"] = batch["classes"] * 2
+        result = train_model.training_step(batch, step=0)
+        assert "train_loss/loss_sigreg" not in result.log_dict
+
+    def test_missing_raw_taps_fail_loud(self, fake_rfdetr_transformers, monkeypatch):
+        """sigreg configured but the head produced no raw taps = head/config
+        mismatch: fail loud instead of silently training without it."""
+        train_model = RFDETRObjectDetectionTrain(
+            make_train_args(
+                ssl={"mode": "unsup", "view": "two_crop", "sigreg_coef": 0.5}
+            )
+        )
+        train_model.train()
+        # Strip the raw taps off the model outputs to simulate the mismatch.
+        real_forward = train_model.model._forward_train
+
+        def no_taps(x, targets=None):
+            out = real_forward(x, targets=targets)
+            out.pop("ssl_s1", None)
+            out.pop("ssl_s2", None)
+            return out
+
+        monkeypatch.setattr(train_model.model, "_forward_train", no_taps)
+        batch = make_batch(batch_size=2)
+        batch["image"] = torch.randn(4, 3, 224, 224)
+        batch["bboxes"] = batch["bboxes"] * 2
+        batch["classes"] = batch["classes"] * 2
+        with pytest.raises(ValueError, match="ssl_s1/ssl_s2"):
+            train_model.training_step(batch, step=0)
+
+    def test_calibration_stat_logged_without_weight(self, fake_rfdetr_transformers):
+        """sigreg_coef=0 (default): the unweighted Epps–Pulley statistic
+        logs as loss_sigreg_stat (read-only λ_sr calibration readout) and
+        the weighted loss_sigreg key stays absent."""
+        train_model = RFDETRObjectDetectionTrain(
+            make_train_args(ssl={"mode": "unsup", "view": "two_crop"})
+        )
+        train_model.train()
+        batch = make_batch(batch_size=2)
+        batch["image"] = torch.randn(4, 3, 224, 224)
+        batch["bboxes"] = batch["bboxes"] * 2
+        batch["classes"] = batch["classes"] * 2
+        result = train_model.training_step(batch, step=0)
+        assert "train_loss/loss_sigreg_stat" in result.log_dict
+        assert "train_loss/loss_sigreg" not in result.log_dict
+        result.loss.backward()
+
+    def test_sigreg_pool_capped_at_1024_rows(
+        self, fake_rfdetr_transformers, monkeypatch
+    ):
+        """Two_crop pools beyond the 1024-row cap are randomly subsampled
+        before the Epps–Pulley statistic (the ~4GB intermediate OOMed at
+        micro 8, design doc 18 §2)."""
+        import autovision.tasks.detection.components.ssl_contrastive as ssl_mod
+
+        seen = {}
+
+        def spy(embeddings, **kwargs):
+            seen["rows"] = embeddings.shape[0]
+            return torch.tensor(0.1)
+
+        monkeypatch.setattr(ssl_mod, "epps_pulley_sigreg", spy)
+        train_model = RFDETRObjectDetectionTrain(
+            make_train_args(ssl={"mode": "unsup", "view": "two_crop"})
+        )
+        train_model.train()
+        batch = make_batch(batch_size=2)
+        batch["image"] = torch.randn(4, 3, 224, 224)
+        batch["bboxes"] = batch["bboxes"] * 2
+        batch["classes"] = batch["classes"] * 2
+        train_model.training_step(batch, step=0)
+        # Fake pool: 4 images x 16 queries = 64 rows, far below the cap.
+        assert seen["rows"] == 64
+        # And the cap constant really binds a two_crop-sized pool.
+        from autovision.tasks.detection.rfdetr_object_detection.train_model import (
+            _SIGREG_POOL_CAP,
+        )
+
+        assert _SIGREG_POOL_CAP == 1024

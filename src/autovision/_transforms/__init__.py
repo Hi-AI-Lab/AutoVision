@@ -1,27 +1,19 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
-"""Transforms: argument models, view pipelines, and method transforms."""
+"""Deprecated alias of :mod:`autovision.augment` (compat shim).
 
-from autovision._transforms.method_transform import MethodTransform, MultiViewTransform
-from autovision._transforms.transform_args import (
-    ColorJitterArgs,
-    GaussianBlurArgs,
-    MethodTransformArgs,
-    NormalizeArgs,
-    RandomFlipArgs,
-    RandomResizeArgs,
-    SolarizeArgs,
+Removed in the next minor release; import from the new location.
+"""
+
+from __future__ import annotations
+
+import warnings
+
+warnings.warn(
+    "autovision._transforms is a deprecated alias; import from "
+    "autovision.augment instead.",
+    DeprecationWarning,
+    stacklevel=2,
 )
-from autovision._transforms.view_transform import ViewTransform
 
-__all__ = [
-    "ColorJitterArgs",
-    "GaussianBlurArgs",
-    "MethodTransform",
-    "MethodTransformArgs",
-    "MultiViewTransform",
-    "NormalizeArgs",
-    "RandomFlipArgs",
-    "RandomResizeArgs",
-    "SolarizeArgs",
-    "ViewTransform",
-]
+from autovision.augment import *  # noqa: E402,F401,F403
+from autovision.augment import __all__ as _exported  # noqa: E402,F401

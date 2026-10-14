@@ -10,12 +10,12 @@ import torch
 
 timm = pytest.importorskip("timm", reason="timm not installed")
 
-from autovision._models.package_helpers import (  # noqa: E402
+from autovision.encoders.package_helpers import (  # noqa: E402
     get_package,
     get_wrapped_model,
 )
-from autovision._models.timm import TIMM_PACKAGE  # noqa: E402
-from autovision._models.timm.timm_wrapper import (  # noqa: E402
+from autovision.encoders.timm import TIMM_PACKAGE  # noqa: E402
+from autovision.encoders.timm.timm_wrapper import (  # noqa: E402
     TIMMModelWrapper,
     architecture_info_for_name,
 )

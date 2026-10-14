@@ -10,13 +10,13 @@ pytest.importorskip("onnx", reason="onnx not installed")
 onnxruntime = pytest.importorskip("onnxruntime", reason="onnxruntime not installed")
 pytest.importorskip("onnxslim", reason="onnxslim not installed")
 
-from autovision._export import benchmark  # noqa: E402
-from autovision._export.benchmark import (  # noqa: E402
+from autovision.export import benchmark  # noqa: E402
+from autovision.export.benchmark import (  # noqa: E402
     ONNXBackendArgs,
     TorchBackendArgs,
     _normalize_backends,
 )
-from autovision._task_models import RTDETRObjectDetection  # noqa: E402
+from autovision.tasks import RTDETRObjectDetection  # noqa: E402
 
 pytestmark = pytest.mark.filterwarnings("ignore::UserWarning")
 

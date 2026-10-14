@@ -3,11 +3,11 @@
 
 import pytest
 import torch
+from tests.helpers_models import TinyWrapper
 from torch import nn
 
-from autovision._models.custom import CustomPackage
-from autovision._models.rtdetr import RTDETRModelWrapper
-from tests.helpers_models import TinyWrapper
+from autovision.encoders.custom import CustomPackage
+from autovision.encoders.rtdetr import RTDETRModelWrapper
 
 
 class FakeBackbone(nn.Module):

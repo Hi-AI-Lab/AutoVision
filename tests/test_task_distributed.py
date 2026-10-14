@@ -13,9 +13,9 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
-from autovision._engine.engine import TaskEngine, _InfiniteCycleIterator
-from autovision._metrics.map_evaluator import COCOMAPEvaluator
-from autovision._task_models.train_model import TaskStepResult, TrainModel
+from autovision.engine.engine import TaskEngine, _InfiniteCycleIterator
+from autovision.metrics.map_evaluator import COCOMAPEvaluator
+from autovision.tasks.train_model import TaskStepResult, TrainModel
 
 pytestmark = pytest.mark.filterwarnings("ignore::UserWarning")
 
@@ -62,7 +62,7 @@ class TestTrainModelForwardAlias:
 
     def test_watch_metric_defaults_to_none(self):
         assert _TinyTrainModel.watch_metric is None
-        from autovision._task_models.rtdetr_object_detection import (
+        from autovision.tasks.detection.rtdetr_object_detection import (
             RTDETRObjectDetectionTrain,
         )
 

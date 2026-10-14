@@ -2,8 +2,8 @@
 
 | 文档属性 | 内容 |
 |---|---|
-| 版本 | v1.1（检测路径 + P1.5 退火 + P2 R1-A1 SIGReg 已实施；实施记录见 §5/§6） |
-| 状态 | 检测路径 19 例 + SIGReg 13 例 + LT-DETR SSL 集成 2 例全过；真实 VisDrone 健全性检查通过 |
+| 版本 | v1.3（检测路径 + P1.5 退火 + P2 R1-A1 SIGReg 已实施；v1.2 审查修复 = SIGReg×Tanh 校验 / sigreg 池过滤 / 擦除 step_stop 纳入激活元组，见 §6；v1.3 = P1.6 擦除版二次评测通道，rfdetr 率先） |
+| 状态 | 检测路径 19 例 + SIGReg 13 例 + LT-DETR SSL 集成 2 例 + P1.6 擦除评测 9 例全过；真实 VisDrone 健全性检查通过 |
 | 来源设计 | rf-detr-ssl-v2 `docs/learn/train/levjepa-detr-integration.md` §8（R3b）/ §9（R4），代码 `src/rfdetr/datasets/box_aware_eraser.py`、`src/rfdetr/training/callbacks/erasure_schedule.py` |
 | 上游思想 | LeVJEPA（Meta）：随机互补子集丢弃优于结构化 masking；LeJEPA：SIGReg 分布正则 |
 | 参考实现 | `/home/hdjs/Research/Software/rf-detr-ssl-v2`（Apache-2.0） |
@@ -100,6 +100,8 @@ random_erase_min_keep: int = 2           # V2 每框保留 cell 下限
 
 `build_val_transform_args` 硬置 `random_erase_prob=None`——验证与导出永远密集，与【RFSSL】"train-side only, dense at inference/export" 约定一致；`erase_background` 本身对无框图像保守跳过（直接返回原张量），不改动输入。
 
+**P1.6 补充（不改变 E2）**：擦除版二次评测通道（§6 P1.6）是**模型侧的第二条 val 通道**，不是 val transform 配方——`build_val_transform_args` 依旧硬关擦除，擦除发生在 `validation_step` 内（val batch 自带 GT，正好是框感知擦除需要的保护来源；部署推理无 GT，不适用此机制）。主通道 `val_metric/*` 与被监控的 val loss 保持密集逐位不变，协议可比性不受影响。
+
 ### 4.5 差异 E3：退火暂缓
 
 【RFSSL】的 `ErasureScheduleCallback`（逐 epoch 线性衰减到 0）v1 未移植：官方建议首跑 constant；VTrain 的 `resolve_step_schedule` 机制（scale_jitter 的 `step_stop` 同款）是现成的二期注入点。**P1.5**：若 constant 消融出正信号，加 `random_erase_step_stop`（复用 step 窗口机制，~20 行）。
@@ -115,6 +117,7 @@ random_erase_min_keep: int = 2           # V2 每框保留 cell 下限
 | 4 个脚本 `--erase` | §4.3 | 语法 + lint |
 | 真实数据健全性 | VisDrone 12 图（DEIMv2 路径）/ 6 图（LT-DETR builder 路径）：擦除面积 35.1% / 35.5%（标称 40%，密集自限 ✓），GT 框零丢失 | 已运行 |
 | 回归 | `test_box_aware_eraser.py` 19 例 + 检测变换 + deimv2/rfdetr 套件全过；ruff 全绿 | 已运行 |
+| **P1.6 擦除版二次评测通道（v1.3，rfdetr 率先）** | `RFDETREvalEraseArgs`（ratio/padding/cell/interior/min_keep，默认镜像 --erase V2 配方）+ rfdetr `validation_step` 双通道：val batch（已归一化，恰为擦除工作空间）按 `image_path` blake2b 稳定 seed 逐图擦除（全图必擦、无训练掷币；无标注图保守跳过），labels=None 前向（被监控 val loss 保持密集），对**不变 GT** 打分 → `val_erased_metric/*` 与 `val_metric/*` 并行；export/merge 指标状态携带双通道（DDP all_gather 兼容），`watch_metric=val_metric/map` 选择不受影响；脚本 `--erase-val`（与 `--erase` 独立）。共享组件 `box_aware_eraser.py` 零改动（torch 已支持 CPU bool 掩码索引 CUDA 张量） | 契约测试 9 例（默认关单通道、密集逐位不变、seed 确定性、label-free 前向、export/merge roundtrip、reset 双通道、配置面 3 例）+ 真实 VisDrone smoke（`--smoke --erase-val`）；其他家族按同模式复制即可 |
 
 ---
 
@@ -124,9 +127,12 @@ random_erase_min_keep: int = 2           # V2 每框保留 cell 下限
 |---|---|---|---|
 | **P1** | **擦除消融跑批**：Dome ± erase（对照 27.37）× DEIMv2-S ± erase（对照 21.82），V2 模式 constant | 各 ~1–2.5 h，已排队 | ±0.3 mAP 为噪声线（单 epoch 波动 ±0.1–0.3）；Dome +erase 若 ≥ +0.5 即转正式配方 |
 | **P1.5** | ✅ **已实现**：`random_erase_step_stop`（`"auto"`→共享 step 调度 stop，`None`=全程 constant；transform 按步门控） | ~20 行 | 契约测试 4 例；与 scale_jitter.step_stop 同款语义 |
+| **P1.6** | ✅ **已实现（rfdetr 率先）**：擦除版二次评测通道——每张 val 图按路径稳定 seed 做框感知擦除后评分，直接回答"擦除训练是否让模型摆脱背景依赖"（与 P1 消融互证）；主通道/协议/best 选择零改动，成本 = 验证前向 ×2 | ~90 行 | `val_erased_metric/map` 与密集 `val_metric/map` 的差值即擦除鲁棒性读数；契约测试 9 例 + 真实 smoke |
 | **P2** | ✅ **已实现（A1）**：`epps_pulley_sigreg` + `SSLProjectionHead.forward_with_raw` + `SSLParams.sigreg_{coef,slices,knots}` + `LTDETRSSLArgs` 校验（mode≠off / view=two_crop / matched_gt）+ criterion `loss_sigreg`（独立 weight_dict 项）+ 任务模型 raw taps。**实现差异**：参考实现只对 group-0 匹配池做统计，VTrain 对全查询池（batch 展平）——分布正则同时约束未匹配 query 半区，语义记录在案 | ~120 行 | 13 例测试（分布敏感性 6 + raw tap 3 + 配置面 4）；**待办**：只读校准 run 定 λ_sr 网格，随后按【RFSSL】§4 矩阵 E1a→E2 推进（60 ep 止损线） |
 | **P3** | R3a V=3 三视图 | 数据/显存线性 | V=2 消融出正信号后再议 |
 | 否决 | R2 / R3c / R4 | — | §3 已记录依据 |
+
+**实施记录（v1.2，2026-10-08，审查修复）**：①**SIGReg×Tanh 校验（P1）**——`simcse` 投影头的 raw tap 是 post-Tanh 输出，有界 (−1,1)^K，N(0,I) 目标原理性不可达（统计地板远离 0、梯度把线性层推入 Tanh 饱和区）；配置校验器新增 `sigreg_coef>0 ⇒ projector='mlp2'`（fail-loud，mlp2 末层 Linear 无界即 LeJEPA 假设的空间）。②**SIGReg 池过滤 padding 查询（P1）**——criterion 侧 sigreg 统计原为全查询展平，Dome 组合时 padding 查询（零内容 query 过 decoder 的伪特征）会污染分布目标；现按 `query_mask` 展平过滤（与匹配池的对比损失同一防线），组件级 spy 测试锁定池大小。③**擦除 step_stop 纳入激活元组（P2）**——原实现擦除门控在 `__call__` 内做 call-time step 比较，而 step 更新只发生在主进程；worker 持有上次 dataloader 重建时的过期副本，任何不与其他算子窗口重合的显式 `random_erase_step_stop` 会静默不生效（此前 `auto` 恰好与 photometric/zoom_out/iou_crop 的 stop 重合而侥幸正确）。现擦除窗口成为 `StepScheduledCompose` 激活元组第 5 元，窗口翻转触发 dataloader 重建，与全家族算子同一机制；测试锁定 stop 边界的 reinit 标记。回归：eraser 21 + sigreg 16 + 变换/家族套件全绿。
 
 ---
 
@@ -135,6 +141,7 @@ random_erase_min_keep: int = 2           # V2 每框保留 cell 下限
 - `tests/test_box_aware_eraser.py`（19 例）：保护 cell 重复采样永不擦、margin 扩保护（含 padding=0 无下限分支）、空框/零 ratio 恒等、精确擦除数、单 cell 目标全 ratio 下存活、擦除置 0 且保护像素逐位不变、输入不变异、生成器复现、min_keep 逐框下限（含重叠框）、小框 interior 全保护、膨胀环保留、interior 开启时背景仍被擦、transform 开/关集成、val 配方隔离。
 - 真实数据：VisDrone 12 图端到端（DEIMv2 路径）+ 6 图（LT-DETR builder 路径）。
 - 回归：检测变换 / deimv2 / rfdetr 套件全过；`random_erase_prob=None` 默认路径零改动。
+- P1.6（v1.3）：`test_rfdetr_object_detection.py` 新增 `TestEvalEraseConfig`（3 例：默认关 / dict 载荷 + V2 默认 / ratio 校验）+ `TestErasedEvalChannel`（6 例：默认关单通道、`val_erased_metric/*` 键位、deepcopy 权重下密集通道逐位不变、spy 锁定 seed 确定性 + label-free 前向 + 掩码实际生效、export/merge roundtrip、reset 双通道清空）。
 
 ---
 

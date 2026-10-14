@@ -7,16 +7,16 @@ import pytest
 import torch
 from torch import nn
 
-from autovision._metrics.map_evaluator import COCOMAPEvaluator, predictions_to_coco
-from autovision._task_models import (
+from autovision.metrics.map_evaluator import COCOMAPEvaluator, predictions_to_coco
+from autovision.tasks import (
     RTDETRObjectDetection,
     RTDETRObjectDetectionTrain,
     RTDETRObjectDetectionTrainArgs,
-    TaskModel,
+    TaskNetwork,
     TrainModel,
 )
-from autovision._task_models.object_detection_components import ModelEMA
-from autovision._task_models.task_model_io import ModelInputSpec, TensorSpec
+from autovision.tasks.detection.components import ModelEMA
+from autovision.tasks.task_model_io import ModelInputSpec, TensorSpec
 
 
 @pytest.fixture(scope="module")
@@ -42,7 +42,7 @@ class TestTaskModelBase:
             def convert_to_deploy(self):
                 calls.append(1)
 
-        class TinyTask(TaskModel):
+        class TinyTask(TaskNetwork):
             def __init__(self):
                 super().__init__(init_args={"a": 1})
                 self.module = Deployable()
@@ -347,11 +347,11 @@ class TestBackbonePretrained:
     def test_load_pretrained_backbone_copies_weights(self):
         import torchvision.models as tvm
 
-        from autovision._task_models.rtdetr_object_detection import (
+        from autovision.tasks.detection.rtdetr_object_detection import (
             RTDETRObjectDetectionTrain,
             RTDETRObjectDetectionTrainArgs,
         )
-        from autovision._task_models.rtdetr_object_detection.train_model import (
+        from autovision.tasks.detection.rtdetr_object_detection.train_model import (
             load_pretrained_backbone,
         )
 
@@ -375,11 +375,11 @@ class TestBackbonePretrained:
         assert torch.allclose(after, expected)
 
     def test_unsupported_package_rejected(self):
-        from autovision._task_models.rtdetr_object_detection import (
+        from autovision.tasks.detection.rtdetr_object_detection import (
             RTDETRObjectDetectionTrain,
             RTDETRObjectDetectionTrainArgs,
         )
-        from autovision._task_models.rtdetr_object_detection.train_model import (
+        from autovision.tasks.detection.rtdetr_object_detection.train_model import (
             load_pretrained_backbone,
         )
 
@@ -399,10 +399,10 @@ class TestCriterionLossBoxes:
         # loss must take the matched diagonal. Summing the full matrix
         # inflated loss_giou ~N× on dense datasets and destroyed box
         # learning (found via VisDrone convergence run).
-        from autovision._task_models.object_detection_components.matcher import (
+        from autovision.tasks.detection.components.matcher import (
             HungarianMatcher,
         )
-        from autovision._task_models.object_detection_components.rtdetrv2_criterion import (
+        from autovision.tasks.detection.components.rtdetrv2_criterion import (
             RTDETRCriterionV2,
         )
 
@@ -426,7 +426,7 @@ class TestCriterionLossBoxes:
         loss_dict = criterion(outputs_list, targets, world_size=1)
 
         # Reference: GIoU loss computed per aligned pair only.
-        from autovision._task_models.object_detection_components.box_ops import (
+        from autovision.tasks.detection.components.box_ops import (
             generalized_box_iou_loss,
         )
 

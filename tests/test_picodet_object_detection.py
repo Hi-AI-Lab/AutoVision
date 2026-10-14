@@ -2,38 +2,38 @@
 
 import pytest
 import torch
-
-from autovision import load_task_model as load_model
-from autovision import train_object_detection
-from autovision._task_models.picodet_object_detection import (
-    PicoDetObjectDetection,
-    PicoDetObjectDetectionTrain,
-    PicoDetObjectDetectionTrainArgs,
-)
-from autovision._task_models.picodet_object_detection.csp_pan import CSPPAN
-from autovision._task_models.picodet_object_detection.esnet import (
-    ESNet,
-    channel_shuffle,
-    resolve_backbone_scale,
-)
-from autovision._task_models.picodet_object_detection.losses import (
-    PicoCriterion,
-    distribution_focal_loss,
-    varifocal_loss,
-)
-from autovision._task_models.picodet_object_detection.pico_head import PicoHead
-from autovision._task_models.picodet_object_detection.postprocessor import (
-    decode_pico_outputs,
-)
-from autovision._task_models.picodet_object_detection.sim_ota_assigner import (
-    SimOTAAssigner,
-    TaskAlignedAssigner,
-)
 from tests.conftest import create_image
 from tests.test_train_object_detection import (
     data_config,
     make_coco_dataset,
     transform_args,
+)
+
+from autovision import load_task_model as load_model
+from autovision import train_object_detection
+from autovision.tasks.detection.picodet_object_detection import (
+    PicoDetObjectDetection,
+    PicoDetObjectDetectionTrain,
+    PicoDetObjectDetectionTrainArgs,
+)
+from autovision.tasks.detection.picodet_object_detection.csp_pan import CSPPAN
+from autovision.tasks.detection.picodet_object_detection.esnet import (
+    ESNet,
+    channel_shuffle,
+    resolve_backbone_scale,
+)
+from autovision.tasks.detection.picodet_object_detection.losses import (
+    PicoCriterion,
+    distribution_focal_loss,
+    varifocal_loss,
+)
+from autovision.tasks.detection.picodet_object_detection.pico_head import PicoHead
+from autovision.tasks.detection.picodet_object_detection.postprocessor import (
+    decode_pico_outputs,
+)
+from autovision.tasks.detection.picodet_object_detection.sim_ota_assigner import (
+    SimOTAAssigner,
+    TaskAlignedAssigner,
 )
 
 STRIDES = (8, 16, 32)

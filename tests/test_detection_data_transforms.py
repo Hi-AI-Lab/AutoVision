@@ -6,23 +6,23 @@ from pathlib import Path
 
 import pytest
 import torch
+from tests.conftest import create_image
 from torchvision import tv_tensors
 
-from autovision._data.coco_object_detection_dataset import (
-    COCOObjectDetectionDataArgs,
-)
-from autovision._data.yolo_object_detection_dataset import (
-    YOLOObjectDetectionDataArgs,
-    yolo_images_to_labels_path,
-)
-from autovision._transforms.detection_transforms import (
+from autovision.augment.detection import (
     RTDETRDetectionCollateFunction,
     RTDETRDetectionTransform,
     RTDETRDetectionTransformArgs,
     build_val_transform_args,
     resolve_detection_step_schedule,
 )
-from tests.conftest import create_image
+from autovision.data.coco_object_detection_dataset import (
+    COCOObjectDetectionDataArgs,
+)
+from autovision.data.yolo_object_detection_dataset import (
+    YOLOObjectDetectionDataArgs,
+    yolo_images_to_labels_path,
+)
 
 
 def make_coco(tmp_path, num_images: int = 4, num_classes: int = 2):
@@ -197,6 +197,63 @@ class TestStepSchedule:
         assert schedule.window("mixup") == (400, 4000)
         assert schedule.window("photometric") == (400, 6000)
 
+    def test_copyblend_step_window_auto_resolves(self):
+        # Baseline CopyBlend window is [step_start, step_stop) with the
+        # start shared with the photometric family. Both MUST resolve:
+        # the collate treats an unresolved stop as None (whole-run ON)
+        # and an unresolved start as OFF.
+        args = RTDETRDetectionTransformArgs(
+            image_size=(32, 32),
+            copyblend_prob=0.5,
+            scale_jitter=None,
+        )
+        args.resolve_step_schedule(
+            total_steps=7200, train_num_batches=100, gradient_accumulation_steps=1
+        )
+        assert args.copyblend_step_start == 400
+        assert args.copyblend_step_stop == 6000
+        assert args.random_erase_step_stop == 6000
+
+    def test_copyblend_collate_gate_is_windowed(self):
+        from autovision.augment.detection.collate import (
+            RTDETRDetectionCollateFunction,
+        )
+
+        args = RTDETRDetectionTransformArgs(
+            image_size=(32, 32),
+            copyblend_prob=0.5,
+            mixup_prob=None,
+            mosaic_prob=None,
+            scale_jitter=None,
+        )
+        args.resolve_step_schedule(
+            total_steps=7200, train_num_batches=100, gradient_accumulation_steps=1
+        )
+        collate = RTDETRDetectionCollateFunction(args, train=True)
+        collate.set_step(399)
+        assert collate._copyblend_active is False
+        collate.set_step(400)
+        assert collate._copyblend_active is True
+        collate.set_step(6000)
+        assert collate._copyblend_active is False
+
+    def test_copyblend_unresolved_start_fails_closed(self):
+        from autovision.augment.detection.collate import (
+            RTDETRDetectionCollateFunction,
+        )
+
+        args = RTDETRDetectionTransformArgs(
+            image_size=(32, 32),
+            copyblend_prob=0.5,
+            mixup_prob=None,
+            mosaic_prob=None,
+            scale_jitter=None,
+        )
+        # No resolve_step_schedule call: start stays "auto".
+        collate = RTDETRDetectionCollateFunction(args, train=True)
+        collate.set_step(10_000)
+        assert collate._copyblend_active is False
+
     def test_validation(self):
         with pytest.raises(ValueError):
             resolve_detection_step_schedule(100, 0)
@@ -307,7 +364,7 @@ class TestDetectionCollate:
 
     def test_scale_jitter_keeps_normalized_boxes(self):
         args = self._args()
-        from autovision._transforms.detection_transforms import ScaleJitterArgs
+        from autovision.augment.detection import ScaleJitterArgs
         args.scale_jitter = ScaleJitterArgs(sizes=[40, 48])
         collate = RTDETRDetectionCollateFunction(args, train=True)
         collate.set_step(0)

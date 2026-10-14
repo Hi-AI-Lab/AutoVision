@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
-"""Tests for the LT-DETR density-guided branch (Dome-DETR port, doc 13 §7).
+"""Tests for the AV-DETR density-guided branch (Dome-DETR port, doc 13 §7).
 
 All cases run offline against the tiny ``dinov2-vittest-notpretrained``
 variant (hermetic, CPU-friendly), mirroring the conventions of
@@ -14,28 +14,28 @@ import pytest
 import torch
 from torch import nn
 
-from autovision._task_models.ltdetr_object_detection import (
-    LTDETRDensityArgs,
-    LTDETRObjectDetectionTrain,
-    LTDETRObjectDetectionTrainArgs,
+from autovision.tasks.detection.avdetr import (
+    AVDETRDensityArgs,
+    AVDETRObjectDetectionTrain,
+    AVDETRObjectDetectionTrainArgs,
 )
-from autovision._task_models.ltdetr_object_detection.dome_decoder import (
+from autovision.tasks.detection.avdetr.dome_decoder import (
     _PADDED_LOGIT,
     DomeDFINEv2Decoder,
 )
-from autovision._task_models.ltdetr_object_detection.dome_encoder import (
+from autovision.tasks.detection.avdetr.dome_encoder import (
     DomeHybridEncoder,
 )
-from autovision._task_models.object_detection_components.defe import (
+from autovision.tasks.detection.components.defe import (
     GaussHeatmapGenerator,
     LiteDeFE,
     defe_count_loss,
     defe_density_loss,
 )
-from autovision._task_models.object_detection_components.dynamic_nms import (
+from autovision.tasks.detection.components.dynamic_nms import (
     per_class_dynamic_nms,
 )
-from autovision._task_models.object_detection_components.mwas import (
+from autovision.tasks.detection.components.mwas import (
     WindowProcessor,
     adaptive_window_mask,
     window_grid_size,
@@ -44,14 +44,14 @@ from autovision._task_models.object_detection_components.mwas import (
 PADDED_LOGIT = -1e4
 
 
-def make_density_args(**overrides) -> LTDETRDensityArgs:
+def make_density_args(**overrides) -> AVDETRDensityArgs:
     defaults: dict = dict(max_num_select=50, mwas_window_size=5)
     defaults.update(overrides)
-    return LTDETRDensityArgs(**defaults)
+    return AVDETRDensityArgs(**defaults)
 
 
-def make_dome_train_model(**density_overrides) -> LTDETRObjectDetectionTrain:
-    args = LTDETRObjectDetectionTrainArgs(
+def make_dome_train_model(**density_overrides) -> AVDETRObjectDetectionTrain:
+    args = AVDETRObjectDetectionTrainArgs(
         num_classes=2,
         backbone="dinov2-vittest-notpretrained",
         image_size=(224, 224),
@@ -60,11 +60,11 @@ def make_dome_train_model(**density_overrides) -> LTDETRObjectDetectionTrain:
         decoder="dfine",
         density=make_density_args(**density_overrides),
     )
-    return LTDETRObjectDetectionTrain(args)
+    return AVDETRObjectDetectionTrain(args)
 
 
-def make_baseline_train_model() -> LTDETRObjectDetectionTrain:
-    args = LTDETRObjectDetectionTrainArgs(
+def make_baseline_train_model() -> AVDETRObjectDetectionTrain:
+    args = AVDETRObjectDetectionTrainArgs(
         num_classes=2,
         backbone="dinov2-vittest-notpretrained",
         image_size=(224, 224),
@@ -72,7 +72,7 @@ def make_baseline_train_model() -> LTDETRObjectDetectionTrain:
         num_top_queries=20,
         decoder="dfine",
     )
-    return LTDETRObjectDetectionTrain(args)
+    return AVDETRObjectDetectionTrain(args)
 
 
 def make_batch(images: int = 2, size: int = 224):
@@ -119,7 +119,7 @@ class TestDensityArgs:
 
     def test_extra_fields_forbidden(self):
         with pytest.raises(ValueError):
-            LTDETRDensityArgs(unknown_field=1)
+            AVDETRDensityArgs(unknown_field=1)
 
 
 class TestDeFE:
@@ -324,7 +324,7 @@ class TestDenoisingDynamicMask:
         ]
 
     def _group(self, batch_queries_num=None, num_heads=None, num_queries=10):
-        from autovision._task_models.object_detection_components.denoising import (
+        from autovision.tasks.detection.components.denoising import (
             get_contrastive_denoising_training_group,
         )
 
@@ -374,10 +374,10 @@ class TestDenoisingDynamicMask:
 class TestDomeTaskModel:
     def test_density_off_constructs_baseline_modules(self):
         train_model = make_baseline_train_model()
-        from autovision._task_models.object_detection_components.dfine_decoder import (
+        from autovision.tasks.detection.components.dfine_decoder import (
             DFINEv2Decoder,
         )
-        from autovision._task_models.object_detection_components.hybrid_encoder import (
+        from autovision.tasks.detection.components.hybrid_encoder import (
             HybridEncoder,
         )
 
@@ -390,7 +390,7 @@ class TestDomeTaskModel:
         assert type(train_model.model.decoder).__name__ == "DomeDFINEv2Decoder"
 
     def test_density_requires_dfine_decoder(self):
-        args = LTDETRObjectDetectionTrainArgs(
+        args = AVDETRObjectDetectionTrainArgs(
             num_classes=2,
             backbone="dinov2-vittest-notpretrained",
             image_size=(224, 224),
@@ -398,22 +398,22 @@ class TestDomeTaskModel:
             decoder="rtdetrv2",
         )
         with pytest.raises(ValueError, match="requires the D-FINE decoder"):
-            LTDETRObjectDetectionTrain(args)
+            AVDETRObjectDetectionTrain(args)
 
     def test_pyramid4_requires_convnext_family(self):
-        from autovision._task_models.ltdetr_object_detection.task_model import (
-            LTDETRObjectDetection,
+        from autovision.tasks.detection.avdetr.task_model import (
+            AVDETRObjectDetection,
         )
 
         with pytest.raises(ValueError, match="ConvNeXt-family"):
-            LTDETRObjectDetection(
+            AVDETRObjectDetection(
                 num_classes=2,
                 model_name="dinov2-vittest-notpretrained",
                 image_size=(224, 224),
                 pyramid_levels=4,
             )
         with pytest.raises(ValueError, match="pyramid_levels must be 3 or 4"):
-            LTDETRObjectDetection(
+            AVDETRObjectDetection(
                 num_classes=2,
                 model_name="dinov2-vittest-notpretrained",
                 image_size=(224, 224),
@@ -427,13 +427,13 @@ class TestDomeTaskModel:
         from a local tiny DINOv3-ConvNeXt (hermetic, no HF download)."""
         import transformers
 
-        from autovision._models.dinov3.dinov3_wrapper import (
+        from autovision.encoders.dinov3.dinov3_wrapper import (
             TransformersDinov3ConvNextWrapper,
         )
-        from autovision._task_models.ltdetr_object_detection.backbone_wrappers import (
+        from autovision.tasks.detection.avdetr.backbone_wrappers import (
             ConvNeXtDetectionBackbone,
         )
-        from autovision._task_models.ltdetr_object_detection.dome_decoder import (
+        from autovision.tasks.detection.avdetr.dome_decoder import (
             DomeDFINEv2Decoder,
         )
 
@@ -497,7 +497,7 @@ class TestDomeTaskModel:
         assert all(20 <= n <= 50 for n in out["batch_queries_num"])
 
     def test_num_queries_must_fit_max_select(self):
-        args = LTDETRObjectDetectionTrainArgs(
+        args = AVDETRObjectDetectionTrainArgs(
             num_classes=2,
             backbone="dinov2-vittest-notpretrained",
             image_size=(224, 224),
@@ -506,7 +506,7 @@ class TestDomeTaskModel:
             decoder="dfine",
         )
         with pytest.raises(ValueError, match="max_num_select"):
-            LTDETRObjectDetectionTrain(args)
+            AVDETRObjectDetectionTrain(args)
 
     def test_training_step_losses_and_backward(self):
         train_model = make_dome_train_model()
@@ -597,7 +597,7 @@ class TestDomeTaskModel:
     def test_deploy_static_falls_back_to_fixed_queries(self):
         train_model = make_dome_train_model()
         model = train_model.model
-        # TaskModel.deploy() recursively invokes convert_to_deploy; the
+        # TaskNetwork.deploy() recursively invokes convert_to_deploy; the
         # dome modules participate through that hook (design doc 13 §4.8).
         model.deploy()
         assert model.encoder._static_export
@@ -686,8 +686,8 @@ class TestDomeTaskModel:
         baseline = make_baseline_train_model()
         report = baseline.validation_report({"val_metric/map": 0.0})
         assert "VFL/bbox/GIoU only" in report
-        siou_train = LTDETRObjectDetectionTrain(
-            LTDETRObjectDetectionTrainArgs(
+        siou_train = AVDETRObjectDetectionTrain(
+            AVDETRObjectDetectionTrainArgs(
                 num_classes=2,
                 backbone="dinov2-vittest-notpretrained",
                 image_size=(224, 224),
@@ -861,8 +861,8 @@ class TestScriptTwin:
         return module
 
     def test_base_is_density_off_twin_of_dome(self):
-        base = self._load_script("visdrone_ltdetr_800.py")
-        dome = self._load_script("visdrone_ltdetr_dome_800.py")
+        base = self._load_script("visdrone_avdetr_800.py")
+        dome = self._load_script("visdrone_avdetr_dome_800.py")
         assert set(dome.MODEL_ARGS) - set(base.MODEL_ARGS) == {"density"}
         for key, value in base.MODEL_ARGS.items():
             assert value == dome.MODEL_ARGS[key], f"model_args.{key} diverged"
@@ -895,16 +895,16 @@ class TestScriptTwin:
         ), "transform_args diverged beyond the horizon step stops"
 
     def test_twin_configs_pass_strict_validation(self):
-        from autovision._task_models.ltdetr_object_detection import (
-            LTDETRObjectDetectionTrainArgs,
-        )
-        from autovision._transforms.detection_transforms.args import (
+        from autovision.augment.detection.args import (
             RTDETRDetectionTransformArgs,
         )
+        from autovision.tasks.detection.avdetr import (
+            AVDETRObjectDetectionTrainArgs,
+        )
 
-        for name in ("visdrone_ltdetr_800.py", "visdrone_ltdetr_dome_800.py"):
+        for name in ("visdrone_avdetr_800.py", "visdrone_avdetr_dome_800.py"):
             module = self._load_script(name)
-            args = LTDETRObjectDetectionTrainArgs(**module.MODEL_ARGS)
+            args = AVDETRObjectDetectionTrainArgs(**module.MODEL_ARGS)
             args.resolve_image_size()
             transform = RTDETRDetectionTransformArgs.model_validate(
                 {**module.TRANSFORM_ARGS, "image_size": (800, 800)}

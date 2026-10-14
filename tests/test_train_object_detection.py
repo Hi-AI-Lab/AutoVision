@@ -5,10 +5,10 @@ import json
 
 import pytest
 import torch
+from tests.conftest import create_image
 
 from autovision import load_task_model as load_model
 from autovision import train_object_detection
-from tests.conftest import create_image
 
 
 def make_coco_dataset(tmp_path, num_images: int = 8):
@@ -189,11 +189,11 @@ class TestEvalMaxDets:
     """eval_max_dets flows into the COCO evaluator (dense datasets need 500)."""
 
     def test_rtdetr_wiring(self, monkeypatch):
-        from autovision._metrics.map_evaluator import COCOMAPEvaluator
-        from autovision._task_models.rtdetr_object_detection.config import (
+        from autovision.metrics.map_evaluator import COCOMAPEvaluator
+        from autovision.tasks.detection.rtdetr_object_detection.config import (
             RTDETRObjectDetectionTrainArgs,
         )
-        from autovision._task_models.rtdetr_object_detection.train_model import (
+        from autovision.tasks.detection.rtdetr_object_detection.train_model import (
             RTDETRObjectDetectionTrain,
         )
 
@@ -205,7 +205,7 @@ class TestEvalMaxDets:
             return real(categories, max_dets=max_dets)
 
         monkeypatch.setattr(
-            "autovision._task_models.rtdetr_object_detection.train_model.COCOMAPEvaluator",
+            "autovision.tasks.detection.rtdetr_object_detection.train_model.COCOMAPEvaluator",
             spy,
         )
         args = RTDETRObjectDetectionTrainArgs(

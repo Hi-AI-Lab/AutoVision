@@ -17,16 +17,16 @@ import pytest
 import torch
 from torch import nn
 
-from autovision._task_models.deimv2_object_detection.config import (
+from autovision.tasks.detection.deimv2_object_detection.config import (
     DEIMV2_MODEL_REGISTRY,
     Deimv2ObjectDetectionTrainArgs,
     resolve_deimv2_variant,
 )
-from autovision._task_models.deimv2_object_detection.task_model import (
+from autovision.tasks.detection.deimv2_object_detection.task_model import (
     Deimv2ObjectDetection,
     _reinitialize_class_head,
 )
-from autovision._task_models.deimv2_object_detection.train_model import (
+from autovision.tasks.detection.deimv2_object_detection.train_model import (
     Deimv2ObjectDetectionTrain,
     _deimv2_param_buckets,
 )
@@ -160,10 +160,14 @@ class TestConfig:
             resolve_deimv2_variant("deimv2-dinov3-x")
 
     def test_registry_variants(self):
+        # deimv2-dinov3-l: design doc 22 PR-0 (official Intellindust config,
+        # no transformers conversion); fsdc-vittest: hermetic FSDC build.
         assert set(DEIMV2_MODEL_REGISTRY) == {
             "deimv2-dinov3-s",
+            "deimv2-dinov3-l",
             "deimv2-hgnetv2-n",
             "deimv2-hgnetv2-pico",
+            "fsdc-vittest",
         }
 
     def test_auto_image_size_resolves_to_native(self):
@@ -224,7 +228,7 @@ class TestConfig:
 
 class TestGating:
     def test_no_support_raises_informative(self, monkeypatch):
-        from autovision._task_models.deimv2_object_detection import task_model
+        from autovision.tasks.detection.deimv2_object_detection import task_model
 
         monkeypatch.setattr(task_model, "_deimv2_classes", lambda: None)
         with pytest.raises(ImportError, match="transformers"):

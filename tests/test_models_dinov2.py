@@ -6,10 +6,10 @@ import os
 import pytest
 import torch
 
-from autovision._models import EmbeddingModel, get_wrapped_model
-from autovision._models._model_helpers import load_state_dict_compat
-from autovision._models.dinov2 import DINOV2_PACKAGE, TransformersDinov2Wrapper
-from autovision._models.model_wrapper import ModelWrapper
+from autovision.encoders import FeatureExtractor, get_wrapped_model
+from autovision.encoders._model_helpers import load_state_dict_compat
+from autovision.encoders.dinov2 import DINOV2_PACKAGE, TransformersDinov2Wrapper
+from autovision.encoders.model_wrapper import EncoderProtocol
 
 transformers = pytest.importorskip(
     "transformers", reason="transformers package not installed"
@@ -65,7 +65,7 @@ class TestListModelNames:
         assert not any("tips" in n for n in names)
 
     def test_registration_before_custom(self):
-        from autovision._models.package_helpers import list_base_packages
+        from autovision.encoders.package_helpers import list_base_packages
 
         names = [p.name for p in list_base_packages()]
         assert names.index("dinov2") < names.index("custom")
@@ -123,7 +123,7 @@ class TestGetModel:
 
 class TestWrapper:
     def test_is_model_wrapper(self):
-        assert isinstance(make_wrapper(), ModelWrapper)
+        assert isinstance(make_wrapper(), EncoderProtocol)
 
     def test_forward_shapes(self):
         wrapper = make_wrapper()
@@ -239,7 +239,7 @@ class TestWrapper:
 
     def test_embedding_model_roundtrip(self):
         wrapper = make_wrapper()
-        embedding_model = EmbeddingModel(wrapped_model=wrapper, embed_dim=64)
+        embedding_model = FeatureExtractor(wrapped_model=wrapper, embed_dim=64)
         state = embedding_model.state_dict()
         embedding_model.load_state_dict(state, strict=True)
         out = embedding_model(torch.randn(1, 3, 224, 224), pool=True)

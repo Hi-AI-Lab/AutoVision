@@ -2,7 +2,7 @@
 """Pin registry-published sha256 hashes into the weight manifest.
 
 Fetches the LFS sha256 of every weight file for each manifest entry and
-rewrites ``src/autovision/_models/weight_hashes.py`` with the pinned tier
+rewrites ``src/autovision/encoders/weight_hashes.py`` with the pinned tier
 enabled. Requires network access to the model registry. Only registry
 metadata is fetched (LFS pointers), never the weights themselves.
 
@@ -26,8 +26,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from autovision._models import weight_hashes  # noqa: E402
-from autovision._models.weight_verification import (  # noqa: E402
+from autovision.encoders import weight_hashes  # noqa: E402
+from autovision.encoders.weight_verification import (  # noqa: E402
     _lfs_sha256,
     _render_manifest,
 )

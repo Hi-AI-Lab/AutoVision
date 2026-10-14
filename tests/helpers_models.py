@@ -8,7 +8,7 @@ from torch import nn
 
 
 class TinyWrapper(nn.Module):
-    """Minimal ModelWrapper implementation used across tests."""
+    """Minimal EncoderProtocol implementation used across tests."""
 
     def __init__(self, dim: int = 8, model_type: str = "convolutional"):
         super().__init__()

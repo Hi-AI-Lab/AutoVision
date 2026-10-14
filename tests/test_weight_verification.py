@@ -9,8 +9,8 @@ from typing import Any
 
 import pytest
 
-from autovision._models.weight_hashes import WEIGHT_MANIFEST
-from autovision._models.weight_verification import (
+from autovision.encoders.weight_hashes import WEIGHT_MANIFEST
+from autovision.encoders.weight_verification import (
     WeightArtifact,
     WeightVerificationError,
     _render_manifest,
@@ -72,15 +72,15 @@ def fake_download(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         return snapshot
 
     monkeypatch.setattr(
-        "autovision._models.weight_verification._download_snapshot",
+        "autovision.encoders.weight_verification._download_snapshot",
         lambda repo_id, revision, *a, **k: download(repo_id, revision),
     )
     monkeypatch.setattr(
-        "autovision._models.weight_verification._lfs_sha256",
+        "autovision.encoders.weight_verification._lfs_sha256",
         lambda repo_id, revision: {"model.safetensors": GOOD_HASH},
     )
     monkeypatch.setattr(
-        "autovision._models.weight_verification.get_weight_artifact",
+        "autovision.encoders.weight_verification.get_weight_artifact",
         lambda repo_id: make_artifact(),
     )
     calls.append({"config.json": b"{}", "model.safetensors": GOOD_CONTENT})
@@ -89,7 +89,7 @@ def fake_download(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 
 class TestManifest:
     def test_covers_dinov2_registry(self):
-        from autovision._models.dinov2 import dinov2_package
+        from autovision.encoders.dinov2 import dinov2_package
 
         repos = {
             info["hf"] if use_reg else info["hf_noreg"]
@@ -103,9 +103,14 @@ class TestManifest:
             assert artifact.source
 
     def test_covers_dinov3_registry(self):
-        from autovision._models.dinov3 import dinov3_package
+        from autovision.encoders.dinov3 import dinov3_package
 
         for info in dinov3_package._MODEL_INFO.values():
+            if info["hf"] is None:
+                # No public HF checkpoint (distilled vitt16/vitt16plus):
+                # config-built only, weights arrive via backbone_weights /
+                # detector loads — nothing to pin in the manifest.
+                continue
             artifact = get_weight_artifact(info["hf"])
             assert artifact is not None, f"missing manifest entry: {info['hf']}"
             assert artifact.license
@@ -155,7 +160,7 @@ class TestLoadPretrainedVerified:
         self, monkeypatch, fake_download, tmp_path: Path
     ):
         monkeypatch.setattr(
-            "autovision._models.weight_verification._download_snapshot",
+            "autovision.encoders.weight_verification._download_snapshot",
             lambda *a, **k: _write_snapshot(tmp_path, BAD_CONTENT),
         )
         with pytest.raises(WeightVerificationError, match="sha256 mismatch"):
@@ -164,12 +169,12 @@ class TestLoadPretrainedVerified:
     def test_unpinned_uses_lfs_metadata_tier(self, monkeypatch, fake_download):
         calls = fake_download
         monkeypatch.setattr(
-            "autovision._models.weight_verification.get_weight_artifact",
+            "autovision.encoders.weight_verification.get_weight_artifact",
             lambda repo_id: make_artifact(sha256={}),
         )
         lfs_calls: list[str] = []
         monkeypatch.setattr(
-            "autovision._models.weight_verification._lfs_sha256",
+            "autovision.encoders.weight_verification._lfs_sha256",
             lambda repo_id, revision: lfs_calls.append(repo_id)
             or {"model.safetensors": GOOD_HASH},
         )
@@ -179,7 +184,7 @@ class TestLoadPretrainedVerified:
 
     def test_pinned_skips_lfs_metadata(self, monkeypatch, fake_download):
         monkeypatch.setattr(
-            "autovision._models.weight_verification._lfs_sha256",
+            "autovision.encoders.weight_verification._lfs_sha256",
             lambda repo_id, revision: (_ for _ in ()).throw(
                 AssertionError("network metadata must not be fetched when pinned")
             ),
@@ -219,11 +224,11 @@ class TestOfflineAndMirror:
             return snapshot
 
         monkeypatch.setattr(
-            "autovision._models.weight_verification._download_snapshot",
+            "autovision.encoders.weight_verification._download_snapshot",
             fake_download,
         )
         monkeypatch.setattr(
-            "autovision._models.weight_verification.get_weight_artifact",
+            "autovision.encoders.weight_verification.get_weight_artifact",
             lambda repo_id: make_artifact(
                 sha256={"model.safetensors": hashlib.sha256(GOOD_CONTENT).hexdigest()}
             ),
@@ -239,7 +244,7 @@ class TestOfflineAndMirror:
 
         monkeypatch.setenv("AUTOVISION_OFFLINE", "1")
         monkeypatch.setattr(
-            "autovision._models.weight_verification._download_snapshot",
+            "autovision.encoders.weight_verification._download_snapshot",
             lambda *a, **k: (_ for _ in ()).throw(
                 LocalEntryNotFoundError("not cached")
             ),
@@ -251,11 +256,11 @@ class TestOfflineAndMirror:
         snapshot = _write_snapshot(tmp_path, BAD_CONTENT, write=True)
         monkeypatch.setenv("AUTOVISION_OFFLINE", "1")
         monkeypatch.setattr(
-            "autovision._models.weight_verification.get_weight_artifact",
+            "autovision.encoders.weight_verification.get_weight_artifact",
             lambda repo_id: make_artifact(sha256={}),
         )
         monkeypatch.setattr(
-            "autovision._models.weight_verification._download_snapshot",
+            "autovision.encoders.weight_verification._download_snapshot",
             lambda *a, **k: snapshot,
         )
         model = load_pretrained_verified(FakeModelCls, "org/model")
@@ -296,7 +301,7 @@ class TestModelScopeSource:
             return snapshot
 
         monkeypatch.setattr(
-            "autovision._models.weight_verification._download_modelscope_snapshot",
+            "autovision.encoders.weight_verification._download_modelscope_snapshot",
             download,
         )
         return calls
@@ -304,7 +309,7 @@ class TestModelScopeSource:
     def _ms_artifact(self, monkeypatch, **overrides):
         artifact = make_artifact(modelscope_id="merve/model", **overrides)
         monkeypatch.setattr(
-            "autovision._models.weight_verification.get_weight_artifact",
+            "autovision.encoders.weight_verification.get_weight_artifact",
             lambda repo_id: artifact,
         )
         return artifact
@@ -335,7 +340,7 @@ class TestModelScopeSource:
             return snapshot
 
         monkeypatch.setattr(
-            "autovision._models.weight_verification._download_modelscope_snapshot",
+            "autovision.encoders.weight_verification._download_modelscope_snapshot",
             download,
         )
         model = load_pretrained_verified(FakeModelCls, "org/model")
@@ -361,7 +366,7 @@ class TestModelScopeSource:
             raise CheckpointError("no cached snapshot")
 
         monkeypatch.setattr(
-            "autovision._models.weight_verification._download_modelscope_snapshot",
+            "autovision.encoders.weight_verification._download_modelscope_snapshot",
             no_cache,
         )
         with pytest.raises(CheckpointError):
@@ -377,7 +382,7 @@ class TestModelScopeSource:
             raise RuntimeError("connection refused")
 
         monkeypatch.setattr(
-            "autovision._models.weight_verification._download_snapshot",
+            "autovision.encoders.weight_verification._download_snapshot",
             hub_fail,
         )
         calls = self._fake_ms_download(monkeypatch, tmp_path)
@@ -397,7 +402,7 @@ class TestModelScopeSource:
             raise AssertionError("fallback must not run")
 
         monkeypatch.setattr(
-            "autovision._models.weight_verification._download_modelscope_snapshot",
+            "autovision.encoders.weight_verification._download_modelscope_snapshot",
             ms_download,
         )
         snapshot = tmp_path / "hub"
@@ -405,7 +410,7 @@ class TestModelScopeSource:
         (snapshot / "config.json").write_bytes(b"{}")
         (snapshot / "model.safetensors").write_bytes(GOOD_CONTENT)
         monkeypatch.setattr(
-            "autovision._models.weight_verification._download_snapshot",
+            "autovision.encoders.weight_verification._download_snapshot",
             lambda *a, **k: snapshot,
         )
         model = load_pretrained_verified(FakeModelCls, "org/model")

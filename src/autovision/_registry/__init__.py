@@ -1,30 +1,19 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
-"""Model asset registry (filesystem + MLflow backends) + downloadable cache."""
+"""Deprecated alias of :mod:`autovision.registry` (compat shim).
 
-from autovision._registry.downloadable import (
-    DOWNLOADABLE_MODEL_URL_AND_HASH,
-    DownloadableModel,
-    DownloadableModelError,
-    register_downloadable,
-    resolve_downloadable,
-)
-from autovision._registry.mlflow_registry import MLflowModelRegistry
-from autovision._registry.model_registry import (
-    MODEL_STAGES,
-    ModelRegistry,
-    RegistryEntry,
-    RegistryError,
+Removed in the next minor release; import from the new location.
+"""
+
+from __future__ import annotations
+
+import warnings
+
+warnings.warn(
+    "autovision._registry is a deprecated alias; import from "
+    "autovision.registry instead.",
+    DeprecationWarning,
+    stacklevel=2,
 )
 
-__all__ = [
-    "DOWNLOADABLE_MODEL_URL_AND_HASH",
-    "DownloadableModel",
-    "DownloadableModelError",
-    "MLflowModelRegistry",
-    "MODEL_STAGES",
-    "ModelRegistry",
-    "RegistryEntry",
-    "RegistryError",
-    "register_downloadable",
-    "resolve_downloadable",
-]
+from autovision.registry import *  # noqa: E402,F401,F403
+from autovision.registry import __all__ as _exported  # noqa: E402,F401

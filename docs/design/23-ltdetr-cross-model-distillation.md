@@ -2,8 +2,8 @@
 
 | 文档属性 | 内容 |
 |---|---|
-| 版本 | v1.0（设计评审稿，未实施） |
-| 状态 | 设计完成，待 G1–G3 门槛跑通后立项实施 |
+| 版本 | v1.1（v1.0 设计评审稿 → v1.1：**核心已实施**（2026-10-12，实施记录与偏差见 §13）；G1–G3 门槛与 §9 消融待 GPU 环境） |
+| 状态 | 🟡 代码落地 + 25 例测试全绿；`self:ema` / 导出 `.pt` teacher 可用，HF 权重 teacher 未实现（§13.2）；GPU pilot 待跑 |
 | 上游思想 | DeepSeek-R1（arXiv:2501.12948）：把大模型的**输出**蒸馏给小模型，监督效率优于小模型自己长训/RL——R1-Distill 系列全部由对 R1 轨迹的监督微调得到，同尺寸效果超过自己跑 RL 的模型。【DS】结合本仓已有的 D-FINE **DDF 层间自蒸馏**（`dfine_utils.ddf_loss`），把"末层教中间层"升级为"跨模型互蒸馏" |
 | 配套分册 | DeepSeek 迁移四联册：本册（蒸馏）+ 分册 24（FP8）/ 25（token indexer）/ 26（步工程优化） |
 | 参考实现 | 无外部参考实现（本仓首创组合）；数学基础完全复用仓内已验证的 `ddf_loss` / `matched_pair_iou` / `HungarianMatcher` |
@@ -370,3 +370,38 @@ MODEL_ARGS = {
 | 导出格式（teacher 加载源） | `_engine/engine.py:733-749` |
 | EMA（self-teacher 臂 / 注册豁免依据） | `_task_models/object_detection_components/ema.py:23-87` |
 | VisDrone 基座配方 | `scripts/visdrone_ltdetr_800.py:80-247`；deimv2 臂 `scripts/visdrone_deimv2_800.py` |
+
+---
+
+## 13. 实施记录（2026-10-12，v1.1 核心落地）
+
+PR-1 + PR-2 的核心已实施（teacher 两个来源 + 三腿损失 + 全部接线），测试全绿。版本号 v1.0 → v1.1。
+
+### 13.1 落地面
+
+| 文件 | 内容 |
+|---|---|
+| `ltdetr_object_detection/config.py` | `LTDETRDistillArgs`（teacher 源/分辨率/三腿系数/start_step/every_n_steps/类空间规则）+ `distill` 字段 + 校验器 + `to_distill_params()` |
+| `ltdetr_object_detection/train_model.py` | teacher 构建（`_load_teacher_from_export` / `self:ema` 别名）/ 惰性设备搬移 / `_build_teacher_targets`（inference_mode + 解码器临时 train + `num_denoising=0`）/ GT→teacher-query 映射 / `distill_coverage` 诊断 / DDF bin 空间守卫 |
+| `object_detection_components/distillation.py`（新） | `DistillParams` + `cross_model_distill_losses`（GT 锚定 join + 三腿）+ `cross_model_ddf_loss`（matched-only KL） |
+| `dfine_criterion.py` | `distill_params` ctor + weight_dict 三条目 + forward 的 `distill_targets` 分支（含 `gated_out` 步门控标记与 eval 双保险） |
+| `tests/test_ltdetr_distill.py` | 25 例：config 校验 / cls 腿手工对账 / teacher 漏检跳过 / connected zero / DDF 自退 / 覆盖率映射 / 步门控 / eval 安全 / wrapper 级 state 键集合不变 / 导出 checkpoint teacher 加载（EMA 权重精确对账）/ 类空间两臂 / 解码器门控 |
+
+验收：新套件 25 例全绿 + 受影响回归 365 例全绿 + ruff 干净（与分册 26 的 W1/W2 同批交付）。
+
+### 13.2 与 §7 设计的偏差（如实记录）
+
+| 偏差 | 依据 |
+|---|---|
+| teacher 源 v1 只有 `self:ema` 与导出 `.pt`；**HF 公开权重名（臂 b）`NotImplementedError`** | deimv2 任务模型以 `num_classes` 重建会触发类头 retile，"真 teacher 的类空间"问题未决（§2.1 臂 b 本就是对照臂，不阻塞主推臂 a） |
+| deimv2 HF teacher 的 DDF 腿暂不可用 | 其 `_forward_train` 契约只透传 `pred_logits/pred_boxes`（HF 输出对象虽有 `intermediate_predicted_corners` 字段，未透传）→ bin 空间守卫自动丢弃该腿 + 一次性 warning；HF teacher 本就被上条挡在 v1 之外 |
+| 实现 D7 的步门控语义为显式 `gated_out` 标记 | criterion 无法感知步号；wrapper 门控未命中时传标记（而非 None），让 criterion 能区分"调度跳过"与"接线错误"（后者响亮 raise） |
+| EMA 块在 `__init__` 中上移至 criterion 之前 | `self:ema` teacher 需要别名 EMA 副本；deepcopy 不消耗 RNG，上移对其它初始化零影响 |
+| DDP gloo 多卡用例未包含 | 单卡实验环境；padded-gather 类风险在本设计中不存在（teacher 前向无 collective），多卡冒烟留待 GPU 环境 |
+| teacher_image_size 的 resize 用 `F.interpolate` 直达 | 归一化坐标使分辨率解耦成立（D6）；antialias 省略（teacher 输入不需要像素级对拍） |
+
+### 13.3 待办（进入 §9 消融前）
+
+1. GPU 环境：真实 VisDrone 配方 smoke（2k 步）——观察 `distill_coverage` 首→末走势与步时开销（§6 G2）；
+2. deimv2 VisDrone 臂 checkpoint 盘点（G1：teacher mAP ≥ student 基线 +2.0 AP）；
+3. `scripts/visdrone_ltdetr_distill_800.py` 配方脚本 + §9 消融矩阵执行。

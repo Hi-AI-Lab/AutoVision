@@ -21,9 +21,9 @@ import pytest
 import torch
 from torch import nn
 
-from autovision._models import get_wrapped_model
-from autovision._models.model_wrapper import ModelWrapper
-from autovision._models.rfdetr import RFDETR_PACKAGE, RFDETRModelWrapper
+from autovision.encoders import get_wrapped_model
+from autovision.encoders.model_wrapper import EncoderProtocol
+from autovision.encoders.rfdetr import RFDETR_PACKAGE, RFDETRModelWrapper
 
 # ── gating: forced deterministically, not assumed from the environment ──
 
@@ -31,7 +31,7 @@ from autovision._models.rfdetr import RFDETR_PACKAGE, RFDETRModelWrapper
 class TestGating:
     @pytest.fixture
     def no_support(self, monkeypatch):
-        from autovision._models.rfdetr import rfdetr_package
+        from autovision.encoders.rfdetr import rfdetr_package
 
         monkeypatch.setattr(
             rfdetr_package, "_rfdetr_classes", lambda: None
@@ -45,7 +45,7 @@ class TestGating:
             RFDETR_PACKAGE.get_model("rf-detr-base", load_weights=False)
 
     def test_support_lists_all_variants(self, monkeypatch):
-        from autovision._models.rfdetr import rfdetr_package
+        from autovision.encoders.rfdetr import rfdetr_package
 
         classes = {"config": object, "model": object, "backbone_config": object}
         monkeypatch.setattr(rfdetr_package, "_rfdetr_classes", lambda: classes)
@@ -191,7 +191,7 @@ class TestWithInjectedSupport:
         assert "rfdetr/rf-detr-seg-preview" not in names
 
     def test_registration_before_custom(self, fake_rfdetr_transformers):
-        from autovision._models.package_helpers import list_base_packages
+        from autovision.encoders.package_helpers import list_base_packages
 
         names = [p.name for p in list_base_packages()]
         assert names.index("rfdetr") < names.index("custom")
@@ -240,7 +240,7 @@ class TestWithInjectedSupport:
             RFDETR_PACKAGE.get_model("rf-detr-unknown", load_weights=False)
 
     def test_wrapper_is_model_wrapper(self, fake_rfdetr_transformers):
-        assert isinstance(make_wrapper(), ModelWrapper)
+        assert isinstance(make_wrapper(), EncoderProtocol)
 
     def test_forward_features_last_stage(self, fake_rfdetr_transformers):
         wrapper = make_wrapper()
@@ -255,7 +255,7 @@ class TestWithInjectedSupport:
         assert isinstance(wrapper.backbone, FakeRfDetrDinov2Backbone)
 
     def test_masked_forward_rejected(self, fake_rfdetr_transformers):
-        # DINOv2-style methods pass bool_masked_pos through EmbeddingModel;
+        # DINOv2-style methods pass bool_masked_pos through FeatureExtractor;
         # the HF RF-DETR backbone cannot apply it, so the wrapper must fail
         # with a direction to the ViT backbones instead of ignoring it.
         wrapper = make_wrapper()
@@ -343,19 +343,19 @@ class TestWithInjectedSupport:
         (snapshot / "model.safetensors").write_bytes(b"weights")
         # Force the lfs-metadata verification tier: an unpinned manifest
         # entry, independent of what the real manifest has pinned.
-        from autovision._models.weight_verification import WeightArtifact
+        from autovision.encoders.weight_verification import WeightArtifact
 
         monkeypatch.setattr(
-            "autovision._models.weight_verification.get_weight_artifact",
+            "autovision.encoders.weight_verification.get_weight_artifact",
             lambda repo_id: WeightArtifact(repo_id=repo_id, license="apache-2.0"),
         )
         monkeypatch.setattr(
-            "autovision._models.weight_verification._download_snapshot",
+            "autovision.encoders.weight_verification._download_snapshot",
             lambda repo_id, revision, *a, **k: downloaded.append(repo_id)
             or snapshot,
         )
         monkeypatch.setattr(
-            "autovision._models.weight_verification._lfs_sha256",
+            "autovision.encoders.weight_verification._lfs_sha256",
             lambda repo_id, revision: {
                 "model.safetensors": hashlib.sha256(b"weights").hexdigest()
             },

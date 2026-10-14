@@ -5,7 +5,7 @@ import pytest
 import torch
 from torch import nn
 
-from autovision._optim import (
+from autovision.optim import (
     AdamWArgs,
     CosineWarmupScheduler,
     LARSArgs,
@@ -16,7 +16,7 @@ from autovision._optim import (
     get_optimizer_args_cls,
     get_weight_decay_parameters,
 )
-from autovision._optim.lars import LARS
+from autovision.optim.lars import LARS
 
 
 class DummyModel(nn.Module):

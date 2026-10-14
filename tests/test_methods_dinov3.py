@@ -5,21 +5,21 @@ import random
 
 import pytest
 import torch
+from tests.test_methods_dinov2 import TinyMaskedViTWrapper
 
-from autovision._methods import get_method_cls, list_methods
-from autovision._methods.dinov3 import DINOv3, DINOv3Args, DINOv3Transform
-from autovision._methods.dinov3.constrained_crop import (
+from autovision.augment.transform_args import (
+    NormalizeArgs,
+)
+from autovision.encoders import FeatureExtractor
+from autovision.pretext import get_method_cls, list_methods
+from autovision.pretext.dinov3 import DINOv3, DINOv3Args, DINOv3Transform
+from autovision.pretext.dinov3.constrained_crop import (
     _GeometryViewTransform,
     render_clean_global,
     sample_high_overlap_box,
 )
-from autovision._methods.dinov3.paika import _linear_cka_loss, _roi_resample_to_grid
-from autovision._models import EmbeddingModel
-from autovision._scaling import ScalingInfo
-from autovision._transforms.transform_args import (
-    NormalizeArgs,
-)
-from tests.test_methods_dinov2 import TinyMaskedViTWrapper
+from autovision.pretext.dinov3.paika import _linear_cka_loss, _roi_resample_to_grid
+from autovision.scaling import ScalingInfo
 
 pytestmark = pytest.mark.filterwarnings("ignore::UserWarning")
 
@@ -28,7 +28,7 @@ pytestmark = pytest.mark.filterwarnings("ignore::UserWarning")
 
 
 def make_method(**args_overrides) -> DINOv3:
-    from autovision._methods.dinov2 import DINOv2AdamWArgs
+    from autovision.pretext.dinov2 import DINOv2AdamWArgs
 
     args = DINOv3Args(
         output_dim=16,
@@ -41,7 +41,7 @@ def make_method(**args_overrides) -> DINOv3:
     args.resolve_auto(scaling_info=ScalingInfo(dataset_size=64, epochs=10))
     optimizer_args = DINOv2AdamWArgs()
     optimizer_args.resolve_auto(wrapped_model=None)
-    student = EmbeddingModel(
+    student = FeatureExtractor(
         wrapped_model=TinyMaskedViTWrapper(grid=4), embed_dim=8
     )
     return DINOv3(
@@ -151,7 +151,7 @@ class TestConstrainedCrop:
 
 class TestTransform:
     def make_transform(self, **overrides) -> DINOv3Transform:
-        from autovision._methods.dinov3 import DINOv3TransformArgs
+        from autovision.pretext.dinov3 import DINOv3TransformArgs
 
         args = DINOv3TransformArgs(
             image_size=(32, 32),

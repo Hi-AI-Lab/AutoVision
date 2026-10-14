@@ -2,8 +2,8 @@
 import pytest
 from pydantic import Field
 
-from autovision._configs.base import PydanticConfig
-from autovision._configs.validate import (
+from autovision.config.base import PydanticConfig
+from autovision.config.validate import (
     assert_config_resolved,
     no_auto,
     pydantic_model_validate,

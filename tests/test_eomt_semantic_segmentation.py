@@ -5,13 +5,13 @@ import torch
 
 from autovision import load_task_model as load_model
 from autovision import train_semantic_segmentation
-from autovision._scheduler import CosineWarmupScheduler
-from autovision._task_models.dinov2_eomt_semantic_segmentation import (
+from autovision.optim.schedulers import CosineWarmupScheduler
+from autovision.tasks.dinov2_eomt_semantic_segmentation import (
     Dinov2EomtSemanticSegmentation,
     Dinov2EomtSemanticSegmentationTrain,
     Dinov2EomtSemanticSegmentationTrainArgs,
 )
-from autovision._task_models.eomt import (
+from autovision.tasks.eomt import (
     adapt_eomt_head,
     build_eomt_model,
     build_eomt_optimizer,

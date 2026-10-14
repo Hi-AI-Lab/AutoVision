@@ -2,9 +2,9 @@
 
 | 文档属性 | 内容 |
 |---|---|
-| 版本 | v1.0（设计评审稿，未实施） |
-| 状态 | 设计完成；**前置缺口：本仓尚无 ViT 变体的 VisDrone 训练配方**（doc 17 §11.2 记录：现有脚本全为 ConvNeXt），G0 先补配方再过门槛 |
-| 上游思想 | DeepSeek-V3.2 的 DeepSeek Sparse Attention（DSA，arXiv:2509.…/官方 repo）：细粒度 token 级稀疏注意力的关键是**可学习的轻量 lightning indexer**——每个 (query, key) 对打分、top-k 选择，"什么重要"由可学习小模块判断而非启发式规则。【DS】 |
+| 版本 | v1.1（v1.0 设计评审稿 → v1.1：G1 已实测（§13）、引用勘误、fade 语义补全） |
+| 状态 | 设计完成；**前置缺口已收窄**：ViT 变体 VisDrone 配方已存在 `scripts/visdrone_ltdetr_1280_vits16_baseline_coco.py`（1280px 基线，v1.0 误记为缺失）；800px twin 基线仍需新建（G0 剩余项） |
+| 上游思想 | DeepSeek-V3.2 的 DeepSeek Sparse Attention（DSA，arXiv:2512.02556，2025-12）：细粒度 token 级稀疏注意力的关键是**可学习的轻量 lightning indexer**——每个 (query, key) 对打分、top-k 选择，"什么重要"由可学习小模块判断而非启发式规则。【DS】 |
 | 本册定位 | 把分册 17 的静态 token drop（GT 框规则 + 随机窗口采样）升级为**可学习的 per-token indexer**：规则先验降格为辅助监督信号，选择本身交给打分模块学习。统一分册 13（密度）/ 17（token drop）/ 20（masked forward）三条"token 重要性"线索的第一步 |
 | 参考实现 | 无外部移植源；管道完全复用本仓已验证的 masked-forward 基础设施（docs 17/20，`tests/test_window_token_drop.py` 30 例） |
 | 受影响模块 | `ltdetr_object_detection/config.py`、`train_model.py`、`task_model.py`、`_models/dinov2/dinov2_wrapper.py`、`_models/dinov3/dinov3_wrapper.py`、`scripts/visdrone_ltdetr_vits16_800.py`（新，G0）、`tests/test_token_indexer.py`（新） |
@@ -31,8 +31,9 @@
 
 ### 1.2 诚实的预期管理
 
-- **家族限定 ViT**：ConvNeXt 主力（现役 VisDrone 配方）是卷积，无 token 序列，本册不适用（doc 17 §3.1 的家族矩阵裁定沿用）。本册的全部价值兑现在 ViT 变体配方上——因此 G0 前置"ViT VisDrone 配方"缺口；
-- **序列长度现实**：800px/patch16 → 2500 token（DINOv3 ViT），相比 LLM 的万级序列短——DSA 的收益比例不会完整复现，目标定位为"骨干 encoder 相位 30–50% 的 FLOPs 削减"（mask 粒度从 32px 窗细化到 patch，可丢率上限从 ~47% 提高，G1 实测）；
+- **家族限定 ViT**：ConvNeXt 主力（现役 VisDrone 配方）是卷积，无 token 序列，本册不适用（doc 17 §3.1 的家族矩阵裁定沿用）。本册的全部价值兑现在 ViT 变体配方上——1280px vits16 基线已存在，800px twin 待建（G0）；
+- **可删率上限（已实测，§13）**：patch 粒度（16px @800px）的 GT 外扩保护后背景占比为 **83.2%**（mean；median 86.0%，p90 95.6%），对比窗级（32px）的 77.9%——粒度细化只抬升 **+5.3pp** 上限，v1.0"上限提高到 60%+"的预估方向对、幅度错（同 keep_ratio 0.4 下 patch 级期望可删 49.9% vs 窗级 46.7%）。**因此本册的核心收益主张不是"能删得更多"，而是"同样的删得下的预算里，删得对"**：静态规则的背景窗保留是均匀随机的、前景保护是二值的；indexer 输出连续分数，可以把预算留给边界过渡带、遮挡目标和规则判不掉的背景（未标注前景）；
+- **序列长度现实**：800px/patch16 → 2500 token（DINOv3 ViT），相比 LLM 的万级序列短——DSA 的收益比例不会完整复现，目标定位为"骨干 encoder 稀疏段（后 N−select_layer 层）的 FLOPs 按预算比例削减"；
 - **增广语义保留**：doc 17 §5 的裁定（partial keep = 结构化真缺失增广，非无损加速）在可学习选择下**同样成立**——本册同时收获增广与速度，消融按增广实验设计（± indexer × ± erase）。
 
 ---
@@ -77,13 +78,15 @@ class TokenIndexer(nn.Module):
             nn.Linear(hidden_dim, indexer_dim), nn.GELU(),
             nn.Linear(indexer_dim, 1),
         )
-        # 2D sincos 位置投影（可学习线性到 indexer_dim），拼接到输入——
-        # 纯内容打分对 patch 网格位置不敏感，位置是前景性的强先验。
+        # 位置投影：由 patch 网格坐标 (y, x) 现算 2D sincos（与骨干的 rope 无关
+        # ——DINOv3 的 rope 在 token gather 后同索引裁剪，见 §3.7；indexer 用
+        # 自己的绝对网格坐标，保证被 gather 前打分时位置信息完整），
+        # 经可学习线性投到 indexer_dim 后拼接到内容特征。
     def forward(self, patch_tokens: Tensor, pos: Tensor) -> Tensor:
         # (B, N, D) + (B, N, D_pos) → (B, N) logits
 ```
 
-参数量 ~hidden_dim×64 级（vits16：384×64×2 ≈ 50K，骨干 22M 的 0.2%）。归入 **detector 参数组**（随机初始化连接件的既有归类先例，`train_model.py:637-642` 的 connector 语义）。
+参数量 ~hidden_dim×64 级（vits16：384×64×2 ≈ 50K，骨干 22M 的 0.2%）。归入 **detector 参数组**（随机初始化连接件的既有归类先例，`train_model.py:637-642` 的 connector 语义）。模块定义放 `object_detection_components/`（组件层，同 `SSLProjectionHead` 先例），由 `ViTDetectionBackbone` 实例化持有。
 
 ### 3.2 选择机制（D3：预算化 top-k，非阈值）
 
@@ -116,7 +119,8 @@ class LTDETRTokenIndexerArgs(PydanticConfig):
     overlap_coef: float = Field(default=1.0, ge=0.0)   # GT 重叠 BCE 权重 λ_overlap
     budget_coef: float = Field(default=0.1, ge=0.0)
     overlap_padding: float = Field(default=0.15, ge=0.0)  # GT 外扩（doc 16/17 同语义）
-    cold_start_steps: int = Field(default=1000, ge=0)     # 0..N 步用静态 doc17 mask，之后线性切换
+    cold_start_steps: int = Field(default=1000, ge=0)     # 0..N 步用静态 doc17 mask
+    fade_steps: int = Field(default=500, ge=0)            # 淡入窗长：静态→indexer 的概率线性切换（§3.5）
     step_stop: int | None | Literal["auto"] = "auto"      # 末期回稠密（doc 17 同款）
     use_for_mwas: bool = False                             # v2：分数池化驱动 MWAS 窗掩码
 
@@ -129,7 +133,7 @@ class LTDETRTokenIndexerArgs(PydanticConfig):
 ### 3.5 冷启动与退火（D5）
 
 - **cold_start（0..cold_start_steps）**：keep mask 直接取 doc 17 静态逻辑（GT 保护 + 随机背景采样，预算对齐 keep_ratio）——indexer 的 BCE 监督同期在学；此阶段行为与 doc 17 等价（增广语义连续）；
-- **切换（cold_start..cold_start+fade）**：以概率 p 线性从静态切到 indexer 选择（每步每图掷币，RNG 可复现）；
+- **淡入（cold_start..cold_start+fade_steps）**：每步每图以概率 `p = clamp((step − cold_start_steps) / max(fade_steps, 1), 0, 1)` 从静态切换到 indexer 选择（RNG 可复现，淡入完成后 p=1 恒 indexer）；
 - **step_stop**：复用 doc 17 的步窗机制（`train_model.py:609-621` 的 auto 解析同款），末期回稠密——部署分布一致性裁定不变。
 
 ### 3.6 wrapper 门控扩展
@@ -188,8 +192,8 @@ MWAS 窗掩码现在由 DeFE 密度图阈值化产生（`dome_encoder.py:99-107`
 
 | # | 内容 | 工具 | 判据 |
 |---|---|---|---|
-| G0 | **ViT 变体 VisDrone 配方补缺**：`scripts/visdrone_ltdetr_vits16_800.py`（COCO 热启动 + 现役 twin 配方）跑通 10-epoch 基线 | 新脚本 | 基线 mAP 落盘；无此基线则后续全部消融无参照系 |
-| G1 | **可丢率上界**：patch 粒度 GT 重叠标签的背景占比（= indexer 可删上限，对比 doc 17 窗级的 46.7%） | 离线统计（`scripts/visdrone_token_drop_stats.py` 加 `--patch` 模式） | patch 级可删率显著 > 窗级（预期 >60%），否则细化粒度的动机削弱 |
+| G0 | **ViT 变体 VisDrone 基线**：800px vits16 twin 配方（1280px 基线已存在：`scripts/visdrone_ltdetr_1280_vits16_baseline_coco.py`）跑通 10-epoch 基线 | 新脚本（复制现役 twin 模式） | 基线 mAP 落盘；无此基线则后续全部消融无参照系 |
+| G1 | **可丢率上界**：patch 粒度 GT 重叠标签的背景占比（= indexer 可删上限，对比 doc 17 窗级的 46.7%） | `scripts/visdrone_token_drop_stats.py --window 16`（原生支持，无需改代码） | ✅ **已实测通过（§13）**：上限 83.2% ≫ 25% 双动机门槛；但仅比窗级 +5.3pp——收益主张依 §1.2 修订为"同预算下删得对" |
 | G2 | **骨干占比**：ViT 变体骨干相位步时占比 | `profile_step_phases.py`（vits16 配方变体） | 骨干 < 35% 步时 → 速度动机降级（doc 17 G2 同阈值），按增广动机继续 |
 | G3 | **逐层驱动面确认**：DINOv2/DINOv3 的 layer 迭代前向与整段调用逐位一致（select_layer=N 时） | 单测（tiny 配置） | 逐位一致才允许逐层编排上线（HF 属性面风险的前置排查） |
 | G4 | G0–G3 通过 → 实施 §7 | — | — |
@@ -293,3 +297,24 @@ MWAS 窗掩码现在由 DeFE 密度图阈值化产生（`dome_encoder.py:99-107`
 | "算一次无后缀"损失接线模式 | `object_detection_components/dfine_criterion.py:477-489` |
 | 步窗调度先例（step_stop/cold start） | `ltdetr_object_detection/train_model.py:609-621`；分册 16 P1.5 |
 | 可丢率统计工具（G1） | `scripts/visdrone_token_drop_stats.py`；doc 17 §11.1 实测（46.7% 窗级基线） |
+
+---
+
+## 13. 实测记录（2026-10-12，v1.1）
+
+### 13.1 G1 可删率实测（全量 VisDrone train，6471 图，零模型改动）
+
+工具：`scripts/visdrone_token_drop_stats.py`（原生支持 patch 粒度：`--window 16` = vits16 patch-16 网格，无需改代码）。
+
+| 粒度 | 配置 | 期望可删（mean / median / p90） | 判读 |
+|---|---|---|---|
+| patch 16px（50×50 网格） | keep_ratio 0.4，padding 0.15 | **49.9% / 51.6% / 57.4%** | 同预算下略优于窗级 |
+| window 32px（25×25 网格，doc 17 口径） | 同上 | 46.7% / 48.2% / 55.8%（doc 17 §11.1 原数） | — |
+| **patch 16px 背景占比上限**（keep_ratio→0） | — | **83.2% / 86.0% / 95.6%** | indexer 的预算调度空间 |
+| window 32px 背景占比上限 | — | 77.9% / 80.3% / 93.0% | — |
+
+**判读（对照 v1.0 的 G1 预判）**：v1.0 预判"patch 级可删率显著 > 窗级（预期 >60%）"**方向对、幅度错**——同预算仅 +3.2pp、上限仅 +5.3pp。VisDrone 外扩 GT 已覆盖 ~17–22% 画面，粒度细化腾出的空间有限。**本册的收益主张据此修订（§1.2）**：从"细化粒度提高可删上限"改为"同一可删预算下，连续分数选择替换二值规则 + 均匀随机"——indexer 的对照组是同预算的静态 drop（§9 臂 c），这恰是原设计的核心消融，动机修正后实验设计不变。
+
+### 13.2 前置缺口勘误
+
+v1.0 状态栏记"本仓尚无 ViT 变体的 VisDrone 训练配方"（转引自 doc 17 §11.2 的旧记录）：**已过时**——工作树现存 `scripts/visdrone_ltdetr_1280_vits16_baseline_coco.py`（1280px vits16 COCO 热启动基线）。G0 剩余项收窄为"800px vits16 twin 配方 + 10-epoch 基线落盘"。

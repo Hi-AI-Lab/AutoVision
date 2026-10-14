@@ -16,8 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from autovision._registry.mlflow_registry import MLflowModelRegistry
-from autovision._registry.model_registry import RegistryError
+from autovision.registry.mlflow_registry import MLflowModelRegistry
+from autovision.registry.model_registry import RegistryError
 
 # ── fake MLflow client ──────────────────────────────────────────────────
 

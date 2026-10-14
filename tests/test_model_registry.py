@@ -5,9 +5,9 @@ import json
 
 import pytest
 
-from autovision._models.weight_verification import compute_file_sha256
-from autovision._registry import (
-    DOWNLOADABLE_MODEL_URL_AND_HASH,
+from autovision.encoders.weight_verification import compute_file_sha256
+from autovision.registry import (
+    ASSET_MANIFEST,
     DownloadableModelError,
     ModelRegistry,
     RegistryError,
@@ -170,7 +170,7 @@ class TestDownloadable:
             again = resolve_downloadable("test-model", cache_dir=tmp_path / "cache")
             assert again == path
         finally:
-            DOWNLOADABLE_MODEL_URL_AND_HASH.pop("test-model", None)
+            ASSET_MANIFEST.pop("test-model", None)
 
     def test_corrupt_cache_is_redownloaded(self, tmp_path):
         import hashlib
@@ -189,4 +189,62 @@ class TestDownloadable:
             path = resolve_downloadable("test-corrupt", cache_dir=cache)
             assert path.read_bytes() == payload
         finally:
-            DOWNLOADABLE_MODEL_URL_AND_HASH.pop("test-corrupt", None)
+            ASSET_MANIFEST.pop("test-corrupt", None)
+
+
+# ── mirror fallback (design doc 28 §6.3, regional mirrors) ──────────────
+
+
+class TestMirrorFallback:
+    def test_falls_back_to_mirror_on_primary_failure(self, monkeypatch, tmp_path):
+        import hashlib
+
+        from autovision.registry import downloadable as dl
+
+        payload = b"weights"
+        sha = hashlib.sha256(payload).hexdigest()
+        monkeypatch.setitem(
+            dl.ASSET_MANIFEST,
+            "mirror-test",
+            dl.DownloadableModel(
+                url="https://primary.invalid/w.pt",
+                sha256=sha,
+                mirrors=("https://mirror.invalid/w.pt",),
+            ),
+        )
+        attempted: list[str] = []
+
+        def fake_download(url: str, target) -> None:
+            attempted.append(url)
+            if url.startswith("https://primary"):
+                raise dl.DownloadableModelError(f"primary down: {url}")
+            target.write_bytes(payload)
+
+        monkeypatch.setattr(dl, "_download", fake_download)
+        out = dl.resolve_downloadable("mirror-test", cache_dir=tmp_path)
+        assert out.read_bytes() == payload
+        assert attempted == ["https://primary.invalid/w.pt", "https://mirror.invalid/w.pt"]
+
+    def test_mirror_sha_mismatch_tries_next(self, monkeypatch, tmp_path):
+        import hashlib
+
+        from autovision.registry import downloadable as dl
+
+        payload = b"good"
+        sha = hashlib.sha256(payload).hexdigest()
+        monkeypatch.setitem(
+            dl.ASSET_MANIFEST,
+            "mirror-sha-test",
+            dl.DownloadableModel(
+                url="https://a.invalid/w.pt",
+                sha256=sha,
+                mirrors=("https://b.invalid/w.pt", "https://c.invalid/w.pt"),
+            ),
+        )
+
+        def fake_download(url: str, target) -> None:
+            target.write_bytes(b"corrupt" if "b." in url else payload)
+
+        monkeypatch.setattr(dl, "_download", fake_download)
+        out = dl.resolve_downloadable("mirror-sha-test", cache_dir=tmp_path)
+        assert out.read_bytes() == payload

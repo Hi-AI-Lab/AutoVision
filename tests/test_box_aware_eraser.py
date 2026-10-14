@@ -12,12 +12,12 @@ from __future__ import annotations
 import torch
 from torchvision import tv_tensors
 
-from autovision._transforms.detection_transforms import (
+from autovision.augment.detection import (
     RTDETRDetectionTransform,
     RTDETRDetectionTransformArgs,
     build_val_transform_args,
 )
-from autovision._transforms.detection_transforms.box_aware_eraser import (
+from autovision.augment.detection.box_aware_eraser import (
     erase_background,
     protected_cell_mask,
     reserve_interior_cells,
@@ -300,3 +300,27 @@ class TestEraseStepStop:
             total_steps=1000, train_num_batches=100, gradient_accumulation_steps=1
         )
         assert args.random_erase_step_stop == 800
+
+    def test_stop_boundary_triggers_dataloader_reinit(self):
+        """The erase window rides the step activation tuple: crossing the
+        stop flips the gate AND marks the dataloader for reinitialization —
+        the mechanism that carries the new gate into (persistent) worker
+        processes. A call-time step read would see each worker's stale
+        pickled copy for any window that does not coincide with another
+        op's boundary."""
+        transform = RTDETRDetectionTransform(self._args(step_stop=100))
+        transform.set_step(99)
+        assert transform.compose.erase_active()
+        assert not transform.requires_dataloader_reinitialization()
+        transform.set_step(100)
+        assert not transform.compose.erase_active()
+        assert transform.requires_dataloader_reinitialization()
+        transform.mark_dataloader_as_reinitialized()
+        assert not transform.requires_dataloader_reinitialization()
+
+    def test_gate_inactive_when_prob_unset(self):
+        args = self._args(step_stop=100)
+        args.random_erase_prob = None
+        transform = RTDETRDetectionTransform(args)
+        transform.set_step(10)
+        assert not transform.compose.erase_active()

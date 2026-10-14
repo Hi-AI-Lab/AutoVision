@@ -11,14 +11,14 @@ from pathlib import Path
 
 import pytest
 import torch
+from tests.test_train_object_detection import data_config, make_coco_dataset
 
 from autovision import load_task_model as load_model
 from autovision import train_object_detection
-from tests.test_train_object_detection import data_config, make_coco_dataset
 
-MODEL = "ltdetr/dinov2-vittest-notpretrained"
+MODEL = "avdetr/dinov2-vittest-notpretrained"
 
-LTDETR_ARGS = {
+AVDETR_ARGS = {
     "image_size": (224, 224),
     "num_queries": 10,
     "num_top_queries": 10,
@@ -52,7 +52,7 @@ def test_joint_ssl_two_crop_end_to_end(tmp_path, coco):
         batch_size=4,
         num_workers=0,
         model_args={
-            **LTDETR_ARGS,
+            **AVDETR_ARGS,
             "ssl": {"mode": "unsup", "view": "two_crop", "loss_coef": 0.1},
         },
         transform_args=TRANSFORM_ARGS,
@@ -81,7 +81,7 @@ def test_batch_matched_baseline_has_no_ssl_keys(tmp_path, coco):
         steps=2,
         batch_size=4,
         num_workers=0,
-        model_args={**LTDETR_ARGS, "ssl": {"mode": "off", "view": "two_crop"}},
+        model_args={**AVDETR_ARGS, "ssl": {"mode": "off", "view": "two_crop"}},
         transform_args=TRANSFORM_ARGS,
         seed=0,
     )
@@ -99,7 +99,7 @@ def test_route_b_ssl_only_end_to_end(tmp_path, coco):
         batch_size=4,
         num_workers=0,
         model_args={
-            **LTDETR_ARGS,
+            **AVDETR_ARGS,
             "ssl": {
                 "mode": "unsup",
                 "view": "dropout",

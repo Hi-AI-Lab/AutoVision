@@ -2,21 +2,22 @@
 
 import pytest
 import torch
+from tests.conftest import create_image
+from tests.test_train_object_detection import (
+    data_config,
+    make_coco_dataset,
+    transform_args,
+)
 
 from autovision import load_task_model as load_model
 from autovision import train_object_detection
-from autovision._task_models.dfine_object_detection import (
-    DFINEObjectDetection,
-    DFINEObjectDetectionTrain,
-    DFINEObjectDetectionTrainArgs,
-)
-from autovision._task_models.object_detection_components.dfine_criterion import (
+from autovision.tasks.detection.components.dfine_criterion import (
     DFINECriterionV2,
 )
-from autovision._task_models.object_detection_components.dfine_decoder import (
+from autovision.tasks.detection.components.dfine_decoder import (
     DFINEv2Decoder,
 )
-from autovision._task_models.object_detection_components.dfine_utils import (
+from autovision.tasks.detection.components.dfine_utils import (
     bbox2distance,
     ddf_loss,
     distance2bbox,
@@ -25,14 +26,13 @@ from autovision._task_models.object_detection_components.dfine_utils import (
     translate_gt,
     weighting_function,
 )
-from autovision._task_models.object_detection_components.matcher import (
+from autovision.tasks.detection.components.matcher import (
     HungarianMatcher,
 )
-from tests.conftest import create_image
-from tests.test_train_object_detection import (
-    data_config,
-    make_coco_dataset,
-    transform_args,
+from autovision.tasks.detection.dfine_object_detection import (
+    DFINEObjectDetection,
+    DFINEObjectDetectionTrain,
+    DFINEObjectDetectionTrainArgs,
 )
 
 REG_MAX = 8  # small bin layout keeps tests fast
@@ -404,11 +404,45 @@ class TestDFineCriterion:
         )
         for key in (
             "loss_vfl", "loss_bbox", "loss_giou", "loss_fgl",
-            "loss_vfl_aux_0", "loss_fgl_aux_0", "loss_ddf_aux_0",
+            "loss_vfl_aux_0", "loss_bbox_aux_0", "loss_giou_aux_0",
+            "loss_fgl_aux_0", "loss_ddf_aux_0",
             "loss_vfl_dn_0", "loss_fgl_dn_0", "loss_ddf_dn_0", "loss",
         ):
             assert key in losses, key
         assert torch.isfinite(losses["loss"]).item()
+
+    def test_aux_box_losses_ride_union_assignment(self):
+        # Baseline aux loop: each intermediate layer's L1/GIoU uses the
+        # union assignment and num_boxes_go normalization (official
+        # ``indices_in = indices_go if loss in ["boxes", ...]``), NOT the
+        # layer's own Hungarian match — and is weighted like the final
+        # layer's box loss.
+        torch.manual_seed(0)
+        model = make_decoder(num_layers=2)
+        model.train()
+        targets = make_targets()
+        out = model(make_feats(), targets=targets)
+        outputs_list = list(out["aux_outputs"]) + [
+            {"pred_logits": out["pred_logits"], "pred_boxes": out["pred_boxes"]}
+        ]
+        losses = self.make_criterion()(
+            outputs_list,
+            targets,
+            corners_list=out["pred_corners_list"],
+            ref_boxes_list=out["ref_boxes_list"],
+        )
+        assert torch.isfinite(losses["loss_bbox_aux_0"]).item()
+        assert torch.isfinite(losses["loss_giou_aux_0"]).item()
+        # The weighted total includes the aux box terms at the base
+        # weights: rebuild the total from the individual losses (the only
+        # suffix at num_layers=2 is "_aux_0") and compare.
+        criterion = self.make_criterion()
+        rebuilt = sum(
+            value.detach() * criterion.weight_dict[key.replace("_aux_0", "")]
+            for key, value in losses.items()
+            if key != "loss"
+        )
+        assert losses["loss"].detach() == pytest.approx(rebuilt, rel=1e-5)
 
     def test_dn_pre_outputs_supervised(self):
         # The denoising segment of the pre-output head is supervised like
@@ -439,6 +473,47 @@ class TestDFineCriterion:
             assert key not in without, key
             assert torch.isfinite(with_pre[key]).item()
         assert "loss" in with_pre and torch.isfinite(with_pre["loss"]).item()
+
+    def test_pre_heads_supervised_like_baseline(self):
+        # Baseline parity lock: pre_outputs / dn_pre_outputs carry no
+        # pred_corners (the baseline dfine_decoder assembles pred_logits +
+        # pred_boxes only), so the baseline loss_local early-outs on the
+        # missing key — NO loss_fgl_pre / loss_ddf_pre (nor dn_pre FGL/DDF)
+        # exists upstream. VFL + L1/GIoU are the only pre-head terms, and
+        # they must stay that way for baseline equivalence.
+        torch.manual_seed(0)
+        model = make_decoder(num_layers=2)
+        model.train()
+        targets = make_targets()
+        out = model(make_feats(), targets=targets)
+        outputs_list = list(out["aux_outputs"]) + [
+            {"pred_logits": out["pred_logits"], "pred_boxes": out["pred_boxes"]}
+        ]
+        losses = self.make_criterion()(
+            outputs_list,
+            targets,
+            pre_outputs=out["pre_outputs"],
+            dn_outputs=out["dn_aux_outputs"],
+            dn_meta=out["dn_meta"],
+            dn_pre_outputs=out["dn_pre_outputs"],
+            corners_list=out["pred_corners_list"],
+            ref_boxes_list=out["ref_boxes_list"],
+            dn_corners_list=out["dn_pred_corners_list"],
+            dn_ref_boxes_list=out["dn_ref_boxes_list"],
+        )
+        for name in (
+            "loss_vfl_pre", "loss_bbox_pre", "loss_giou_pre",
+            "loss_vfl_dn_pre", "loss_bbox_dn_pre", "loss_giou_dn_pre",
+        ):
+            assert name in losses, name
+        for name in (
+            "loss_fgl_pre", "loss_ddf_pre",
+            "loss_fgl_dn_pre", "loss_ddf_dn_pre",
+        ):
+            assert name not in losses, name
+        # The decoder-side contract that makes the equivalence hold.
+        assert "pred_corners" not in out["pre_outputs"]
+        assert "pred_corners" not in out["dn_pre_outputs"]
 
     def test_dn_fgl_weight_override_reweights_only_dn(self):
         # The dense-batch knob: dn_fgl_loss_weight replaces the main FGL
@@ -687,7 +762,7 @@ class TestLQE:
     def test_zero_init_is_identity_on_scores(self):
         """At init the LQE's last layer is zeroed — the quality scalar is 0,
         so the module must return the scores unchanged (official no-op)."""
-        from autovision._task_models.object_detection_components.dfine_utils import LQE
+        from autovision.tasks.detection.components.dfine_utils import LQE
 
         torch.manual_seed(0)
         lqe = LQE(k=4, hidden_dim=64, num_layers=2, reg_max=REG_MAX)
@@ -696,7 +771,7 @@ class TestLQE:
         torch.testing.assert_close(lqe(scores, corners), scores)
 
     def test_trained_offset_shifts_scores(self):
-        from autovision._task_models.object_detection_components.dfine_utils import LQE
+        from autovision.tasks.detection.components.dfine_utils import LQE
 
         lqe = LQE(k=4, hidden_dim=64, num_layers=2, reg_max=REG_MAX)
         with torch.no_grad():

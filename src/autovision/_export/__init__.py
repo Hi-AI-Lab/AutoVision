@@ -1,38 +1,19 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
-"""Export layer: ONNX pipeline, TensorRT, int8 PTQ, benchmarking."""
+"""Deprecated alias of :mod:`autovision.export` (compat shim).
 
-from autovision._export.benchmark import (
-    BenchmarkResult,
-    ONNXBackendArgs,
-    TensorRTBackendArgs,
-    TorchBackendArgs,
-    benchmark,
-    benchmark_inference,
-)
-from autovision._export.export_onnx import (
-    ONNXExportMixin,
-    ONNXExportPrecisionPolicy,
-)
-from autovision._export.quantization import (
-    Int8CalibrationReader,
-    Int8QuantizationConfig,
-    image_folder_calibration_reader,
-    quantize_onnx_int8,
-)
-from autovision._export.tensorrt_helpers import export_onnx_to_tensorrt
+Removed in the next minor release; import from the new location.
+"""
 
-__all__ = [
-    "BenchmarkResult",
-    "Int8CalibrationReader",
-    "Int8QuantizationConfig",
-    "ONNXBackendArgs",
-    "ONNXExportMixin",
-    "ONNXExportPrecisionPolicy",
-    "TensorRTBackendArgs",
-    "TorchBackendArgs",
-    "benchmark",
-    "benchmark_inference",
-    "export_onnx_to_tensorrt",
-    "image_folder_calibration_reader",
-    "quantize_onnx_int8",
-]
+from __future__ import annotations
+
+import warnings
+
+warnings.warn(
+    "autovision._export is a deprecated alias; import from "
+    "autovision.export instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
+from autovision.export import *  # noqa: E402,F401,F403
+from autovision.export import __all__ as _exported  # noqa: E402,F401

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from autovision._export.tensorrt_helpers import export_onnx_to_tensorrt
+from autovision.export.tensorrt_helpers import export_onnx_to_tensorrt
 
 
 def _noop_export_fn(**kwargs):  # pragma: no cover - only reached with trt installed
@@ -53,6 +53,6 @@ class TestGracefulDegradation:
             )
 
     def test_task_model_method_exposed(self):
-        from autovision._task_models import RTDETRObjectDetection
+        from autovision.tasks import RTDETRObjectDetection
 
         assert hasattr(RTDETRObjectDetection, "export_tensorrt")

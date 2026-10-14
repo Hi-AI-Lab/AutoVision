@@ -3,14 +3,14 @@
 
 import pytest
 import torch
+from tests.test_methods_distillationv3 import make_batch, make_method
 
-from autovision._commands.train import PretrainConfig
-from autovision._data._serialize.memory_mapped_sequence import (
+from autovision.cli.train import PretrainConfig
+from autovision.data.serialize.memory_mapped_sequence import (
     MemoryMappedSequence,
     write_items_to_file,
 )
-from autovision._methods.distillationv3 import DistillationV3Args
-from tests.test_methods_distillationv3 import make_batch, make_method
+from autovision.pretext.distillationv3 import DistillationV3Args
 
 
 class TestP0StringPaths:
@@ -37,7 +37,7 @@ class TestP0StringPaths:
 
 
 class TestP0DDPForward:
-    """P0: Method needs a forward for DDP wrapping."""
+    """P0: PretextRecipe needs a forward for DDP wrapping."""
 
     def test_forward_is_training_step(self):
         # The method is stateful (queue updates), so compare two identically
@@ -58,7 +58,7 @@ class TestP1MmapRefcount:
 
     def test_exists_path_increments_refcount(self, tmp_path, monkeypatch):
         monkeypatch.setenv("AUTOVISION_DATA_CACHE_DIR", str(tmp_path / "cache"))
-        from autovision._data.mmap_helpers import get_dataset_mmap_file
+        from autovision.data.mmap_helpers import get_dataset_mmap_file
 
         def items():
             return [{"filenames": f"i{i}"} for i in range(3)]
@@ -71,8 +71,8 @@ class TestP1MmapRefcount:
 
         assert json.loads(ref_file.read_text()) == 2
         # First consumer exits -> file survives for the second.
-        from autovision._data.mmap_helpers import _decrement_and_cleanup_if_zero
         from autovision._env import Env
+        from autovision.data.mmap_helpers import _decrement_and_cleanup_if_zero
 
         _decrement_and_cleanup_if_zero(seq1.path, reuse=Env.MMAP_REUSE_FILE.value)
         assert seq2.path.exists()
@@ -124,7 +124,7 @@ class TestP2SequenceContract:
 
 class TestP2EngineValidation:
     def test_zero_epochs_raises(self, tmp_path):
-        from autovision._engine import Engine
+        from autovision.engine import Engine
 
         engine = Engine()
         with pytest.raises(ValueError, match="max_epochs"):
@@ -151,7 +151,7 @@ class _EmptyLoader:
 
 
 def _tiny_detection_model():
-    from autovision._task_models.rtdetr_object_detection.task_model import (
+    from autovision.tasks.detection.rtdetr_object_detection.task_model import (
         RTDETRObjectDetection,
     )
 
@@ -211,7 +211,7 @@ class TestP0PostprocessCoordinateMapping:
 
     def test_perfect_val_path_scores_map_one(self):
         """End-to-end val-path sanity: perfect predictions → mAP 1.0."""
-        from autovision._metrics.map_evaluator import COCOMAPEvaluator
+        from autovision.metrics.map_evaluator import COCOMAPEvaluator
 
         model = _tiny_detection_model().eval()
         evaluator = COCOMAPEvaluator({0: "cat", 1: "dog"})
@@ -238,10 +238,10 @@ class TestP1EvalKeepsTinyGroundTruth:
     """The small-box filter is a train-time policy; eval must keep tiny GT."""
 
     def test_val_args_lift_min_bbox_size(self):
-        from autovision._transforms.detection_transforms.args import (
+        from autovision.augment.detection.args import (
             RTDETRDetectionTransformArgs,
         )
-        from autovision._transforms.detection_transforms.transform import (
+        from autovision.augment.detection.transform import (
             RTDETRDetectionTransform,
             build_val_transform_args,
         )
@@ -277,10 +277,10 @@ class TestP1EffectiveBatchLrScaling:
     includes gradient accumulation (v5 ran at sqrt(8/16) of the recipe LR)."""
 
     def _train_model(self):
-        from autovision._task_models.rtdetr_object_detection.config import (
+        from autovision.tasks.detection.rtdetr_object_detection.config import (
             RTDETRObjectDetectionTrainArgs,
         )
-        from autovision._task_models.rtdetr_object_detection.train_model import (
+        from autovision.tasks.detection.rtdetr_object_detection.train_model import (
             RTDETRObjectDetectionTrain,
         )
 
@@ -313,7 +313,7 @@ class TestP1EffectiveBatchLrScaling:
         train_json, val_json, images_dir = make_coco_dataset(
             tmp_path, num_images=4
         )
-        from autovision._task_models.rtdetr_object_detection.train_model import (
+        from autovision.tasks.detection.rtdetr_object_detection.train_model import (
             RTDETRObjectDetectionTrain,
         )
 
@@ -348,7 +348,7 @@ class TestP2DetectionExampleRendering:
     mean-color image (bright normalized pixels reach ~2.6)."""
 
     def test_normalized_batch_renders_structure(self, tmp_path):
-        from autovision._visualize.detection import save_detection_examples
+        from autovision.visualize.detection import save_detection_examples
 
         raw = torch.rand(3, 32, 32)
         mean, std = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]

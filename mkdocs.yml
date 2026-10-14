@@ -3,6 +3,7 @@ site_description: Enterprise visual model training framework
 theme: {name: material}
 nav:
   - Home: index.md
+  - Migration 0.2: migration-0.2.md
   - Design:
       - Overview: design/01-overview-and-architecture.md
       - API & Config: design/02-public-api-and-config.md
@@ -20,3 +21,4 @@ nav:
       - LT-DETR SSL Contrastive Head: design/14-ltdetr-ssl-contrastive-head.md
       - SIoU Box Regression: design/15-siou-box-regression-loss.md
       - Box-Aware Eraser: design/16-box-aware-eraser.md
+      - Clean Provenance Refactor: design/28-clean-provenance-refactor.md

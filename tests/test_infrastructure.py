@@ -71,7 +71,7 @@ class TestPackaging:
     def test_cli_entry_point_registered(self):
         config = tomllib.loads((ROOT / "pyproject.toml").read_text())
         scripts = config["project"].get("scripts", {})
-        assert scripts.get("autovision-cli") == "autovision._cli:cli_entrypoint"
+        assert scripts.get("autovision-cli") == "autovision.cli._app:cli_entrypoint"
 
     def test_optional_extras_declared(self):
         config = tomllib.loads((ROOT / "pyproject.toml").read_text())

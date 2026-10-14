@@ -1,27 +1,19 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
-"""Task model layer: bases + detection family."""
+"""Deprecated alias of :mod:`autovision.tasks` (compat shim).
 
-from autovision._task_models.rtdetr_object_detection import (
-    RTDETRObjectDetection,
-    RTDETRObjectDetectionTrain,
-    RTDETRObjectDetectionTrainArgs,
-)
-from autovision._task_models.task_model import TaskModel
-from autovision._task_models.task_model_io import (
-    BaseModelOutput,
-    ModelInputSpec,
-    TensorSpec,
-)
-from autovision._task_models.train_model import TaskStepResult, TrainModel
+Removed in the next minor release; import from the new location.
+"""
 
-__all__ = [
-    "BaseModelOutput",
-    "ModelInputSpec",
-    "RTDETRObjectDetection",
-    "RTDETRObjectDetectionTrain",
-    "RTDETRObjectDetectionTrainArgs",
-    "TaskModel",
-    "TaskStepResult",
-    "TensorSpec",
-    "TrainModel",
-]
+from __future__ import annotations
+
+import warnings
+
+warnings.warn(
+    "autovision._task_models is a deprecated alias; import from "
+    "autovision.tasks instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
+from autovision.tasks import *  # noqa: E402,F401,F403
+from autovision.tasks import __all__ as _exported  # noqa: E402,F401

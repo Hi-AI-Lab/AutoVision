@@ -3,9 +3,9 @@ import pytest
 import torch
 from torch import nn
 
-from autovision._models import (
-    EmbeddingModel,
-    ModelWrapper,
+from autovision.encoders import (
+    EncoderProtocol,
+    FeatureExtractor,
     get_package,
     get_package_from_model,
     get_wrapped_model,
@@ -14,13 +14,13 @@ from autovision._models import (
     parse_model_name,
     register_package,
 )
-from autovision._models.model_wrapper import ArchitectureInfoGettable
-from autovision._models.package_helpers import list_base_packages, list_packages
+from autovision.encoders.model_wrapper import ArchitectureInfoGettable
+from autovision.encoders.package_helpers import list_base_packages, list_packages
 from autovision.errors import UnknownModelError
 
 
 class TinyWrapper(nn.Module):
-    """Minimal ModelWrapper implementation used across tests."""
+    """Minimal EncoderProtocol implementation used across tests."""
 
     def __init__(self, dim: int = 8, spatial: int = 2, model_type: str = "convolutional"):
         super().__init__()
@@ -48,7 +48,7 @@ class TinyWrapper(nn.Module):
 
 class TestProtocols:
     def test_tiny_wrapper_is_model_wrapper(self):
-        assert isinstance(TinyWrapper(), ModelWrapper)
+        assert isinstance(TinyWrapper(), EncoderProtocol)
         assert isinstance(TinyWrapper(), ArchitectureInfoGettable)
 
     def test_missing_attrs_diagnostic(self):
@@ -101,7 +101,7 @@ class TestPackageRegistry:
         assert "torchvision/convnext_tiny" in names
 
     def test_duplicate_registration_raises(self):
-        from autovision._models.package import BasePackage
+        from autovision.encoders.package import BasePackage
 
         class Duplicate(BasePackage):
             name = "torchvision"
@@ -120,7 +120,7 @@ class TestPackageRegistry:
 class TestTorchvisionPackage:
     def test_build_resnet18(self):
         wrapper = get_wrapped_model("torchvision/resnet18")
-        assert isinstance(wrapper, ModelWrapper)
+        assert isinstance(wrapper, EncoderProtocol)
         model = wrapper.get_model()
         assert model.conv1.in_channels == 3
 
@@ -160,7 +160,7 @@ class TestTorchvisionPackage:
     def test_export_model(self, tmp_path):
         wrapper = get_wrapped_model("torchvision/resnet18")
         out = tmp_path / "exported" / "model.pt"
-        from autovision._models.torchvision.torchvision_package import (
+        from autovision.encoders.torchvision.torchvision_package import (
             TORCHVISION_PACKAGE,
         )
 
@@ -176,7 +176,7 @@ class TestWrappedModelResolution:
         assert get_wrapped_model(wrapper) is wrapper
 
     def test_nn_module_attributed(self):
-        from autovision._models.torchvision.torchvision_package import (
+        from autovision.encoders.torchvision.torchvision_package import (
             TORCHVISION_PACKAGE,
         )
 
@@ -192,14 +192,14 @@ class TestWrappedModelResolution:
         class Incomplete(nn.Module):
             pass
 
-        with pytest.raises(UnknownModelError, match="implement the ModelWrapper"):
+        with pytest.raises(UnknownModelError, match="implement the EncoderProtocol"):
             get_wrapped_model(Incomplete())
 
 
 class TestEmbeddingModel:
     def test_identity_head(self):
         wrapper = TinyWrapper(dim=8)
-        embedding_model = EmbeddingModel(wrapped_model=wrapper)
+        embedding_model = FeatureExtractor(wrapped_model=wrapper)
         assert embedding_model.embed_dim == 8
         x = torch.randn(2, 3, 16, 16)
         pooled = embedding_model(x, pool=True)
@@ -209,7 +209,7 @@ class TestEmbeddingModel:
 
     def test_projection_head(self):
         wrapper = TinyWrapper(dim=8)
-        embedding_model = EmbeddingModel(wrapped_model=wrapper, embed_dim=16)
+        embedding_model = FeatureExtractor(wrapped_model=wrapper, embed_dim=16)
         assert embedding_model.embed_dim == 16
         out = embedding_model(torch.randn(2, 3, 8, 8), pool=True)
         assert out.shape == (2, 16, 1, 1)

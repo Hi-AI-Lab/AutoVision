@@ -3,17 +3,17 @@
 
 import pytest
 import torch
+from tests.helpers_models import TinyWrapper
 
-from autovision._methods import get_method_cls, list_methods
-from autovision._methods.densecl import DenseCL, DenseCLArgs, DenseCLSGDArgs
-from autovision._methods.densecl.densecl import (
+from autovision.encoders import FeatureExtractor
+from autovision.pretext import get_method_cls, list_methods
+from autovision.pretext.densecl import DenseCL, DenseCLArgs, DenseCLSGDArgs
+from autovision.pretext.densecl.densecl import (
     _QUEUE_SIZE_BUCKETS,
     _DenseProjectionHead,
     _info_nce_with_queue,
 )
-from autovision._models import EmbeddingModel
-from autovision._scaling import ScalingInfo
-from tests.helpers_models import TinyWrapper
+from autovision.scaling import ScalingInfo
 
 pytestmark = pytest.mark.filterwarnings("ignore::UserWarning")
 
@@ -26,7 +26,7 @@ def make_method(**args_overrides) -> DenseCL:
     return DenseCL(
         method_args=args,
         optimizer_args=optimizer_args,
-        embedding_model=EmbeddingModel(
+        embedding_model=FeatureExtractor(
             wrapped_model=TinyWrapper(dim=8), embed_dim=8
         ),
         global_batch_size=8,

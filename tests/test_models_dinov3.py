@@ -17,8 +17,8 @@ import pytest
 import torch
 from torch import nn
 
-from autovision._models import get_wrapped_model
-from autovision._models.dinov3 import (
+from autovision.encoders import get_wrapped_model
+from autovision.encoders.dinov3 import (
     DINOV3_PACKAGE,
     TransformersDinov3ConvNextWrapper,
     TransformersDinov3ViTWrapper,
@@ -31,7 +31,7 @@ class TestGating:
     def test_support_matches_installed_transformers(self):
         # The real transformers may or may not ship DINOv3 classes; the
         # package must agree with whatever is installed.
-        from autovision._models.dinov3.dinov3_package import _dinov3_classes
+        from autovision.encoders.dinov3.dinov3_package import _dinov3_classes
 
         has_support = _dinov3_classes() is not None
         names = DINOV3_PACKAGE.list_model_names()
@@ -41,7 +41,7 @@ class TestGating:
             assert "dinov3/convnext-tiny" in names
 
     def test_no_support_raises_on_get_model(self):
-        from autovision._models.dinov3.dinov3_package import _dinov3_classes
+        from autovision.encoders.dinov3.dinov3_package import _dinov3_classes
 
         if _dinov3_classes() is not None:
             pytest.skip("installed transformers ships DINOv3")
@@ -150,15 +150,39 @@ def fake_dinov3_transformers(monkeypatch):
 class TestWithInjectedSupport:
     def test_list_model_names(self, fake_dinov3_transformers):
         names = DINOV3_PACKAGE.list_model_names()
-        assert len(names) == 24  # 12 models x (pretrained, -notpretrained)
+        # 12 full pairs (pretrained + -notpretrained) + the two distilled
+        # tiny models, which only resolve as -notpretrained (no public HF
+        # checkpoint).
+        assert len(names) == 26
         assert names == sorted(names)
         assert "dinov3/vits16" in names
         assert "dinov3/vits16-notpretrained" in names
         assert "dinov3/convnext-tiny" in names
         assert "dinov3/vitl16-sat493m" in names
+        assert "dinov3/vitt16-notpretrained" in names
+        assert "dinov3/vitt16plus-notpretrained" in names
+        assert "dinov3/vitt16" not in names
+        assert "dinov3/vitt16plus" not in names
+
+    def test_vitt16_no_public_checkpoint_raises(self, fake_dinov3_transformers):
+        with pytest.raises(ValueError, match="vitt16-notpretrained"):
+            DINOV3_PACKAGE.get_model("vitt16", load_weights=True)
+
+    def test_vitt16_notpretrained_build(self, fake_dinov3_transformers):
+        model = DINOV3_PACKAGE.get_model(
+            "vitt16-notpretrained", load_weights=False
+        )
+        assert isinstance(model, FakeDinov3ViTModel)
+        assert model.config.hidden_size == 192
+        assert model.config.num_register_tokens == 4
+        model = DINOV3_PACKAGE.get_model(
+            "vitt16plus-notpretrained", load_weights=False
+        )
+        assert model.config.hidden_size == 192
+        assert model.config.intermediate_size == 1152
 
     def test_registration_before_custom(self, fake_dinov3_transformers):
-        from autovision._models.package_helpers import list_base_packages
+        from autovision.encoders.package_helpers import list_base_packages
 
         names = [p.name for p in list_base_packages()]
         assert names.index("dinov3") < names.index("custom")
@@ -225,8 +249,10 @@ class TestWithInjectedSupport:
     def test_pretrained_uses_from_pretrained(
         self, fake_dinov3_transformers, tmp_path, monkeypatch
     ):
-        # The verified-loading flow: the repo id goes to the download layer,
-        # and from_pretrained receives the verified local snapshot dir.
+        # The verified-loading flow (behind the D1-a opt-in): the repo id
+        # goes to the download layer, and from_pretrained receives the
+        # verified local snapshot dir.
+        monkeypatch.setenv("AUTOVISION_DINOV3_WEIGHTS", "1")
         requested = []
         downloaded = []
 
@@ -242,19 +268,19 @@ class TestWithInjectedSupport:
         (snapshot / "model.safetensors").write_bytes(b"weights")
         # Force the lfs-metadata verification tier: an unpinned manifest
         # entry, independent of what the real manifest has pinned.
-        from autovision._models.weight_verification import WeightArtifact
+        from autovision.encoders.weight_verification import WeightArtifact
 
         monkeypatch.setattr(
-            "autovision._models.weight_verification.get_weight_artifact",
+            "autovision.encoders.weight_verification.get_weight_artifact",
             lambda repo_id: WeightArtifact(repo_id=repo_id, license="apache-2.0"),
         )
         monkeypatch.setattr(
-            "autovision._models.weight_verification._download_snapshot",
+            "autovision.encoders.weight_verification._download_snapshot",
             lambda repo_id, revision, *a, **k: downloaded.append(repo_id)
             or snapshot,
         )
         monkeypatch.setattr(
-            "autovision._models.weight_verification._lfs_sha256",
+            "autovision.encoders.weight_verification._lfs_sha256",
             lambda repo_id, revision: {
                 "model.safetensors": hashlib.sha256(b"weights").hexdigest()
             },
@@ -278,3 +304,64 @@ class TestWithInjectedSupport:
         out = tmp_path / "exported" / "model.pt"
         DINOV3_PACKAGE.export_model(wrapper, out, log_example=False)
         assert out.exists()
+
+
+# ── D1-a: user-held DINOv3 weights gate ─────────────────────────────────
+
+
+class TestD1aWeightsGate:
+    """Pretrained DINOv3 weights are user-held (design doc 28 §6.1, D1-a):
+    nothing is fetched without an explicit per-environment opt-in."""
+
+    def test_pretrained_refused_without_opt_in(
+        self, fake_dinov3_transformers, monkeypatch
+    ):
+        from autovision.encoders.dinov3 import dinov3_package
+
+        monkeypatch.delenv(dinov3_package.DINOV3_WEIGHTS_ENV, raising=False)
+
+        def _must_not_run(*args, **kwargs):
+            raise AssertionError("weight download attempted without opt-in")
+
+        monkeypatch.setattr(dinov3_package, "load_pretrained_verified", _must_not_run)
+        with pytest.raises(PermissionError, match="AUTOVISION_DINOV3_WEIGHTS"):
+            DINOV3_PACKAGE.get_model("vits16", load_weights=True)
+
+    def test_opt_in_routes_to_verified_loader(
+        self, fake_dinov3_transformers, monkeypatch
+    ):
+        from autovision.encoders.dinov3 import dinov3_package
+
+        monkeypatch.setenv(dinov3_package.DINOV3_WEIGHTS_ENV, "1")
+        sentinel = object()
+        seen: dict[str, str] = {}
+
+        def _fake_load(model_cls, repo_id, config_kwargs):
+            seen["repo"] = repo_id
+            return sentinel
+
+        monkeypatch.setattr(dinov3_package, "load_pretrained_verified", _fake_load)
+        assert DINOV3_PACKAGE.get_model("vits16", load_weights=True) is sentinel
+        assert seen["repo"] == "facebook/dinov3-vits16-pretrain-lvd1689m"
+
+    def test_opt_in_flag_parsing(self, monkeypatch):
+        from autovision.encoders.dinov3.dinov3_package import (
+            DINOV3_WEIGHTS_ENV,
+            dinov3_weights_opt_in,
+        )
+
+        for value in ("1", "yes", "TRUE", " on "):
+            monkeypatch.setenv(DINOV3_WEIGHTS_ENV, value)
+            assert dinov3_weights_opt_in(), value
+        for value in ("", "0", "no", "false", "  "):
+            monkeypatch.setenv(DINOV3_WEIGHTS_ENV, value)
+            assert not dinov3_weights_opt_in(), value
+        monkeypatch.delenv(DINOV3_WEIGHTS_ENV)
+        assert not dinov3_weights_opt_in()
+
+    def test_notpretrained_never_gated(self, fake_dinov3_transformers, monkeypatch):
+        from autovision.encoders.dinov3 import dinov3_package
+
+        monkeypatch.delenv(dinov3_package.DINOV3_WEIGHTS_ENV, raising=False)
+        model = DINOV3_PACKAGE.get_model("vits16-notpretrained", load_weights=False)
+        assert isinstance(model, FakeDinov3ViTModel)

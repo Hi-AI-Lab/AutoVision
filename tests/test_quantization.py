@@ -8,13 +8,13 @@ import pytest
 import torch
 from PIL import Image
 
-from autovision._export import (
+from autovision.export import (
     Int8CalibrationReader,
     Int8QuantizationConfig,
     image_folder_calibration_reader,
     quantize_onnx_int8,
 )
-from autovision._task_models import (
+from autovision.tasks import (
     RTDETRObjectDetection,
 )
 

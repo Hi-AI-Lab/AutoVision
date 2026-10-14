@@ -15,7 +15,7 @@ from torch import nn
 
 class TestLoggers:
     def test_jsonl_always_available(self, tmp_path):
-        from autovision._loggers import get_loggers
+        from autovision.observability.loggers import get_loggers
 
         loggers = get_loggers(None, tmp_path)
         assert len(loggers) >= 1
@@ -40,7 +40,7 @@ class TestLoggers:
 
     def test_tensorboard_lazy_missing_warns(self, tmp_path, monkeypatch, caplog):
         self._hide_tensorboard(monkeypatch)
-        from autovision._loggers import get_loggers
+        from autovision.observability.loggers import get_loggers
 
         with caplog.at_level("INFO"):
             loggers = get_loggers(None, tmp_path)  # default: skip silently
@@ -48,13 +48,13 @@ class TestLoggers:
 
     def test_tensorboard_explicit_missing_raises(self, tmp_path, monkeypatch):
         self._hide_tensorboard(monkeypatch)
-        from autovision._loggers import get_loggers
+        from autovision.observability.loggers import get_loggers
 
         with pytest.raises(ImportError, match="tensorboard"):
             get_loggers({"tensorboard": {}}, tmp_path)
 
     def test_unknown_logger_raises(self, tmp_path):
-        from autovision._loggers import get_loggers
+        from autovision.observability.loggers import get_loggers
 
         with pytest.raises(ValueError, match="Unknown loggers"):
             get_loggers({"neptune": {}}, tmp_path)
@@ -99,7 +99,7 @@ class TestLoggers:
         fake_wandb.finish = lambda: None
         monkeypatch.setitem(sys.modules, "wandb", fake_wandb)
 
-        from autovision._loggers import get_loggers
+        from autovision.observability.loggers import get_loggers
 
         loggers = get_loggers({"mlflow": {}, "wandb": {}}, tmp_path)
         names = [type(lg).__name__ for lg in loggers]
@@ -114,8 +114,9 @@ class TestLoggers:
 
     def test_wired_into_pretrain(self, tmp_path):
         """pretrain(loggers=...) must honor the spec (JSONL only)."""
-        from autovision import pretrain
         from tests.conftest import create_images
+
+        from autovision import pretrain
 
         create_images(tmp_path / "images", num_images=8, size=(64, 64))
         result = pretrain(
@@ -134,7 +135,7 @@ class TestTelemetry:
     def test_disabled_by_default(self, monkeypatch):
         import urllib.request
 
-        from autovision._events import track_event
+        from autovision.observability.events import track_event
 
         def _fail(*args, **kwargs):
             raise AssertionError("network must not be touched")
@@ -148,7 +149,7 @@ class TestTelemetry:
         monkeypatch.setenv(
             "AUTOVISION_TELEMETRY_ENDPOINT", str(tmp_path / "endpoint")
         )  # invalid URL scheme -> transport error path is swallowed
-        from autovision._events import tracker
+        from autovision.observability.events import tracker
 
         sent = {}
         monkeypatch.setattr(tracker, "_sender", lambda payload, endpoint: sent.update(
@@ -167,7 +168,7 @@ class TestTelemetry:
         monkeypatch.setenv("AUTOVISION_TELEMETRY", "1")
         monkeypatch.setenv("AUTOVISION_CACHE_DIR", str(tmp_path))
         monkeypatch.setenv("AUTOVISION_TELEMETRY_ENDPOINT", str(tmp_path / "e"))
-        from autovision._events import tracker
+        from autovision.observability.events import tracker
 
         monkeypatch.setattr(tracker, "_sender", lambda *a: None)
         tracker.track_event("evt", {})
@@ -177,7 +178,7 @@ class TestTelemetry:
     def test_user_id_persisted(self, monkeypatch, tmp_path):
         monkeypatch.setenv("AUTOVISION_TELEMETRY", "1")
         monkeypatch.setenv("AUTOVISION_CACHE_DIR", str(tmp_path))
-        from autovision._events import tracker
+        from autovision.observability.events import tracker
 
         uid1 = tracker._anonymous_user_id()
         uid2 = tracker._anonymous_user_id()
@@ -189,12 +190,13 @@ class TestTelemetry:
 
 class TestDebug:
     def test_nan_capture_snapshot_and_replay(self, tmp_path):
-        from autovision._debug import (
+        from tests.test_methods_distillationv3 import make_method
+
+        from autovision.debug import (
             NaNCaptureMonitor,
             NaNDetectedError,
             load_nan_capture,
         )
-        from tests.test_methods_distillationv3 import make_method
 
         model = make_method()
         monitor = NaNCaptureMonitor(
@@ -220,8 +222,9 @@ class TestDebug:
         assert snapshot["torch_rng_state"].numel() > 0
 
     def test_nan_gradient_check(self, tmp_path):
-        from autovision._debug import NaNCaptureMonitor, NaNDetectedError
         from tests.test_methods_distillationv3 import make_method
+
+        from autovision.debug import NaNCaptureMonitor, NaNDetectedError
 
         model = make_method()
         monitor = NaNCaptureMonitor(model, tmp_path)
@@ -236,8 +239,9 @@ class TestDebug:
             monitor.check_gradients(model)
 
     def test_finite_gradients_pass(self, tmp_path):
-        from autovision._debug import NaNCaptureMonitor
         from tests.test_methods_distillationv3 import make_method
+
+        from autovision.debug import NaNCaptureMonitor
 
         model = make_method()
         monitor = NaNCaptureMonitor(model, tmp_path)
@@ -248,7 +252,7 @@ class TestDebug:
         monitor.check_gradients(model)  # must not raise
 
     def test_underflow_overflow_hooks(self, tmp_path):
-        from autovision._debug import DebugUnderflowOverflow
+        from autovision.debug import DebugUnderflowOverflow
 
         model = nn.Sequential(nn.Conv2d(3, 4, 3), nn.ReLU())
         monitor = DebugUnderflowOverflow(model, out_dir=tmp_path)
@@ -262,7 +266,7 @@ class TestDebug:
         assert path.exists()
 
     def test_underflow_abort(self, tmp_path):
-        from autovision._debug import DebugUnderflowOverflow
+        from autovision.debug import DebugUnderflowOverflow
 
         model = nn.Sequential(nn.Conv2d(3, 4, 3))
         monitor = DebugUnderflowOverflow(
@@ -277,13 +281,14 @@ class TestDebug:
     def test_debug_args_wired_into_task_engine(self, tmp_path):
         """debug_args flow into TaskEngine (snapshot behavior is covered by
         the monitor unit tests above)."""
-        from autovision import train_object_detection
         from tests.test_train_object_detection import (
             data_config,
             make_coco_dataset,
             model_args,
             transform_args,
         )
+
+        from autovision import train_object_detection
 
         train_json, val_json, images_dir = make_coco_dataset(tmp_path)
         result = train_object_detection(
@@ -310,7 +315,7 @@ class TestVisualization:
         assert path.exists() and path.stat().st_size > 0
 
     def test_save_detection_examples(self, tmp_path):
-        from autovision._visualize import save_detection_examples
+        from autovision.visualize import save_detection_examples
 
         batch = {
             "image": torch.rand(2, 3, 64, 64),
@@ -328,8 +333,9 @@ class TestVisualization:
 
 class TestEmbed:
     def test_full_cycle(self, tmp_path):
-        from autovision import embed, pretrain
         from tests.conftest import create_images
+
+        from autovision import embed, pretrain
 
         create_images(tmp_path / "images", num_images=8, size=(64, 64))
         result = pretrain(
@@ -345,8 +351,9 @@ class TestEmbed:
         assert payload["embeddings"].shape[0] == 8
 
     def test_csv_format(self, tmp_path):
-        from autovision import embed, pretrain
         from tests.conftest import create_images
+
+        from autovision import embed, pretrain
 
         create_images(tmp_path / "images", num_images=8, size=(64, 64))
         result = pretrain(
@@ -441,7 +448,7 @@ class TestTorchCompile:
 class TestAdamW8bit:
     def test_missing_package_raises(self):
         pytest.importorskip.__doc__  # keep importorskip semantics documented
-        from autovision._optim.adamw8bit_args import AdamW8bitArgs
+        from autovision.optim.adamw8bit_args import AdamW8bitArgs
 
         args = AdamW8bitArgs()
         try:
@@ -454,7 +461,7 @@ class TestAdamW8bit:
             args.get_optimizer(params=[{"params": []}], lr_scale=1.0)
 
     def test_registered_in_lookup(self):
-        from autovision._optim import get_optimizer_args_cls
+        from autovision.optim import get_optimizer_args_cls
 
         assert get_optimizer_args_cls("adamw8bit").__name__ == "AdamW8bitArgs"
 
@@ -466,7 +473,7 @@ class TestCLI:
     def test_list_methods(self, capsys):
         from typer.testing import CliRunner
 
-        from autovision._cli import app
+        from autovision.cli._app import app
 
         runner = CliRunner()
         result = runner.invoke(app, ["list-methods"])
@@ -476,7 +483,7 @@ class TestCLI:
     def test_list_models(self):
         from typer.testing import CliRunner
 
-        from autovision._cli import app
+        from autovision.cli._app import app
 
         runner = CliRunner()
         result = runner.invoke(app, ["list-models"])
@@ -484,10 +491,10 @@ class TestCLI:
         assert "torchvision/resnet18" in result.output
 
     def test_pretrain_smoke(self, tmp_path):
+        from tests.conftest import create_images
         from typer.testing import CliRunner
 
-        from autovision._cli import app
-        from tests.conftest import create_images
+        from autovision.cli._app import app
 
         create_images(tmp_path / "images", num_images=8, size=(64, 64))
         runner = CliRunner()
@@ -505,14 +512,14 @@ class TestCLI:
     def test_bad_kwargs_message(self):
         from typer.testing import CliRunner
 
-        from autovision._cli import app
+        from autovision.cli._app import app
 
         runner = CliRunner()
         result = runner.invoke(app, ["pretrain", "novalue"])
         assert result.exit_code != 0
 
     def test_jsonl_args_forwarded(self, tmp_path):
-        from autovision._loggers import get_loggers
+        from autovision.observability.loggers import get_loggers
 
         loggers = get_loggers({"jsonl": {"flush_logs_every_n_steps": 5}}, tmp_path)
         assert len(loggers) >= 1  # jsonl built from args without error

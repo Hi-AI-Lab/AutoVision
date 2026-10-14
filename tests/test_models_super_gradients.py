@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import pytest
 
-from autovision._models.package_helpers import get_package
-from autovision._models.super_gradients import SUPER_GRADIENTS_PACKAGE
-from autovision._models.super_gradients.super_gradients_package import (
+from autovision.encoders.package_helpers import get_package
+from autovision.encoders.super_gradients import SUPER_GRADIENTS_PACKAGE
+from autovision.encoders.super_gradients.super_gradients_package import (
     CustomizableDetectorModelWrapper,
     _load_customizable_detector_cls,
 )

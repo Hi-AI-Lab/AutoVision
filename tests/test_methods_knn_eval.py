@@ -7,17 +7,17 @@ import pytest
 import torch
 from torch import nn
 
-from autovision._methods.knn_eval import (
+from autovision.augment.transform_args import (
+    MethodTransformArgs,
+    NormalizeArgs,
+    RandomResizeArgs,
+)
+from autovision.pretext.knn_eval import (
     KnnEvalArgs,
     KnnEvalRunner,
     attach_knn_eval_runner,
     knn_accuracy,
     labels_for_filenames,
-)
-from autovision._transforms.transform_args import (
-    MethodTransformArgs,
-    NormalizeArgs,
-    RandomResizeArgs,
 )
 
 pytestmark = pytest.mark.filterwarnings("ignore::UserWarning")
@@ -195,7 +195,7 @@ class TestKnnEvalRunner:
 
 class TestAttachKnnEvalRunner:
     def _make_method_args(self, **method_args_overrides):
-        from autovision._methods.distillationv3 import DistillationV3Args
+        from autovision.pretext.distillationv3 import DistillationV3Args
 
         overrides = {"queue_size": 16}
         overrides.update(method_args_overrides)
@@ -267,8 +267,9 @@ class TestAttachKnnEvalRunner:
 
 class TestPretrainKnnIntegration:
     def test_pretrain_logs_knn_metrics(self, tmp_path: Path):
-        from autovision import pretrain
         from tests.conftest import create_images
+
+        from autovision import pretrain
 
         image_dir = tmp_path / "data"
         create_images(image_dir, num_images=8, size=(32, 32))

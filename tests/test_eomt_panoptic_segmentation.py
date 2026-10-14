@@ -9,19 +9,19 @@ import torch
 
 from autovision import load_task_model as load_model
 from autovision import train_panoptic_segmentation
-from autovision._data.mask_panoptic_segmentation_dataset import (
+from autovision.data.mask_panoptic_segmentation_dataset import (
     MaskPanopticSegmentationDataset,
     list_panoptic_pairs,
     load_panoptic_segments,
     split_panoptic_classes,
 )
-from autovision._metrics.panoptic_segmentation import PanopticMetricCollector
-from autovision._task_models.dinov2_eomt_panoptic_segmentation import (
+from autovision.metrics.panoptic_segmentation import PanopticMetricCollector
+from autovision.tasks.dinov2_eomt_panoptic_segmentation import (
     Dinov2EomtPanopticSegmentation,
     Dinov2EomtPanopticSegmentationTrain,
     Dinov2EomtPanopticSegmentationTrainArgs,
 )
-from autovision._task_models.eomt.postprocess import panoptic_segmentation_decode
+from autovision.tasks.eomt.postprocess import panoptic_segmentation_decode
 
 MODEL_KWARGS = {
     "image_size": 64,

@@ -5,10 +5,12 @@ from pathlib import Path
 
 import pytest
 import torch
+from tests.helpers_models import TinyWrapper
 from torch import nn
 
-from autovision._methods import Method, TrainingStepResult, get_method_cls, list_methods
-from autovision._methods.distillationv3 import (
+from autovision.encoders import FeatureExtractor
+from autovision.pretext import PretextRecipe, StepOutput, get_method_cls, list_methods
+from autovision.pretext.distillationv3 import (
     DistillationV3,
     DistillationV3AdamWArgs,
     DistillationV3Args,
@@ -16,9 +18,7 @@ from autovision._methods.distillationv3 import (
     DistillationV3Transform,
     DistillationV3TransformArgs,
 )
-from autovision._models import EmbeddingModel
-from autovision._scaling import ScalingInfo
-from tests.helpers_models import TinyWrapper
+from autovision.scaling import ScalingInfo
 
 # ── registry ────────────────────────────────────────────────────────────
 
@@ -116,7 +116,7 @@ def make_method(
     optimizer_args.resolve_auto(
         wrapped_model=TinyWrapper(dim=teacher_dim, model_type="convolutional")
     )
-    student = EmbeddingModel(
+    student = FeatureExtractor(
         wrapped_model=TinyWrapper(dim=student_dim), embed_dim=embed_dim
     )
     teacher_wrapper = TinyWrapper(dim=teacher_dim)
@@ -140,7 +140,7 @@ def make_batch(batch_size: int = 2, size: int = 16):
 class TestDistillationV3Method:
     def test_structure(self):
         method = make_method()
-        assert isinstance(method, Method)
+        assert isinstance(method, PretextRecipe)
         assert method.teacher_embedding_dim == 8
         assert method.teacher_queue.shape == (16, 8)
         assert method.student_projection_head_global.in_features == 16
@@ -167,7 +167,7 @@ class TestDistillationV3Method:
         method = make_method()
         batch = make_batch()
         result = method.training_step_impl(batch, batch_idx=0)
-        assert isinstance(result, TrainingStepResult)
+        assert isinstance(result, StepOutput)
         assert result.loss.ndim == 0
         assert torch.isfinite(result.loss)
         assert set(result.log_dict) == {

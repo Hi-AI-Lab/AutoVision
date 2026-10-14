@@ -3,17 +3,17 @@
 
 import pytest
 import torch
+from tests.helpers_models import TinyMultiscaleWrapper
 
-from autovision._methods import get_method_cls, list_methods
-from autovision._methods.distillationv2 import (
+from autovision.encoders import FeatureExtractor
+from autovision.pretext import get_method_cls, list_methods
+from autovision.pretext.distillationv2 import (
     DistillationV2,
     DistillationV2Args,
     DistillationV2LARSArgs,
     DistillationV2TransformArgs,
 )
-from autovision._models import EmbeddingModel
-from autovision._scaling import ScalingInfo
-from tests.helpers_models import TinyMultiscaleWrapper
+from autovision.scaling import ScalingInfo
 
 pytestmark = pytest.mark.filterwarnings("ignore::UserWarning")
 
@@ -31,7 +31,7 @@ def make_method(
     optimizer_args.resolve_auto(
         wrapped_model=TinyMultiscaleWrapper(dim=teacher_dim)
     )
-    student = EmbeddingModel(
+    student = FeatureExtractor(
         wrapped_model=TinyMultiscaleWrapper(dim=student_dim, grid=student_grid),
         embed_dim=student_dim,
     )

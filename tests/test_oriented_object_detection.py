@@ -9,27 +9,27 @@ from pathlib import Path
 
 import pytest
 import torch
+from tests.conftest import create_image
 from torchvision.ops import box_iou
 
-from autovision._data.yolo_oriented_object_detection_dataset import (
+from autovision.augment.detection.args import (
+    OrientedObjectDetectionTransformArgs,
+)
+from autovision.augment.detection.oriented_transform import (
+    OrientedObjectDetectionCollateFunction,
+    OrientedObjectDetectionTransform,
+    build_oriented_val_transform_args,
+)
+from autovision.data.yolo_oriented_object_detection_dataset import (
     OrientedObjectDetectionDataset,
     YOLOOrientedObjectDetectionDataArgs,
 )
-from autovision._task_models.object_detection_components.obb import (
+from autovision.tasks.detection.components.obb import (
     obb_nms,
     rotated_iou_matrix,
     xywhr_to_xyxyxyxy,
     xyxyxyxy_to_xywhr,
 )
-from autovision._transforms.detection_transforms.args import (
-    OrientedObjectDetectionTransformArgs,
-)
-from autovision._transforms.detection_transforms.oriented_transform import (
-    OrientedObjectDetectionCollateFunction,
-    OrientedObjectDetectionTransform,
-    build_oriented_val_transform_args,
-)
-from tests.conftest import create_image
 
 # A square with corners (8,8),(24,8),(24,24),(8,24) in a 64x64 image.
 SQ_NORM = [0.125, 0.125, 0.375, 0.125, 0.375, 0.375, 0.125, 0.375]
@@ -217,7 +217,7 @@ class TestOrientedTransform:
 
     def test_horizontal_flip_mirrors_x(self, monkeypatch):
         monkeypatch.setattr(
-            "autovision._transforms.detection_transforms.oriented_transform.random.random",
+            "autovision.augment.detection.oriented_transform.random.random",
             lambda: 0.0,
         )
         args = _val_args()
@@ -229,7 +229,7 @@ class TestOrientedTransform:
 
     def test_vertical_flip_mirrors_y(self, monkeypatch):
         monkeypatch.setattr(
-            "autovision._transforms.detection_transforms.oriented_transform.random.random",
+            "autovision.augment.detection.oriented_transform.random.random",
             lambda: 0.0,
         )
         args = _val_args()

@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
 import pytest
 
-from autovision._commands.common_helpers import (
+from autovision.cli.common_helpers import (
     get_global_batch_size,
     get_num_workers,
     get_out_dir,

@@ -6,14 +6,14 @@
 
 | 子系统 | 模块 | 对应设计章节 |
 |---|---|---|
-| 配置系统 | `_configs/`(PydanticConfig 严格校验 + did-you-mean 报错美化 + Registry) | §5 |
-| 优化器 | `_optim/`(AdamW/SGD/自研 LARS、无 weight-decay 参数规则、按架构 auto wd)、`_scheduler.py`(CosineWarmup) | §7.1 |
-| 模型层 | `_models/`(ModelWrapper 协议族、包注册表 + custom 兜底、EmbeddingModel;**11 个包**:torchvision、**timm(架构前缀表 → auto wd)**、**super_gradients(CustomizableDetector)**、ultralytics(AGPL 隔离)、**dinov2(transformers)、dinov3(transformers 门控)**、rfdetr(transformers 门控)、rtdetr wrapper) | §6 |
-| 数据层 | `_data/`(图像/ImageFolder 分类/成对分割数据集、mmap 文件清单:引用计数/原子发布/碰撞守卫/数据指纹) | §9.1–9.3 |
-| 变换 | `_transforms/`(ViewTransform 管线、MethodTransform 多视图协议、参数模型 + auto 解析) | §9.5 |
-| 方法层 | `_methods/`(**DistillationV3** 全规格、**SimCLR**(自研 NT-Xent)、**DINO**(EMA 教师 + 中心化损失 + 多裁剪 + 动量/温度/权重衰减三调度 + 末层冻结)、**kNN 探针**(`method_args.knn_eval`)) | §7 |
-| 运行时 | `_engine/`(step 循环、预训练与**任务训练双 DDP**、混合精度、原子 checkpoint、resume、`on_before_optimizer_step` 钩子)、`_checkpoint.py`(自描述格式) | §10 |
-| 任务层 | 检测(RT-DETRv2 + **LT-DETR SSL 骨干微调**:`ltdetr/dinov2-vits14` 等 17 变体,ViT 中间层 tap + STA 空间先验 + 骨干/detector 分组 LR,打通自家预训练骨干 → 检测微调闭环;D-FINE 解码器与 ECViT 骨干在路线图)、**分类(ImageFolder + top-k 指标)**、**分割(线性头 + mIoU/混淆矩阵)**;任务指标支持跨 rank 状态汇聚(DDP 验证) | §8 |
+| 配置系统 | `config/`(PydanticConfig 严格校验 + did-you-mean 报错美化 + Registry) | §5 |
+| 优化器 | `optim/`(AdamW/SGD/自研 LARS、无 weight-decay 参数规则、按架构 auto wd)、`optim/schedulers.py`(CosineWarmup) | §7.1 |
+| 模型层 | `encoders/`(ModelWrapper 协议族、包注册表 + custom 兜底、EmbeddingModel;**11 个包**:torchvision、**timm(架构前缀表 → auto wd)**、**super_gradients(CustomizableDetector)**、ultralytics(AGPL 隔离)、**dinov2(transformers)、dinov3(transformers 门控; 权重用户自持 D1-a)**、rfdetr(transformers 门控)、rtdetr wrapper) | §6 |
+| 数据层 | `data/`(图像/ImageFolder 分类/成对分割数据集、mmap 文件清单:引用计数/原子发布/碰撞守卫/数据指纹) | §9.1–9.3 |
+| 变换 | `augment/`(ViewTransform 管线、MethodTransform 多视图协议、参数模型 + auto 解析) | §9.5 |
+| 方法层 | `pretext/`(**DistillationV3** 全规格、**SimCLR**(自研 NT-Xent)、**DINO**(EMA 教师 + 中心化损失 + 多裁剪 + 动量/温度/权重衰减三调度 + 末层冻结)、**kNN 探针**(`method_args.knn_eval`)) | §7 |
+| 运行时 | `engine/`(step 循环、预训练与**任务训练双 DDP**、混合精度、原子 checkpoint、resume、`on_before_optimizer_step` 钩子)、`_checkpoint.py`(自描述格式) | §10 |
+| 任务层 | 检测(RT-DETRv2 + **AV-DETR SSL 骨干微调**:`avdetr/dinov2-vits14` 等 37 变体(原 LT-DETR,R16 更名),ViT 中间层 tap + STA 空间先验 + 骨干/detector 分组 LR,打通自家预训练骨干 → 检测微调闭环;D-FINE 解码器与 ECViT 骨干在路线图)、**分类(ImageFolder + top-k 指标)**、**分割(线性头 + mIoU/混淆矩阵)**;任务指标支持跨 rank 状态汇聚(DDP 验证) | §8 |
 | 部署 | ONNX(FP16 黑名单 + 数值对拍门禁)、**TensorRT 导出**(batch-only profile、attention FP32 强制)、**benchmark**(torch/ONNX/TensorRT backend + 可选 parity 门禁) | §12 |
 | 命令/API | `pretrain`/`train_object_detection`/`train_image_classification`/`train_semantic_segmentation`/`embed`/`benchmark`/`list_models`/`list_methods`/`load_*` | §4 |
 
@@ -77,7 +77,7 @@ autovision.benchmark("rtdetr/resnet18", out="bench/", num_classes=2,
 ```
 
 大图切片推理(SAHI):瓦片合并组件见
-`autovision._task_models.object_detection_components.sahi`
+`autovision.tasks.detection.components.sahi`
 (`tile_image` + `combine_object_detection_tiles`);检测类任务模型提供
 `predict_sahi(image, tile_size, overlap, threshold, ...)` 便捷入口
 (默认 tile 取模型输入尺寸、全图 resize 视图作全局瓦片一并推理)。

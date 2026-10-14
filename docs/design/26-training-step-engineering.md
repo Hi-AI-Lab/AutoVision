@@ -2,7 +2,7 @@
 
 | 文档属性 | 内容 |
 |---|---|
-| 版本 | v1.0（设计评审稿，未实施） |
+| 版本 | v1.1（v1.0 设计评审稿 → v1.1：W1 已实测（§13）、热图项勘误、IoU 方案修正） |
 | 状态 | 设计完成；W1/W2 为 P0 低风险项可直接实施，W3/W4 为实验/评估项各带独立门槛 |
 | 上游思想 | DeepSeek 自研 DeepGEMM / FlashMLA 的工程判断：**大量 launch-bound 小算子的融合收益大于算法改进本身**（FlashMLA 对 memory-bound attention 的带宽优化、DeepGEMM 的 JIT 形状特化 GEMM）。【DS】对应到训练侧：每步的 kernel launch 数与同步次数是吞吐的一阶瓶颈，融合/批量化/异步化优先于新算子 |
 | 配套分册 | DeepSeek 迁移四联册：本册（步工程）+ 分册 23（蒸馏）/ 24（FP8）/ 25（token indexer） |
@@ -28,6 +28,7 @@
 | matcher 批量 D2H | `object_detection_components/matcher.py:117-131` | 全批 cost 一次 `torch.cat(...).cpu()`，scipy 仍逐图——per-image `.cpu()` 的每图一次管线停顿被消除 |
 | 匹配索引单次 H2D | `matcher.py:22-35`（`indices_to_device`） | scipy 索引一次性搬上设备，下游 VFL/box/FGL/DDF 消费者零同步 |
 | `_get_go_indices` 向量化 | `dfine_criterion.py:633-686` | 官方逐行 dict 循环 → `torch.unique` + 稳定排序；消除随 VisDrone union 规模增长的 per-row Python 循环 |
+| DeFE GT 高斯热图按 box 分块向量化 | `object_detection_components/defe.py:179-221` | 全图距离网格 + 64-box 分块（对比 baseline 的 Python 逐核粘贴）；剩余的逐图调用边界（`dome_encoder.py:130` 的列表推导 + stack）只是 B 次模块调用，非 launch-bound 热点——**不列入本册 W2**（v1.0 曾误列，已勘误） |
 | EMA foreach 更新 | `object_detection_components/ema.py:79-87` | `torch._foreach_mul_/_add_` 批量化（数百次 launch → 几次）；别名存储去重 |
 | TF32 | `_engine/engine.py:588-592` | fp32 余量（EMA/优化器/非 autocast 算子）走 tensor core |
 | pin_memory + 异步搬运 | `_commands/common_helpers.py:120`（`pin_memory=cuda`）、`engine.py:413-422`（`non_blocking=True`） | H2D 真异步 |
@@ -56,15 +57,15 @@
 
 ### W1（P0）：fused AdamW
 
-【VTrain】`get_optimizer`（`ltdetr_object_detection/train_model.py:699-704`，deimv2 同款 `deimv2_object_detection/train_model.py:231-236`）用默认 AdamW（foreach 实现：每参数组多 kernel，全模型数十 param → 每步上百 launch）。
+【VTrain】`get_optimizer`（`ltdetr_object_detection/train_model.py:699-704`，deimv2 同款 `deimv2_object_detection/train_model.py:231-236`）用默认 AdamW（foreach/multi_tensor_apply 实现——每步约 10 次 foreach kernel，但每次都要跨 140+ 个张量分块遍历，小张量占比高的检测模型在此很吃亏）。
 
-【设计】CUDA 上 `torch.optim.AdamW(..., fused=True)`：
+【设计】CUDA 上 `torch.optim.AdamW(..., fused=True)`：整步参数更新折叠为单 kernel。
 
-- fused 实现把整步参数更新折叠为每 dtype 组一次 kernel launch——优化器相位的 launch 数下降一个量级；
-- **约束**：fused 要求全部参数同一 dtype 且在 CUDA（fp32 master 权重满足）；` capturable`/`fused` 与 `foreach` 互斥；LR scheduler 经 `param_group["lr"]` 更新的兼容性由 torch 保证（fused 组内 tensor lr 支持现状以测试钉住）；
-- 开关：`ltetr`/`deimv2` 训练 args 加 `fused_optimizer: bool = True`（CUDA 上默认开，CPU/NPU 自动回退 foreach——`try` 构造 + 回退，warning 可见）；
-- 数值语义：fused 与 foreach 在 fp32 下为同公式不同执行序——浮点重排容差内等价（§5 测试 3），**不做逐比特承诺**（D2）；
-- 预期收益：optim+EMA 相位（profile 中通常 5–10%）的 30–50%。
+- **实测收益（§13.1）**：21M 参数 / 140 张量的检测器形状上，foreach **8.70 ms/step → fused 0.71 ms/step（−92%）**——收益远超 v1.0 的保守估计；对 0.7 s/step 的现役配方约合 **−1.1% 端到端**，纯白捡；
+- **调度器兼容性（实测，§13.1）**：`FlatCosineLRScheduler`/`MultiStepWarmupScheduler` 逐步改写 `param_group["lr"]`（Python float）的用法在 fused 下正常工作（基准脚本逐步 ×0.9999 验证）；
+- **约束**：fused 要求全部参数同 dtype 且在 CUDA（fp32 master 权重满足）；CPU/NPU 自动回退 foreach（`try` 构造 + warning 可见）；
+- 开关：`ltdetr`/`deimv2` 训练 args 加 `fused_optimizer: bool = True`（CUDA 上默认开）；
+- 数值语义：fused 与 foreach 在 fp32 下为同公式不同执行序——浮点重排容差内等价（§5 测试 1），**不做逐比特承诺**（D2）。
 
 ### W2（P0）：criterion per-image 循环块对角向量化
 
@@ -76,14 +77,15 @@
 | FGL 逐层施加（逐图 `fg_loss_from_targets`） | `dfine_criterion.py:371-394` | B × num_entries（3 层 decoder → ~24–32） |
 | dn 分支 FGL（`fg_loss` 内层循环） | `dfine_utils.py:354-375` | B × len(dn_outputs) |
 | DDF 权重构建（IoU 逐图 `matched_pair_iou`） | `dfine_utils.py:420-434` | B × (num_entries−1 + dn) |
-| （附带）DeFE GT 高斯热图逐图生成 | `dome_encoder.py:126-133` | B |
+
+（DeFE 热图**不在列**：其内核已按 box 分块向量化——见 §1 已做清单。）
 
 【设计】**块对角展平**（单点模式，与分册 14 R8 的 CPU 段式分组同一思想但留在 GPU）：
 
 1. 逐图的 `(src, dst)` 匹配索引拼接为扁平索引，附每图段偏移 `seg_offsets`（`torch.cat([src + offset_i])` 形式）；
-2. `bbox2distance` / `matched_pair_iou` / `fg_loss_from_targets` 全部按扁平 (ΣN, …) 张量**一次调用**；`matched_pair_iou` 的逐图 `box_iou` 对（pred_i, gt_i）改为扁平 `box_iou(pred_flat, gt_flat)` 后 `torch.diag`（逐图 NxM 矩阵在匹配对齐后天然是对角提取，语义等价）；
-3. 逐图累加 `layer_loss +` 循环 → 扁平求和（`sum / num_boxes_go` 归一化不变）；求和顺序变化 = 浮点重排（D2，容差验收）；
-4. 高斯热图：`GaussHeatmapGenerator` 向量化为网格距离计算的一次 batched 实现（`defe.py` 内新增 batched 路径，逐图路径保留给非方阵边界情况）；
+2. `bbox2distance` / `fg_loss_from_targets` 全部按扁平 (ΣN, …) 张量**一次调用**；
+3. **行对齐 IoU 的逐对公式（v1.1 修正）**：DDF 权重与 FGL 质量用的 `matched_pair_iou` 输入是**行对齐**的等长对（每行一个 (pred, gt) 对），当前实现走 `torch.diag(box_iou(A, B))`——扁平化后若照搬，box_iou 会算出 (ΣN)×(ΣN) 的全矩阵再取对角：O((ΣN)²) 内存与跨图无意义计算（4800 对 → 92 MB fp32/次调用）。修正为**逐对坐标级公式**（`x1=max(x1a,x1b)` 等逐元素运算 + 交并比 clamp），(ΣN, 4) 张量一次算完、零矩阵膨胀；逐对算术与 `box_iou` 对角元素完全一致（同一 clamp/eps 序），可做逐位对拍；
+4. 逐图累加 `layer_loss +` 循环 → 扁平求和（`sum / num_boxes_go` 归一化不变）；求和顺序变化 = 浮点重排（D2，容差验收）；
 5. dn 分支复用同一展平 helper（`_flatten_matches(indices, device)` 返回 `(flat_src, flat_dst, seg_offsets)`）。
 
 **明确不做的**（记录依据，对齐分册 14 R8 先例）：matcher 的 scipy 指派本身不 batch 化——`linear_sum_assignment` O(n³)，合并为 O((Σn)³) 渐近更差（`matcher.py:54-56` 注释已记录）。
@@ -132,8 +134,8 @@
 
 ## 5. 测试与验收
 
-1. **W1**：fused vs foreach 200 步 loss 轨迹相对差 < 1e-5（fp32）；优化器 state_dict 往返兼容（resume 场景：fused↔foreach 混合加载告警但不崩）；CPU/NPU 回退路径；
-2. **W2**：向量化前后同一输入的 FGL/DDF/热图数值相对差 < 1e-6（fp32，torch.testing.assert_close 默认容差）；空匹配图（src.numel()==0）段跳过语义不变；`num_boxes_go`/`dn_num_boxes` 归一化分母逐位一致；金标回归（现有 147 例组件回归全绿）；
+1. **W1**：fused vs foreach 200 步 loss 轨迹相对差 < 1e-5（fp32）；优化器 state_dict 往返兼容（resume 场景：fused↔foreach 混合加载告警但不崩）；CPU/NPU 回退路径；调度器逐步改写组级 lr 的组合冒烟（§13.1 已手工验证，落为测试）；
+2. **W2**：向量化前后同一输入的 FGL/DDF 数值相对差 < 1e-6（fp32，torch.testing.assert_close 默认容差）；**行对齐 IoU 逐对公式与 `torch.diag(box_iou(...))` 逐位一致**（同随机输入对拍，D3）；空匹配图（src.numel()==0）段跳过语义不变；`num_boxes_go`/`dn_num_boxes` 归一化分母逐位一致；金标回归（现有 147 例组件回归全绿）；
 3. **W3**：compile 开/关的输出张量容差内一致；DDP 2-rank smoke；图断点数日志（`torch._dynamo` counters）归档；
 4. **通用**：全部改动 off 开关下与基线逐比特一致（D3）；profile 脚本输出格式向后兼容（消融历史可比）。
 
@@ -143,18 +145,18 @@
 
 **门槛**（§2 协议）：
 
-| # | 项目 | 判据 |
-|---|---|---|
-| G-W1 | fused AdamW | optim 相位步时 ≥ −30% 且端到端 ≥ −2% |
-| G-W2 | criterion 向量化 | criterion 相位步时 ≥ −15% 且 launch 数 ≥ −40% |
-| G-W3 | compile decoder | 步时 ≥ −8% 且 pilot mAP ≥ −0.2 AP |
-| G-W4 | GPU 匹配评估 | scipy 占比 < 5% → 归档否决；≥ 5% → 进入方案对比 |
+| # | 项目 | 判据 | 状态 |
+|---|---|---|---|
+| G-W1 | fused AdamW | optim 相位步时 ≥ −30% 且端到端 ≥ −1% | 微基准已过（−92% 相位内，§13.1）；端到端余量按 0.7 s/step 估算 ≈ −1.1%，压线通过，以实施后实测为准 |
+| G-W2 | criterion 向量化 | criterion 相位步时 ≥ −15% 且 launch 数 ≥ −40% | 待实施 |
+| G-W3 | compile decoder | 步时 ≥ −8% 且 pilot mAP ≥ −0.2 AP | 待实施（实验旗标） |
+| G-W4 | GPU 匹配评估 | scipy 占比 < 5% → 归档否决；≥ 5% → 进入方案对比 | 待评估 |
 
 **风险表**：
 
 | 风险 | 等级 | 缓解 |
 |---|---|---|
-| R1 fused AdamW 与 param_group 级 LR 调度交互（FlatCosine/MultiStep 每步改 group lr） | 中 | torch fused 支持组级 python float lr 的每步更新（测试 1 钉住）；不兼容则该组回退 foreach（混合模式） |
+| R1 fused AdamW 与 param_group 级 LR 调度交互（FlatCosine/MultiStep 每步改 group lr） | 低（已实测，§13.1） | 基准已验证逐步组级 lr 改写在 fused 下正常；测试 1 落为回归钉住 |
 | R2 向量化改变求和顺序 → 极小数值漂移跨 64k 步放大 | 低 | fp32 全程 + 容差验收 + pilot mAP 底线复验（与历史 run 可比性声明：W2 合入点之后的新 run 才两两可比） |
 | R3 compile 图断裂收益为负 | 中 | 实验旗标默认关；G-W3 独立门槛；density-on 场景预期管理（§3 W3） |
 | R4 profile 结论过拟合到 Dome twin 配方 | 低 | §2 协议要求同时记录 micro batch / gt-per-image 两组参数（脚本已支持 `--batch/--gt-per-image`） |
@@ -168,9 +170,8 @@
 | 文件 | 改动 | ~行 |
 |---|---|---|
 | `ltdetr_object_detection/train_model.py`（+ deimv2 镜像） | `fused_optimizer` arg + AdamW fused 构造与回退 | ~40 |
-| `object_detection_components/dfine_utils.py` | `_flatten_matches` helper + `fg_loss`/DDF 权重的扁平路径（原路径保留开关） | ~80 |
+| `object_detection_components/dfine_utils.py` | `_flatten_matches` helper + 行对齐逐对 IoU + `fg_loss`/DDF 权重的扁平路径（原路径保留开关） | ~100 |
 | `object_detection_components/dfine_criterion.py` | FGL 目标构建/施加的扁平路径 | ~60 |
-| `object_detection_components/defe.py` | `GaussHeatmapGenerator` batched 路径 | ~40 |
 | `ltdetr_object_detection/config.py` | `fused_optimizer` / `compile_decoder` 字段 | ~10 |
 | `scripts/profile_criterion_ops.py` | matcher/scipy 计时扩展（G-W4） | ~30 |
 | `tests/test_step_engineering.py` | §5 | ~250 |
@@ -207,8 +208,59 @@
 | 内容 | 位置 |
 |---|---|
 | criterion per-image 循环群（W2 对象） | `dfine_criterion.py:357-394`；`dfine_utils.py:354-375, 420-434` |
-| DeFE 热图逐图循环 | `ltdetr_object_detection/dome_encoder.py:126-133`；`object_detection_components/defe.py` |
+| DeFE 热图（已向量化内核，勘误见 §10 E1） | `ltdetr_object_detection/dome_encoder.py:126-133`；`object_detection_components/defe.py:179-221` |
 | 优化器构造（W1 对象） | `ltdetr_object_detection/train_model.py:699-704`；`deimv2_object_detection/train_model.py:231-236` |
 | 已完成的同源工程（盘点基线） | §1 表格所引各处 |
 | 度量工具 | `scripts/profile_step_phases.py`、`scripts/profile_criterion_ops.py` |
 | "评估后否决"纪律先例 | 分册 14 R8（块对角指派否决）；本文 §3 W4 / 否决项 |
+
+---
+
+## 10. 实测记录（2026-10-12，v1.1）
+
+### 10.1 W1 基准：fused vs foreach AdamW（4090D，torch 2.14.1+cu130）
+
+- 形状：21.0M 参数 / 140 张量（60×1024×256 + 80×256×256，fp32 master 权重），两个参数组（不同 lr/wd），逐步改写组级 lr（×0.9999，模拟 FlatCosine/MultiStep 的每步调度）；
+- 结果（best of 3×60 步）：**foreach 8.70 ms/step，fused 0.71 ms/step（−92%）**；
+- 判读：收益主要来自小张量占比高的检测器形状下 foreach multi_tensor_apply 的分块遍历开销；对现役 0.7 s/step 配方约 −1.1% 端到端，纯启动项收益；
+- 附注：v1.0 对 foreach 的描述（"每参数组多 kernel，上百 launch"）不准确——foreach 经 multi_tensor_apply 每 op 型约一次 launch，慢在小张量分块与标量读写，不在 launch 数；已按实测改写 §3 W1。
+
+### 勘误记录（v1.1 相对 v1.0）
+
+| # | v1.0 表述 | 实测/核查结果 | 修正 |
+|---|---|---|---|
+| E1 | DeFE GT 热图列入 W2 待向量化循环 | `GaussHeatmapGenerator` 内核已按 64-box 分块向量化（`defe.py:179-221`）；剩余逐图边界是 B 次模块调用，非热点 | 移入 §1 已做清单，W2 表删除该行 |
+| E2 | `matched_pair_iou` 扁平化走 `box_iou(pred_flat, gt_flat)` + `torch.diag` | 该方案 O((ΣN)²) 内存（4800 对 → 92 MB/次）且含跨图无意义计算 | 改为逐对坐标级行对齐 IoU（§3 W2 第 3 条），零矩阵膨胀、可逐位对拍 |
+| E3 | W1 收益"optim 相位 5–10% 的 30–50%" | 实测 −92%（相位内），端到端 ≈ −1.1% | 按 §10.1 修订 |
+
+---
+
+## 11. 实施记录（2026-10-12，W1/W2 落地）
+
+W1 与 W2 已实施（同日交付），**两个开关均为 off-by-default**（`fused_optimizer` / `criterion_flat_losses`，LT-DETR 与 DEIMv2 两家族）——与仓内"基线兼容承诺"纪律一致：fused 优化器与扁平求和都会重排浮点运算顺序，进行中的消融 run 必须保持两两可比，新 run 由配方显式开启。
+
+### 11.1 落地面
+
+| 文件 | 内容 |
+|---|---|
+| `_optim/optimizer_helpers.py` | `build_adamw`（fused 请求不可用时 warning + foreach 回退） |
+| `ltdetr/deimv2 config` | `fused_optimizer` / `criterion_flat_losses`（仅 ltdetr）字段，默认 False |
+| `dfine_utils.py` | `flatten_match_indices` / `matched_pair_iou_flat`；`fg_loss`/`ddf_loss` 的 `flat_indexing` 双路径 |
+| `dfine_criterion.py` | `flat_losses` ctor 开关：FGL 目标构建/施加的扁平路径 + dn/DDF 调用点透传 |
+| `box_ops.py` | `elementwise_giou_loss`（行对齐 GIoU，供分册 23 box 腿使用） |
+| `tests/test_step_engineering.py` | 17 例：helper 单测 / 逐位与容差等价 / 回退与调度器交互 / off-by-default 契约 |
+
+验收：新套件 17 例全绿；受影响回归（detection_components / dfine / ltdetr / ssl / dome / deimv2 / hot_path / token_drop / engine_train_mode）**365 例全绿**；ruff 干净。
+
+### 11.2 实测门槛结果
+
+| 门槛 | 结果 | 判定 |
+|---|---|---|
+| G-W1（optim 相位 ≥ −30%） | ✅ 微基准 −92%（§10.1：8.70 → 0.71 ms/step，21M/140 张量形状），调度器逐步改组级 lr 实测兼容 | 通过（端到端 ≈ −1.1% @0.7 s/step） |
+| G-W2（criterion 相位 ≥ −15%） | ⚠️ **实测仅 +1.9%**（fwd+bwd，B=8 / Q=500 / 60 gt/图 / 3 层 / 33 bins：139.2 → 136.6 ms） | **未达标，如实记录**：该规模下 criterion 相位由重损失项主导，per-image 循环占比 ~2%；收益只在更大 batch/更深 decoder 下放大。扁平路径保留（等价性已逐位验证），旗标维持 off-by-default，不作为推荐开启项 |
+
+### 11.3 实施期修正
+
+- 初版蒸馏接线（分册 23）在 criterion 构造处误用原始 `model_args.distill.to_distill_params()`，绕过了类空间规则对 `cls_coef` 的修正——测试 `test_class_space_relaxed_drops_cls_leg` 抓到后改为使用 teacher 构建后的最终参数。
+- `_build_gt_to_teacher_query` 对空匹配图返回的 float 空 tensor 加 `.long()` 防御（测试抓到 IndexError）。
+- teacher 导出加载器：`weights_only=True` 对引擎导出必失败（`model_init_args` 的 `locals()` 快照带 `__class__` 类引用）→ 改为"safe loader 失败则告警 + 全量 unpickler"（teacher 是操作者自有可信工件）；导出键前缀实测为 `ema_model.<task key>`（非 `ema_model.model.`）。

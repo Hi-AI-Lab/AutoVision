@@ -1,26 +1,19 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
-"""Command layer: public entry points and assembly helpers."""
+"""Deprecated alias of :mod:`autovision.cli` (compat shim).
 
-from autovision._commands.train import PretrainConfig, PretrainResult, pretrain
-from autovision._commands.train_task import (
-    TaskTrainResult,
-    train_image_classification,
-    train_instance_segmentation,
-    train_object_detection,
-    train_oriented_object_detection,
-    train_panoptic_segmentation,
-    train_semantic_segmentation,
+Removed in the next minor release; import from the new location.
+"""
+
+from __future__ import annotations
+
+import warnings
+
+warnings.warn(
+    "autovision._commands is a deprecated alias; import from "
+    "autovision.cli instead.",
+    DeprecationWarning,
+    stacklevel=2,
 )
 
-__all__ = [
-    "PretrainConfig",
-    "PretrainResult",
-    "TaskTrainResult",
-    "pretrain",
-    "train_image_classification",
-    "train_instance_segmentation",
-    "train_object_detection",
-    "train_oriented_object_detection",
-    "train_panoptic_segmentation",
-    "train_semantic_segmentation",
-]
+from autovision.cli import *  # noqa: E402,F401,F403
+from autovision.cli import __all__ as _exported  # noqa: E402,F401

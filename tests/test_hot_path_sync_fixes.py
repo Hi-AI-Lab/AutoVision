@@ -30,26 +30,26 @@ import math
 
 import torch
 
-from autovision._task_models.ltdetr_object_detection.dome_decoder import (
+from autovision.tasks.detection.avdetr.dome_decoder import (
     DomeDFINEv2Decoder,
 )
-from autovision._task_models.object_detection_components.denoising import (
+from autovision.tasks.detection.components.denoising import (
     box_cxcywh_to_xyxy,
 )
-from autovision._task_models.object_detection_components.dfine_criterion import (
+from autovision.tasks.detection.components.dfine_criterion import (
     DFINECriterionV2,
 )
-from autovision._task_models.object_detection_components.dfine_utils import (
+from autovision.tasks.detection.components.dfine_utils import (
     ddf_loss,
 )
-from autovision._task_models.object_detection_components.dynamic_nms import (
+from autovision.tasks.detection.components.dynamic_nms import (
     per_class_dynamic_nms,
 )
-from autovision._task_models.object_detection_components.matcher import (
+from autovision.tasks.detection.components.matcher import (
     HungarianMatcher,
     forward_match,
 )
-from autovision._task_models.object_detection_components.mwas import (
+from autovision.tasks.detection.components.mwas import (
     adaptive_window_mask,
 )
 
@@ -63,7 +63,7 @@ def _reference_match_per_image(matcher, outputs, targets):
     """Pre-refactor forward_match: one host transfer per image."""
     from scipy.optimize import linear_sum_assignment
 
-    from autovision._task_models.object_detection_components.box_ops import (
+    from autovision.tasks.detection.components.box_ops import (
         generalized_box_iou_loss,
     )
 
@@ -188,7 +188,7 @@ def _reference_ddf_loss(
     """Pre-refactor ddf_loss (float() scalars + .any() guards)."""
     from torch import nn
 
-    from autovision._task_models.object_detection_components.dfine_utils import (
+    from autovision.tasks.detection.components.dfine_utils import (
         matched_pair_iou,
     )
 
@@ -704,7 +704,7 @@ class TestDDFOnDeviceScalars:
 
 class TestPairTwoCropPacking:
     def test_pairs_and_unpaired_unchanged(self):
-        from autovision._task_models.object_detection_components.ssl_contrastive import (
+        from autovision.tasks.detection.components.ssl_contrastive import (
             _pair_two_crop,
         )
 
@@ -750,7 +750,7 @@ class TestTranslateGtWhereRewrite:
     @staticmethod
     def _reference_translate_gt(gt, reg_max, reg_scale, up):
         """Pre-refactor body (boolean-mask writes)."""
-        from autovision._task_models.object_detection_components.dfine_utils import (
+        from autovision.tasks.detection.components.dfine_utils import (
             weighting_function,
         )
 
@@ -786,7 +786,7 @@ class TestTranslateGtWhereRewrite:
         return indices, weight_right, weight_left
 
     def test_value_identical_on_all_lane_classes(self):
-        from autovision._task_models.object_detection_components.dfine_utils import (
+        from autovision.tasks.detection.components.dfine_utils import (
             translate_gt,
         )
 
@@ -794,7 +794,7 @@ class TestTranslateGtWhereRewrite:
         for reg_max, reg_scale in ((8, 4.0), (32, 4.0), (16, 2.0)):
             # spread across: below W[0], inside the span, above the top,
             # and EXACTLY on knots (historical NaN path)
-            from autovision._task_models.object_detection_components.dfine_utils import (
+            from autovision.tasks.detection.components.dfine_utils import (
                 weighting_function,
             )
 
@@ -815,15 +815,18 @@ class TestTranslateGtWhereRewrite:
                 assert torch.equal(torch.isnan(g), torch.isnan(w_))
                 assert torch.equal(g, w_)
 
-    def test_on_device_matches_cpu(self):
-        # device cache path must return the same values as the CPU path
-        from autovision._task_models.object_detection_components.dfine_utils import (
+    def test_cpu_values_sane(self):
+        from autovision.tasks.detection.components.dfine_utils import (
             translate_gt,
         )
 
         values = torch.linspace(-5, 5, 97)
-        cpu = translate_gt(values, 32, 4.0, 0.5)
-        assert True  # GPU variant exercised by the suite on CUDA machines
+        indices, weight_right, weight_left = translate_gt(values, 32, 4.0, 0.5)
+        # every lane's weights sum to 1 (NaN-knot lanes excepted)
+        total = weight_right + weight_left
+        finite = ~torch.isnan(total)
+        assert torch.allclose(total[finite], torch.ones_like(total[finite]))
+        assert bool(((indices >= 0) & (indices <= 31.9)).all())
 
 
 # ── MWAS batched window scatter ─────────────────────────────────────────
@@ -833,7 +836,7 @@ class TestMwasWindowScatter:
     def test_matches_per_window_slice_add(self):
         import torch.nn.functional as F
 
-        from autovision._task_models.object_detection_components.mwas import (
+        from autovision.tasks.detection.components.mwas import (
             WindowProcessor,
             window_grid_size,
         )
@@ -902,3 +905,79 @@ class TestMwasWindowScatter:
             want = enhanced[:, :, :height, :width]
 
         assert torch.equal(got, want)
+
+
+# ── DN group max_gt_cap ─────────────────────────────────────────────────
+
+
+class TestDenoisingMaxGtCap:
+    """The crash guard: capping per-image DN slots must leave sub-cap
+    batches untouched and keep dn_meta consistent with the targets on
+    capped ones."""
+
+    @staticmethod
+    def _build(num_gt_per_image, max_gt_cap=None):
+        from autovision.tasks.detection.components.denoising import (
+            get_contrastive_denoising_training_group,
+        )
+
+        targets = [
+            {
+                "boxes": torch.rand(n, 4) * 0.5 + 0.1,
+                "labels": torch.randint(0, 5, (n,)),
+            }
+            for n in num_gt_per_image
+        ]
+        class_embed = torch.nn.Embedding(6, 16)
+        return get_contrastive_denoising_training_group(
+            targets,
+            num_classes=5,
+            num_queries=10,
+            class_embed=class_embed,
+            num_denoising=100,
+            max_gt_cap=max_gt_cap,
+        )
+
+    def test_uncapped_batches_identical_to_capped_below_cap(self):
+        counts = [7, 3, 50]  # max 50 < cap
+        torch.manual_seed(11)
+        uncapped = self._build(counts)
+        torch.manual_seed(11)  # same label/box noise draws
+        capped = self._build(counts, max_gt_cap=300)
+        for a, b in zip(uncapped, capped):
+            if isinstance(a, torch.Tensor):
+                assert torch.equal(a, b)
+        assert uncapped[3]["dn_num_split"] == capped[3]["dn_num_split"]
+
+    def test_cap_bounds_query_count_on_extreme_batches(self):
+        counts = [900, 4, 4]
+        dn_content, dn_boxes, attn_mask, dn_meta = self._build(counts, max_gt_cap=300)
+        group_size = dn_meta["dn_group_size"]
+        assert group_size == 300
+        num_dn = dn_meta["dn_num_split"][0]
+        assert num_dn == 300 * 2 * dn_meta["dn_num_group"]
+        assert dn_content.shape[1] == num_dn
+        assert attn_mask.shape[0] == num_dn + 10
+        # matched indices stay consistent with the truncated targets
+        from autovision.tasks.detection.components.denoising import (
+            get_cdn_matched_indices,
+        )
+
+        targets = [
+            {
+                "boxes": torch.rand(n, 4) * 0.5 + 0.1,
+                "labels": torch.randint(0, 5, (n,)),
+            }
+            for n in counts
+        ]
+        indices = get_cdn_matched_indices(dn_meta, targets)
+        for (src, dst), n in zip(indices, counts):
+            assert dst.numel() == min(n, 300) * dn_meta["dn_num_group"]
+            assert int(dst.max()) < n  # target indices stay in range
+
+    def test_group_count_floors_to_one_with_or_without_cap(self):
+        counts = [900, 4]
+        _, _, _, meta = self._build(counts)
+        _, _, _, meta_capped = self._build(counts, max_gt_cap=300)
+        assert meta["dn_num_group"] == 1
+        assert meta_capped["dn_num_group"] == 1

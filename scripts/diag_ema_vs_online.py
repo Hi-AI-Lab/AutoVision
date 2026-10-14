@@ -28,23 +28,23 @@ from pathlib import Path
 
 import torch
 
-from autovision._commands import common_helpers
-from autovision._data.coco_object_detection_dataset import (
+from autovision.cli import common_helpers
+from autovision.data.coco_object_detection_dataset import (
     COCOObjectDetectionDataArgs,
 )
-from autovision._data.object_detection_dataset import ObjectDetectionDataset
-from autovision._task_models.ltdetr_object_detection import (
-    LTDETRObjectDetectionTrain,
-    LTDETRObjectDetectionTrainArgs,
+from autovision.data.object_detection_dataset import ObjectDetectionDataset
+from autovision.tasks.detection.avdetr import (
+    AVDETRObjectDetectionTrain,
+    AVDETRObjectDetectionTrainArgs,
 )
-from autovision._transforms.detection_transforms import build_val_transform_args
-from autovision._transforms.detection_transforms.args import (
+from autovision.augment.detection import build_val_transform_args
+from autovision.augment.detection.args import (
     RTDETRDetectionTransformArgs,
 )
-from autovision._transforms.detection_transforms.collate import (
+from autovision.augment.detection.collate import (
     RTDETRDetectionCollateFunction,
 )
-from autovision._transforms.detection_transforms.transform import (
+from autovision.augment.detection.transform import (
     RTDETRDetectionTransform,
 )
 
@@ -92,11 +92,11 @@ def main() -> None:
     )["categories"]
     num_classes = len(categories)
 
-    args = LTDETRObjectDetectionTrainArgs(
+    args = AVDETRObjectDetectionTrainArgs(
         num_classes=num_classes, **base.MODEL_ARGS
     )
     args.resolve_image_size()
-    train_model = LTDETRObjectDetectionTrain(args).to(arguments.device)
+    train_model = AVDETRObjectDetectionTrain(args).to(arguments.device)
 
     # Online weights: the checkpoint's TrainModel state_dict (`model.*`).
     checkpoint = torch.load(

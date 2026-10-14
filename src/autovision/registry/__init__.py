@@ -1,0 +1,34 @@
+# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+"""Model asset registry (filesystem + MLflow backends) + downloadable cache."""
+
+# Registers the Apache warm-start component assets on import (design doc 28
+# section 6.3). Keep this import before the names below re-export the
+# manifest so ``from autovision.registry import ASSET_MANIFEST`` observes it.
+from autovision.registry import apache_assets  # noqa: F401
+from autovision.registry.downloadable import (
+    ASSET_MANIFEST,
+    DownloadableModel,
+    DownloadableModelError,
+    register_downloadable,
+    resolve_downloadable,
+)
+from autovision.registry.mlflow_registry import MLflowModelRegistry
+from autovision.registry.model_registry import (
+    MODEL_STAGES,
+    ModelRegistry,
+    RegistryEntry,
+    RegistryError,
+)
+
+__all__ = [
+    "ASSET_MANIFEST",
+    "DownloadableModel",
+    "DownloadableModelError",
+    "MLflowModelRegistry",
+    "MODEL_STAGES",
+    "ModelRegistry",
+    "RegistryEntry",
+    "RegistryError",
+    "register_downloadable",
+    "resolve_downloadable",
+]

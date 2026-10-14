@@ -1,30 +1,19 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
-"""Optimizer selection, parameter grouping, and LR scheduling."""
+"""Deprecated alias of :mod:`autovision.optim` (compat shim).
 
-from autovision._optim.optimizer_args import (
-    AdamWArgs,
-    LARSArgs,
-    OptimizerArgs,
-    SGDArgs,
-    get_optimizer_args_cls,
-)
-from autovision._optim.optimizer_helpers import (
-    get_optimizer,
-    get_weight_decay_parameters,
-)
-from autovision._optim.trainable_modules import TrainableModules
-from autovision._optimizer_type import OptimizerType
-from autovision._scheduler import CosineWarmupScheduler
+Removed in the next minor release; import from the new location.
+"""
 
-__all__ = [
-    "AdamWArgs",
-    "CosineWarmupScheduler",
-    "LARSArgs",
-    "OptimizerArgs",
-    "OptimizerType",
-    "SGDArgs",
-    "TrainableModules",
-    "get_optimizer",
-    "get_optimizer_args_cls",
-    "get_weight_decay_parameters",
-]
+from __future__ import annotations
+
+import warnings
+
+warnings.warn(
+    "autovision._optim is a deprecated alias; import from "
+    "autovision.optim instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
+from autovision.optim import *  # noqa: E402,F401,F403
+from autovision.optim import __all__ as _exported  # noqa: E402,F401

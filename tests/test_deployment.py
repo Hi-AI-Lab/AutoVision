@@ -4,18 +4,18 @@
 import pytest
 import torch
 
-from autovision._export import benchmark_inference
-from autovision._task_models import (
+from autovision.export import benchmark_inference
+from autovision.tasks import (
     RTDETRObjectDetection,
     RTDETRObjectDetectionTrain,
     RTDETRObjectDetectionTrainArgs,
 )
-from autovision._task_models.object_detection_components import (
+from autovision.tasks.detection.components import (
     combine_object_detection_tiles,
     tile_image,
 )
-from autovision._task_models.task_model import TaskModel
-from autovision._task_models.task_model_helpers import load_task_model
+from autovision.tasks.task_model import TaskNetwork
+from autovision.tasks.task_model_helpers import load_task_model
 
 onnxruntime = pytest.importorskip("onnxruntime", reason="onnxruntime not installed")
 pytest.importorskip("onnxslim", reason="onnxslim not installed")
@@ -143,7 +143,7 @@ class TestSAHI:
 
 
 class _SahiStubModel:
-    """Stub wiring a TaskModel's three-stage contract to canned outputs,
+    """Stub wiring a TaskNetwork's three-stage contract to canned outputs,
     so the SAHI coordinate pipeline is verified without a real detector."""
 
     image_size = (64, 64)
@@ -180,9 +180,9 @@ class _SahiStubModel:
         self.seen_threshold = threshold
         return self.outputs
 
-    # TaskModel unbound methods bound to the stub instance.
-    predict_sahi = TaskModel.predict_sahi
-    _load_image_unchanged = TaskModel._load_image_unchanged
+    # TaskNetwork unbound methods bound to the stub instance.
+    predict_sahi = TaskNetwork.predict_sahi
+    _load_image_unchanged = TaskNetwork._load_image_unchanged
 
 
 def _det_output(boxes, scores, labels):
@@ -210,7 +210,7 @@ class TestPredictSahi:
 
     def test_default_tile_size_is_model_input_size(self, tiny_model, monkeypatch):
         seen = {}
-        from autovision._task_models.object_detection_components import tiling_utils
+        from autovision.tasks.detection.components import tiling_utils
 
         real_tile = tiling_utils.tile_image
 
@@ -240,7 +240,7 @@ class TestPredictSahi:
         assert stub_pad.seen_metadata[1] == {"orig_w": 64, "orig_h": 64}
 
     def test_tile_offset_and_global_passthrough(self, monkeypatch):
-        from autovision._task_models.object_detection_components import tiling_utils
+        from autovision.tasks.detection.components import tiling_utils
 
         seen = {}
         real_combine = tiling_utils.combine_object_detection_tiles

@@ -3,10 +3,12 @@
 
 import pytest
 import torch
+from tests.helpers_models import TinyWrapper
 from torch import nn
 
-from autovision._methods import get_method_cls, list_methods
-from autovision._methods.dino import (
+from autovision.encoders import FeatureExtractor
+from autovision.pretext import get_method_cls, list_methods
+from autovision.pretext.dino import (
     DINO,
     DINOAdamWArgs,
     DINOArgs,
@@ -16,9 +18,7 @@ from autovision._methods.dino import (
     DINOTransform,
     DINOTransformArgs,
 )
-from autovision._models import EmbeddingModel
-from autovision._scaling import ScalingInfo
-from tests.helpers_models import TinyWrapper
+from autovision.scaling import ScalingInfo
 
 pytestmark = pytest.mark.filterwarnings("ignore::UserWarning")
 
@@ -44,7 +44,7 @@ def make_dino(embed_dim: int = 8, **args_overrides) -> DINO:
     )
     optimizer_args = DINO.optimizer_args_cls("auto")()
     optimizer_args.resolve_auto(wrapped_model=None)
-    embedding_model = EmbeddingModel(
+    embedding_model = FeatureExtractor(
         wrapped_model=TinyWrapper(dim=embed_dim), embed_dim=None
     )
     return DINO(
@@ -300,7 +300,7 @@ class TestReviewFixes:
 
     def test_momentum_updates_buffers(self):
         # A BN teacher must follow the student's running stats (P1 finding).
-        from autovision._methods.dino.dino import _update_momentum
+        from autovision.pretext.dino.dino import _update_momentum
 
         student = nn.Sequential(nn.Conv2d(3, 4, 1), nn.BatchNorm2d(4))
         teacher = nn.Sequential(nn.Conv2d(3, 4, 1), nn.BatchNorm2d(4))

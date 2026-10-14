@@ -20,7 +20,7 @@ import pytest
 import torch
 
 import autovision._accelerator as accelerator
-import autovision._engine.engine as engine_module
+import autovision.engine.engine as engine_module
 from autovision import pretrain, train_object_detection
 from autovision._accelerator import (
     accelerator_device_count,
@@ -31,9 +31,9 @@ from autovision._accelerator import (
     npu_available,
     supports_amp,
 )
-from autovision._engine.engine import resolve_device
-from autovision._observability import otel as otel_module
-from autovision._observability.otel import (
+from autovision.engine.engine import resolve_device
+from autovision.observability import otel as otel_module
+from autovision.observability.otel import (
     TRACER_NAME,
     end_span,
     get_tracer,
