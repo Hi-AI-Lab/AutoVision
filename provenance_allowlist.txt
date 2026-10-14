@@ -4,8 +4,11 @@
 # a review date. Entries matching no scanned file are reported as stale.
 
 # — pending Phase 3 architecture migration (ledger R15/R16). Review 2026-11-14.
+#   (design doc 29: config.py variant registry split into variants.py — both
+#   files carry historical baseline comments; R16 naming itself has landed.)
 src/autovision/features/embed.py :: lightly_csv format name pending R15 rename
-src/autovision/tasks/detection/avdetr/config.py :: LT-DETR family naming pending R16
+src/autovision/tasks/detection/avdetr/config.py :: historical baseline comments (R16 landed; docs 28 §2 notes)
+src/autovision/tasks/detection/avdetr/variants.py :: historical baseline comments (moved from config.py, design doc 29)
 src/autovision/tasks/detection/avdetr/task_model.py :: LT-DETR family naming pending R16
 
 # — pending Phase 4 asset switch (ledger P3-1): legacy warm-start weights and
