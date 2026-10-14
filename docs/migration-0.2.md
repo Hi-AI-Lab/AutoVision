@@ -122,6 +122,7 @@ docs/ 历史分册中的 LT-DETR 表述（历史名，新文档首行已注）�
 | `tasks.detection.components.{obb_decoder,obb_criterion}` | `tasks.oriented_detection.shared` |
 | `tasks.detection.components.{tiling_utils,sahi}` | `tasks.shared.{tiling_utils,sahi}` |
 | `tasks.detection.components.{sfs_ff,dbfsaf,wavelet_downsample}` | `tasks.detection.fsdc.<同名>` |
+| `tasks.eomt`（跨三分割任务架构核，2026-10-15 并入） | `tasks.shared.eomt` |
 | `autovision.tasks.depth_estimation` / `pose_estimation` | 新建脚手架（无家族，见包 docstring 模板） |
 
 不变：`tasks.detection.avdetr`、`tasks.eomt`（跨三任务架构核）、

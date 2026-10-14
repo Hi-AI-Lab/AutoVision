@@ -6,7 +6,7 @@ import torch
 from autovision import load_task_model as load_model
 from autovision import train_semantic_segmentation
 from autovision.optim.schedulers import CosineWarmupScheduler
-from autovision.tasks.eomt import (
+from autovision.tasks.shared.eomt import (
     adapt_eomt_head,
     build_eomt_model,
     build_eomt_optimizer,

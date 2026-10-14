@@ -60,7 +60,7 @@ def train_panoptic_segmentation(
         list_panoptic_pairs,
         load_panoptic_segments,
     )
-    from autovision.tasks.eomt.transforms import (
+    from autovision.tasks.shared.eomt.transforms import (
         build_eomt_segmentation_transform,
     )
 

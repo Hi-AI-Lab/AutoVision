@@ -30,7 +30,7 @@ clean-cut、迁移机制）不受影响。
 ```
 src/autovision/tasks/
 ├── task_model.py / train_model.py / task_model_io.py / task_model_helpers.py
-├── shared/                  # 跨任务训练设施: ema flat_cosine tiling_utils sahi
+├── shared/                  # 跨任务共享：训练设施（平铺）+ 架构核（子包 eomt/）
 ├── detection/
 │   ├── shared/              # RT-DETR/DFINE 架构核（原 components 主体，
 │   │                        #   含 msda + _msda_src CUDA 源）
@@ -42,7 +42,6 @@ src/autovision/tasks/
 ├── semantic_segmentation/   # dinov2_eomt dinov3_eomt linear
 ├── instance_segmentation/   # dinov2_eomt dinov3_eomt
 ├── panoptic_segmentation/   # dinov2_eomt dinov3_eomt
-├── eomt/                    # 跨三分割任务的架构核（原状）
 ├── classification/          # 原 image_classification
 ├── depth_estimation/        # 脚手架（四件套模板见包 docstring）
 └── pose_estimation/         # 脚手架（同上）
@@ -104,3 +103,13 @@ wavelet_downsample）、`fsdc/*` registry 键与 CLI 分派、
 自研检测器族 AV-DETR 更名 **DETR**（目录/registry 键/9 个类/函数/19 个
 脚本），`avdetr/*`、`ltdetr/*` 双旧键弃用别名；第五代类路径迁移
 （模块前缀 + 改名类精确条目）见 `docs/migration-0.2.md` 对应节。
+
+## 8. 附记：eomt 并入 shared/（2026-10-15）
+
+归属规则定为一元：**只服务一个任务的代码进任务目录，跨任务的代码进
+`tasks/shared/`**（任务内多家族共享用 `<task>/shared/`）。
+`tasks/eomt/` 是唯一跨任务却在顶层安家的包，按规则并入
+`tasks/shared/eomt/`（子目录保持架构内聚）。eomt 零依赖任务包，天然
+满足 shared/ 契约；六个公开类路径不变，仅 17 处导入改写 + 一条
+`tasks.eomt. → tasks.shared.eomt.` 前缀迁移作保险。顶层自此为
+8 个任务目录 + 1 个 `shared/`。

@@ -9,9 +9,9 @@ import torch
 
 from autovision.metrics.segmentation import SegmentationMetricCollector
 from autovision.optim.schedulers import CosineWarmupScheduler
-from autovision.tasks.eomt.labels import semantic_masks_to_instances
-from autovision.tasks.eomt.postprocess import semantic_segmentation_decode
-from autovision.tasks.eomt.scheduler import build_eomt_optimizer
+from autovision.tasks.shared.eomt.labels import semantic_masks_to_instances
+from autovision.tasks.shared.eomt.postprocess import semantic_segmentation_decode
+from autovision.tasks.shared.eomt.scheduler import build_eomt_optimizer
 from autovision.tasks.semantic_segmentation.dinov2_eomt.config import (
     Dinov2EomtSemanticSegmentationTrainArgs,
 )

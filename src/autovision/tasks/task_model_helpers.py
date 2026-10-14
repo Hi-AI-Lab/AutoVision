@@ -54,6 +54,8 @@ _MODULE_PATH_MIGRATIONS: tuple[tuple[str, str], ...] = (
      "autovision.tasks.detection.rtdetr."),
     ("autovision.tasks.detection.avdetr.",
      "autovision.tasks.detection.detr."),
+    ("autovision.tasks.eomt.",
+     "autovision.tasks.shared.eomt."),
     ("autovision.tasks.detection.dfine_object_detection.",
      "autovision.tasks.detection.dfine."),
     ("autovision.tasks.detection.deimv2_object_detection.",

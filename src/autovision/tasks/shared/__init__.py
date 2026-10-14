@@ -1,6 +1,11 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
-"""Cross-task training infrastructure shared by all task families.
+"""Cross-task shared code, two kinds:
 
-Modules here are task-agnostic (schedules, EMA, deployment tiling) and
-must not import from any single task package.
+- flat modules: task-agnostic training infrastructure (schedules, EMA,
+  deployment tiling);
+- subpackages: architecture cores serving several task directories
+  (``eomt/`` — the Encoder-only Mask Transformer behind the three
+  segmentation tasks).
+
+Nothing here may import from a single task package.
 """

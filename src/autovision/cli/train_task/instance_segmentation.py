@@ -58,7 +58,7 @@ def train_instance_segmentation(
     from autovision.data.coco_instance_segmentation_dataset import (
         COCOInstanceSegmentationDataset,
     )
-    from autovision.tasks.eomt.transforms import (
+    from autovision.tasks.shared.eomt.transforms import (
         build_eomt_instance_transform,
     )
 

@@ -137,7 +137,7 @@ def train_semantic_segmentation(
     per_device_batch = max(1, global_batch_size // num_devices)
 
     if is_eomt:
-        from autovision.tasks.eomt.transforms import (
+        from autovision.tasks.shared.eomt.transforms import (
             build_eomt_segmentation_transform,
         )
 

@@ -22,7 +22,7 @@ from autovision import (
     train_panoptic_segmentation,
     train_semantic_segmentation,
 )
-from autovision.tasks.eomt.modeling import build_eomt_model
+from autovision.tasks.shared.eomt.modeling import build_eomt_model
 from autovision.tasks.instance_segmentation.dinov2_eomt import (
     Dinov2EomtInstanceSegmentation,
     Dinov2EomtInstanceSegmentationTrain,

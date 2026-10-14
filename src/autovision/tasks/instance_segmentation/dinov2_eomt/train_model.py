@@ -8,7 +8,7 @@ from typing import Any
 import torch
 
 from autovision.metrics.instance_segmentation import COCOMaskAPEvaluator
-from autovision.tasks.eomt.postprocess import instance_segmentation_decode
+from autovision.tasks.shared.eomt.postprocess import instance_segmentation_decode
 from autovision.tasks.instance_segmentation.dinov2_eomt.config import (
     Dinov2EomtInstanceSegmentationTrainArgs,
 )

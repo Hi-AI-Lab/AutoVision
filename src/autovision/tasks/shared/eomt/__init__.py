@@ -3,10 +3,10 @@
 semantic decode, optimizer and transforms. Task packages import from here.
 """
 
-from autovision.tasks.eomt.labels import semantic_masks_to_instances
-from autovision.tasks.eomt.modeling import adapt_eomt_head, build_eomt_model
-from autovision.tasks.eomt.postprocess import semantic_segmentation_decode
-from autovision.tasks.eomt.scheduler import build_eomt_optimizer
+from autovision.tasks.shared.eomt.labels import semantic_masks_to_instances
+from autovision.tasks.shared.eomt.modeling import adapt_eomt_head, build_eomt_model
+from autovision.tasks.shared.eomt.postprocess import semantic_segmentation_decode
+from autovision.tasks.shared.eomt.scheduler import build_eomt_optimizer
 
 __all__ = [
     "adapt_eomt_head",

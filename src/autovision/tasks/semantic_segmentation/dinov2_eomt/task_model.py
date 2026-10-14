@@ -10,8 +10,8 @@ import torch
 
 from autovision.augment.transform_args import NormalizeArgs
 from autovision.export import ONNXExportMixin
-from autovision.tasks.eomt.modeling import build_eomt_model
-from autovision.tasks.eomt.postprocess import semantic_segmentation_decode
+from autovision.tasks.shared.eomt.modeling import build_eomt_model
+from autovision.tasks.shared.eomt.postprocess import semantic_segmentation_decode
 from autovision.tasks.task_model import TaskNetwork
 
 __all__ = ["Dinov2EomtSemanticSegmentation"]

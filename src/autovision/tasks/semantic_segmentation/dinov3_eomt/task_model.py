@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import Any
 
 from autovision.augment.transform_args import NormalizeArgs
-from autovision.tasks.eomt.modeling import build_eomt_model
+from autovision.tasks.shared.eomt.modeling import build_eomt_model
 from autovision.tasks.semantic_segmentation.dinov2_eomt.task_model import (
     Dinov2EomtSemanticSegmentation,
 )

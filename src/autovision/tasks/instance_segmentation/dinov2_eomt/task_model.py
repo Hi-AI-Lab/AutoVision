@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from autovision.tasks.eomt.postprocess import instance_segmentation_decode
+from autovision.tasks.shared.eomt.postprocess import instance_segmentation_decode
 from autovision.tasks.semantic_segmentation.dinov2_eomt.task_model import (
     Dinov2EomtSemanticSegmentation,
 )
