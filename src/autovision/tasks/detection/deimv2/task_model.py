@@ -143,7 +143,7 @@ class Deimv2ObjectDetection(ONNXExportMixin, TaskNetwork):
         if load_weights:
             if not info.get("hf"):
                 # Registry entries without a transformers-format conversion
-                # (deimv2-dinov3-l / fsdc-vittest, design doc 22 PR-0) can
+                # (deimv2-dinov3-l / deimv2-vittest, design doc 22 PR-0) can
                 # only be built locally — fail with the reason, not a
                 # bogus hub download of "None".
                 raise ValueError(

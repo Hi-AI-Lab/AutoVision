@@ -161,13 +161,13 @@ class TestConfig:
 
     def test_registry_variants(self):
         # deimv2-dinov3-l: design doc 22 PR-0 (official Intellindust config,
-        # no transformers conversion); fsdc-vittest: hermetic FSDC build.
+        # no transformers conversion); deimv2-vittest: hermetic test build.
         assert set(DEIMV2_MODEL_REGISTRY) == {
             "deimv2-dinov3-s",
             "deimv2-dinov3-l",
             "deimv2-hgnetv2-n",
             "deimv2-hgnetv2-pico",
-            "fsdc-vittest",
+            "deimv2-vittest",
         }
 
     def test_auto_image_size_resolves_to_native(self):

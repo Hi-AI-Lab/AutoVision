@@ -109,7 +109,7 @@ DEIMV2_MODEL_REGISTRY: dict[str, dict[str, Any]] = {
     # (the wrapper overwrites its embed_dim arg with the ViT's real width
     # — dinov3_adapter.py:103). The serialized config.json's
     # "embed_dim: 224" is the PROJECTED width, not the ViT width. Warm
-    # start for the ViT comes from FsdcArgs.backbone_weights (facebook
+    # start for the ViT comes from the backbone_weights arg (facebook
     # conversion, manifest artifact facebook/dinov3-vits16-pretrain-
     # lvd1689m); the decoder trains fresh (no COCO conversion, PR-0).
     "deimv2-dinov3-l": dict(
@@ -151,11 +151,12 @@ DEIMV2_MODEL_REGISTRY: dict[str, dict[str, Any]] = {
             },
         ),
     ),
-    # Hermetic offline variant for the FSDC family's test suite (design
-    # doc 22 §7): tiny DINOv3 ViT so ``tests/test_fsdc_native.py`` can
-    # build the real HF stack without weights or network. Not trainable
-    # in practice; mirrors the vittest pattern of the AV-DETR family.
-    "fsdc-vittest": dict(
+    # Hermetic offline test variant: tiny DINOv3 ViT so the DEIMv2 test
+    # suite can build the real HF stack without weights or network. Not
+    # trainable in practice; mirrors the vittest pattern of the AV-DETR
+    # family. (Formerly "fsdc-vittest", the FSDC family's build check —
+    # family removed, variant kept under a deimv2 name.)
+    "deimv2-vittest": dict(
         hf=None,
         resolution=256,
         size_divisor=32,

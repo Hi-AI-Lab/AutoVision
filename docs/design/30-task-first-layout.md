@@ -35,7 +35,7 @@ src/autovision/tasks/
 │   ├── shared/              # RT-DETR/DFINE 架构核（原 components 主体，
 │   │                        #   含 msda + _msda_src CUDA 源）
 │   ├── avdetr/              # 自研主家族（原状，含 variants.py/optimizer.py 拆分）
-│   └── rtdetr/ dfine/ deimv2/ rfdetr/ picodet/ fsdc/   # 去后缀
+│   └── rtdetr/ dfine/ deimv2/ rfdetr/ picodet/         # 去后缀
 ├── oriented_detection/      # OBB 提升为同级任务
 │   ├── shared/              #   obb_decoder obb_criterion
 │   └── rtdetr/              #   原 rtdetr_oriented_object_detection
@@ -90,3 +90,11 @@ namespace 包（无 `__init__.py`），与 `detection/` 既有惯例一致。
 - 已知存量（非本次引入，移交后续）：`scripts/` 三个 E402、16 个 I001
   （ledger 期间引入，`ruff check scripts` 范围）；LEDGER.md 有并行会话
   的未提交改动，本重构未附台账条目。
+
+## 6. 附记：FSDC 家族删除（2026-10-15）
+
+方向调整，`tasks/detection/fsdc/`（含 stage 3 归入的 sfs_ff/dbfsaf/
+wavelet_downsample）、`fsdc/*` registry 键与 CLI 分派、
+`tests/test_fsdc_native.py`、4 个 `scripts/*fsdc*` 一并移除；deimv2
+离线测试变体 `fsdc-vittest` 更名 `deimv2-vittest`。详见
+`docs/migration-0.2.md` §0.3 附注。

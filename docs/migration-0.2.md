@@ -126,3 +126,9 @@ docs/ 历史分册中的 LT-DETR 表述（历史名，新文档首行已注）�
 
 不变：`tasks.detection.avdetr`、`tasks.eomt`（跨三任务架构核）、
 registry/CLI 键名与 `LEGACY_CLASS_PATH_REMAP` 全部历史键。
+
+**FSDC 家族删除（2026-10-15）**：`tasks/detection/fsdc/`、registry 键
+`fsdc/*`、CLI 分派分支、`tests/test_fsdc_native.py` 与 4 个
+`scripts/*fsdc*` 运行脚本移除；deimv2 的离线测试变体 `fsdc-vittest`
+更名 `deimv2-vittest`（纯测试用，无发布模型）。旧 FSDC 导出/checkpoint
+自此不可加载（类已不存在）。历史设计文档 21/22 保留。

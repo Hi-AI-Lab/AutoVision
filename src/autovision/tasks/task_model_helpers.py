@@ -60,8 +60,6 @@ _MODULE_PATH_MIGRATIONS: tuple[tuple[str, str], ...] = (
      "autovision.tasks.detection.rfdetr."),
     ("autovision.tasks.detection.picodet_object_detection.",
      "autovision.tasks.detection.picodet."),
-    ("autovision.tasks.detection.fsdc_object_detection.",
-     "autovision.tasks.detection.fsdc."),
 )
 
 
