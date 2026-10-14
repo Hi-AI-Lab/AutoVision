@@ -34,7 +34,7 @@ src/autovision/tasks/
 ├── detection/
 │   ├── shared/              # RT-DETR/DFINE 架构核（原 components 主体，
 │   │                        #   含 msda + _msda_src CUDA 源）
-│   ├── avdetr/              # 自研主家族（原状，含 variants.py/optimizer.py 拆分）
+│   ├── detr/                # 自研主家族（原 avdetr，2026-10-15 再更名）
 │   └── rtdetr/ dfine/ deimv2/ rfdetr/ picodet/         # 去后缀
 ├── oriented_detection/      # OBB 提升为同级任务
 │   ├── shared/              #   obb_decoder obb_criterion
@@ -98,3 +98,9 @@ wavelet_downsample）、`fsdc/*` registry 键与 CLI 分派、
 `tests/test_fsdc_native.py`、4 个 `scripts/*fsdc*` 一并移除；deimv2
 离线测试变体 `fsdc-vittest` 更名 `deimv2-vittest`。详见
 `docs/migration-0.2.md` §0.3 附注。
+
+## 7. 附记：家族更名 avdetr → detr（2026-10-15）
+
+自研检测器族 AV-DETR 更名 **DETR**（目录/registry 键/9 个类/函数/19 个
+脚本），`avdetr/*`、`ltdetr/*` 双旧键弃用别名；第五代类路径迁移
+（模块前缀 + 改名类精确条目）见 `docs/migration-0.2.md` 对应节。

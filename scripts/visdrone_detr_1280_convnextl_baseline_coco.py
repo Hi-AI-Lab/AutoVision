@@ -1,24 +1,31 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
-"""VisDrone LT-DETR at 800x800 — COCO-full warm start + box-aware eraser (A/B twin).
+"""VisDrone LT-DETR at 1280x1280 — ConvNeXt-LARGE, COCO-full warm start.
 
-Bit-identical copy of ``visdrone_ltdetr_800_baseline_coco.py`` except for the
-box-aware eraser (design doc 16) being switched ON in TRANSFORM_ARGS:
+Backbone-upgrade twin of ``visdrone_ltdetr_1280_convnextb_baseline_coco.py``
+(dinov3-convnext-base -> dinov3-convnext-large, NO box-aware eraser).
 
-    random_erase_prob 0.5 / ratio 0.4 / interior=True / min_keep=2,
-    step_stop AUG_STOP_STEP (same Dome aug-stop cadence as every other aug).
+Checkpoint ``dinov3_convnext_large_ltdetr_coco_251218_03fe6750.pt`` was
+verified to mandate the SAME head architecture as the base sibling:
+encoder width 384 / decoder width 256 / 6 rtdetrv2 decoder layers /
+300 queries (read off the checkpoint tensors: encoder input_proj 1x1 convs
+(384, 384/768/1536) — the latter are exactly ConvNeXt-Large's stage-1..3
+widths — and dec self_attn in_proj (768, 256), dec layers 0..5). So
+MODEL_ARGS keeps the base script's shapes verbatim.
 
-Everything else — COCO FULL detector checkpoint (backbone + encoder +
-decoder), checkpoint-mandated baseline architecture (rtdetrv2 6 layers,
-encoder 384 / decoder 256, 300 queries), LR/EMA/aug/schedule recipe, batch,
-steps — is untouched, so against ``runs/visdrone_ltdetr_convnextt_800_cocofull``
-(best mAP 0.3465 @ 36k) the ERASER is the only added variable. Val stays
-erase-free (the loader clears random_erase_prob).
+Resolution / batch handling:
+
+- ``image_size`` (1280, 1280); ``scale_jitter`` pinned to ``[1280]`` (the
+  collate samples train resolution from ``sizes``, not ``image_size``).
+- ConvNeXt-large is ~2.2x the base backbone (198M vs 89M params). Base at
+  micro-batch 2 already leans on the 24 GB card, so large runs micro-batch
+  1 x accum 8 — the GLOBAL batch stays at 8 (LR recipe, 40,443 steps,
+  AUG_STOP_STEP 27299 and LR milestones unchanged).
 
 Launch:
 
     cd /home/hdjs/Research/Project/AutoVision && \
-    setsid nohup .venv/bin/python scripts/visdrone_ltdetr_800_baseline_coco_erase.py \
-        > runs/visdrone_ltdetr_convnextt_800_cocofull_erase_console.log 2>&1 &
+    setsid nohup .venv/bin/python scripts/visdrone_ltdetr_1280_convnextl_baseline_coco.py \
+        > runs/visdrone_ltdetr_convnextl_1280_cocofull_console.log 2>&1 &
 """
 
 import time
@@ -32,27 +39,33 @@ DATA_ARGS = {
     "val": {"annotations": str(VISDRONE / "annotations/visdrone_val.json"),
             "images": str(VISDRONE / "VisDrone2019-DET-val/images")},
 }
-#: The SHA256-verified full published checkpoint (backbone + encoder +
-#: decoder). Same file as /tmp/lightly_ckpts/... copied into the weight dir.
+#: The SHA-verified published ConvNeXt-LARGE detector checkpoint
+#: (backbone + encoder + decoder, 80 COCO classes).
 DETECTOR_CHECKPOINT = Path(
     "/home/hdjs/Research/Project/Dino-Dome-Research/weight/dinov3"
-    "/dinov3_convnext_tiny_ltdetr_coco_full.pt"
+    "/dinov3_convnext_large_ltdetr_coco_251218_03fe6750.pt"
 )
 
-# 50-epoch horizon, batch 8 — same as the running backbone-only pilot.
+IMAGE_SIZE = (1280, 1280)
+
+# 50-epoch horizon — micro-batch 1 x accum 8 keeps the global batch at 8,
+# so STEPS / AUG_STOP_STEP / LR milestones match the tiny/base runs exactly.
 EPOCHS = 50
 TRAIN_IMAGES = 6471
 GLOBAL_BATCH = 8
+MICRO_BATCH = 1
+GRAD_ACCUM = GLOBAL_BATCH // MICRO_BATCH
 STEPS = (TRAIN_IMAGES * EPOCHS) // GLOBAL_BATCH  # 40,443
 AUG_STOP_FRACTION = 108 / 160
 AUG_STOP_STEP = round(STEPS * AUG_STOP_FRACTION)  # 27,299
 
 MODEL_ARGS = {
-    "backbone": "dinov3-convnext-tiny",
+    "backbone": "dinov3-convnext-large",
     "backbone_pretrained": False,       # backbone comes from the checkpoint
     "detector_checkpoint": DETECTOR_CHECKPOINT,
-    "image_size": (800, 800),
-    # Checkpoint-mandated architecture (baseline shapes).
+    "image_size": IMAGE_SIZE,
+    # Checkpoint-mandated architecture — verified identical to the base
+    # baseline shapes (see module docstring).
     "decoder": "rtdetrv2",
     "dec_layers": 6,
     "pyramid_levels": 3,
@@ -67,8 +80,8 @@ MODEL_ARGS = {
     "reg_scale": 4.0,
     # Official eval protocol for the dense benchmark.
     "eval_max_dets": 500,
-    # Pilot LR recipe, identical to the running 50-epoch backbone-only
-    # twin (1.4e-4 -> 9.9e-5 effective at global batch 8).
+    # Pilot LR recipe, identical to the tiny/base 1280 runs (1.4e-4 ->
+    # 9.9e-5 effective at global batch 8, backbone x0.1).
     "lr": 1.4e-4,
     "lr_reference_batch": 16,
     "backbone_lr_factor": 0.1,
@@ -91,17 +104,10 @@ TRANSFORM_ARGS = {
     "photometric_step_stop": AUG_STOP_STEP,
     "zoom_out_step_stop": AUG_STOP_STEP,
     "iou_crop_step_stop": AUG_STOP_STEP,
-    # Box-aware background eraser, doc 16 (design doc 16 / rf-detr-ssl-v2
-    # doc 8): prob 0.5 / ratio 0.4, constrained-interior mode (every object
-    # keeps >= 2 patches). Val stays erase-free (the loader clears
-    # random_erase_prob). The stop follows the Dome aug-stop cadence
-    # (doc 16 P1.5). THE ONLY DIFF against the cocofull baseline script.
-    "random_erase_prob": 0.5,
-    "random_erase_ratio": 0.4,
-    "random_erase_interior": True,
-    "random_erase_min_keep": 2,
     "random_erase_step_stop": AUG_STOP_STEP,
-    "scale_jitter": {"sizes": [800], "step_stop": AUG_STOP_STEP},
+    # Train resolution comes from THIS list (collate samples it), not from
+    # image_size — keep it in sync with IMAGE_SIZE.
+    "scale_jitter": {"sizes": [1280], "step_stop": AUG_STOP_STEP},
 }
 
 
@@ -110,12 +116,12 @@ def main() -> None:
 
     start = time.perf_counter()
     result = train_object_detection(
-        out="runs/visdrone_ltdetr_convnextt_800_cocofull_erase",
+        out="runs/visdrone_ltdetr_convnextl_1280_cocofull",
         data=DATA_ARGS,
-        model="avdetr/dinov3-convnext-tiny",
+        model="detr/dinov3-convnext-large",
         steps=STEPS,
-        batch_size=GLOBAL_BATCH,
-        gradient_accumulation_steps=1,
+        batch_size=MICRO_BATCH,
+        gradient_accumulation_steps=GRAD_ACCUM,
         num_workers=8,
         model_args=MODEL_ARGS,
         transform_args=TRANSFORM_ARGS,
@@ -123,7 +129,8 @@ def main() -> None:
         save_checkpoint_args={"save_every_num_steps": 2000},
     )
     print("\n" + "=" * 60)
-    print(f"VisDrone LT-DETR 800px {EPOCHS} epochs (COCO FULL warm start + box-aware eraser)")
+    print(f"VisDrone LT-DETR 1280px ConvNeXt-LARGE {EPOCHS} epochs "
+          f"(COCO FULL warm start, global batch {GLOBAL_BATCH})")
     print("=" * 60)
     print(f"steps:        {result.steps_run}")
     print(f"best ckpt:    {result.best_checkpoint_path}")

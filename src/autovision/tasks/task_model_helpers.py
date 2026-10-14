@@ -52,6 +52,8 @@ _MODULE_PATH_MIGRATIONS: tuple[tuple[str, str], ...] = (
      "autovision.tasks.oriented_detection.rtdetr."),
     ("autovision.tasks.detection.rtdetr_object_detection.",
      "autovision.tasks.detection.rtdetr."),
+    ("autovision.tasks.detection.avdetr.",
+     "autovision.tasks.detection.detr."),
     ("autovision.tasks.detection.dfine_object_detection.",
      "autovision.tasks.detection.dfine."),
     ("autovision.tasks.detection.deimv2_object_detection.",
@@ -61,6 +63,26 @@ _MODULE_PATH_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("autovision.tasks.detection.picodet_object_detection.",
      "autovision.tasks.detection.picodet."),
 )
+
+
+# Class-name generations: the AV-DETR -> DETR family rename (2026-10-15)
+# also renamed the public classes; the module-prefix rule above fixes the
+# module, these exact entries fix the class segment. (Old exports embed
+# the full old class path.)
+for _module, _names in {
+    "task_model": ["DETRObjectDetection"],
+    "train_model": ["DETRObjectDetectionTrain"],
+    "config": [
+        "DETRObjectDetectionTrainArgs", "DETRDensityArgs", "DETRSSLArgs",
+        "DETRTokenDropArgs", "DETRDistillArgs", "DETROpenVocabArgs",
+    ],
+    "variants": ["DETRVariantSpec"],
+}.items():
+    for _name in _names:
+        _old = f"autovision.tasks.detection.avdetr.{_module}.AV{_name}"
+        _new = f"autovision.tasks.detection.detr.{_module}.{_name}"
+        _CLASS_PATH_MIGRATIONS.setdefault(_old, _new)
+del _module, _names, _name, _old, _new
 
 
 def _migrate_class_path(class_path: str) -> str:

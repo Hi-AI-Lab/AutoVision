@@ -27,16 +27,16 @@ from autovision.augment.detection.box_aware_eraser import (
 )
 from autovision.encoders.dinov2.dinov2_wrapper import TransformersDinov2Wrapper
 from autovision.encoders.dinov3.dinov3_wrapper import TransformersDinov3ViTWrapper
-from autovision.tasks.detection.avdetr import (
-    AVDETRObjectDetectionTrainArgs,
-    AVDETRTokenDropArgs,
+from autovision.tasks.detection.detr import (
+    DETRObjectDetectionTrainArgs,
+    DETRTokenDropArgs,
 )
-from autovision.tasks.detection.avdetr.task_model import (
-    AVDETRObjectDetection,
+from autovision.tasks.detection.detr.task_model import (
+    DETRObjectDetection,
     _dinov3_supported,
 )
-from autovision.tasks.detection.avdetr.train_model import (
-    AVDETRObjectDetectionTrain,
+from autovision.tasks.detection.detr.train_model import (
+    DETRObjectDetectionTrain,
     _build_window_keep_masks,
 )
 
@@ -57,10 +57,10 @@ def make_wrapper() -> TransformersDinov2Wrapper:
     return TransformersDinov2Wrapper(transformers.Dinov2Model(config)).eval()
 
 
-def make_task_model(token_drop: dict | None = None) -> AVDETRObjectDetection:
+def make_task_model(token_drop: dict | None = None) -> DETRObjectDetection:
     """vittest task model on a 112px canvas: 8x8 patches, 28px windows →
     a 4x4 window grid."""
-    model = AVDETRObjectDetection(
+    model = DETRObjectDetection(
         num_classes=4,
         model_name="dinov2-vittest-notpretrained",
         image_size=(112, 112),
@@ -336,7 +336,7 @@ class TestMaskConstruction:
         # One box pinned to the top-left 28px window of the 112px canvas.
         boxes = torch.tensor([[0.125, 0.125, 0.02, 0.02]])
         x, targets = self._batch([boxes])
-        args = AVDETRTokenDropArgs(window_size=28, keep_ratio=0.4, prob=1.0)
+        args = DETRTokenDropArgs(window_size=28, keep_ratio=0.4, prob=1.0)
         for _ in range(20):  # resample the background subset repeatedly
             masks, _ = self._build(x, targets, args)
             mask = masks[0]
@@ -347,7 +347,7 @@ class TestMaskConstruction:
         torch.manual_seed(0)
         boxes = torch.tensor([[0.125, 0.125, 0.02, 0.02]])
         x, targets = self._batch([boxes])
-        args = AVDETRTokenDropArgs(window_size=28, keep_ratio=0.4)
+        args = DETRTokenDropArgs(window_size=28, keep_ratio=0.4)
         masks, _ = self._build(x, targets, args)
         protected = protected_cell_mask(boxes, 112, 112, cell=28, padding=0.15)
         background = int((~protected).sum())
@@ -356,21 +356,21 @@ class TestMaskConstruction:
 
     def test_empty_boxes_run_dense(self):
         x, targets = self._batch([torch.zeros(0, 4)])
-        masks, ratio = self._build(x, targets, AVDETRTokenDropArgs(window_size=28))
+        masks, ratio = self._build(x, targets, DETRTokenDropArgs(window_size=28))
         assert masks == [None]
         assert ratio == 1.0
 
     def test_undivisible_canvas_runs_dense(self):
         boxes = torch.tensor([[0.5, 0.5, 0.1, 0.1]])
         x, targets = self._batch([boxes], size=100)  # 100 % 28 != 0
-        masks, _ = self._build(x, targets, AVDETRTokenDropArgs(window_size=28))
+        masks, _ = self._build(x, targets, DETRTokenDropArgs(window_size=28))
         assert masks == [None]
 
     def test_prob_zero_is_identity(self):
         torch.manual_seed(0)
         boxes = torch.tensor([[0.5, 0.5, 0.1, 0.1]])
         x, targets = self._batch([boxes, boxes])
-        masks, _ = self._build(x, targets, AVDETRTokenDropArgs(window_size=28, prob=0.0))
+        masks, _ = self._build(x, targets, DETRTokenDropArgs(window_size=28, prob=0.0))
         assert masks == [None, None]
 
     def test_fully_protected_sample_runs_dense(self):
@@ -385,7 +385,7 @@ class TestMaskConstruction:
         )
         x, targets = self._batch([boxes])
         masks, ratio = self._build(
-            x, targets, AVDETRTokenDropArgs(window_size=28, keep_ratio=0.4)
+            x, targets, DETRTokenDropArgs(window_size=28, keep_ratio=0.4)
         )
         assert masks == [None], "an all-keep draw must take the dense path"
         assert ratio == 1.0
@@ -393,7 +393,7 @@ class TestMaskConstruction:
     def test_seed_reproducibility(self):
         boxes = torch.tensor([[0.5, 0.5, 0.1, 0.1]])
         x, targets = self._batch([boxes])
-        args = AVDETRTokenDropArgs(window_size=28)
+        args = DETRTokenDropArgs(window_size=28)
         torch.manual_seed(7)
         first, _ = self._build(x, targets, args)
         torch.manual_seed(7)
@@ -403,7 +403,7 @@ class TestMaskConstruction:
 
 class TestConfigContract:
     def test_off_by_default(self):
-        args = AVDETRObjectDetectionTrainArgs()
+        args = DETRObjectDetectionTrainArgs()
         assert args.token_drop is None
 
     def test_task_model_default_has_no_token_drop(self):
@@ -414,7 +414,7 @@ class TestConfigContract:
         model = make_task_model(
             token_drop={"window_size": 28, "keep_ratio": 0.4, "step_stop": None}
         )
-        assert isinstance(model._token_drop_args, AVDETRTokenDropArgs)
+        assert isinstance(model._token_drop_args, DETRTokenDropArgs)
         assert model._token_drop_args.window_size == 28
         # The export-safe snapshot is a plain dict (weights_only loader).
         assert isinstance(model._init_args["token_drop"], dict)
@@ -425,7 +425,7 @@ class TestConfigContract:
 
     def test_convnext_family_rejected(self):
         with pytest.raises(ValueError, match="ViT-family"):
-            AVDETRObjectDetection(
+            DETRObjectDetection(
                 num_classes=2,
                 model_name="dinov3-convnext-tiny",
                 token_drop={"window_size": 32},
@@ -433,7 +433,7 @@ class TestConfigContract:
 
     def test_ecvit_family_rejected(self):
         with pytest.raises(ValueError, match="ViT-family"):
-            AVDETRObjectDetection(
+            DETRObjectDetection(
                 num_classes=2,
                 model_name="edgecrafter-ecvitt",
                 token_drop={"window_size": 32},
@@ -446,7 +446,7 @@ class TestConfigContract:
         # Since design doc 20 the DINOv3 ViT wrapper implements the masked
         # forward itself (embeddings -> rope -> encoder with rope gathered
         # alongside the tokens), so the structural gate accepts it.
-        model = AVDETRObjectDetection(
+        model = DETRObjectDetection(
             num_classes=2,
             model_name="dinov3-vits16-notpretrained",
             image_size=(128, 128),
@@ -515,8 +515,8 @@ class TestTaskModelIntegration:
 
 
 class TestTrainingStepIntegration:
-    def make_train_model(self, token_drop: dict | None) -> AVDETRObjectDetectionTrain:
-        args = AVDETRObjectDetectionTrainArgs(
+    def make_train_model(self, token_drop: dict | None) -> DETRObjectDetectionTrain:
+        args = DETRObjectDetectionTrainArgs(
             num_classes=4,
             backbone="dinov2-vittest-notpretrained",
             image_size=(112, 112),
@@ -524,7 +524,7 @@ class TestTrainingStepIntegration:
             num_top_queries=10,
             token_drop=token_drop,
         )
-        return AVDETRObjectDetectionTrain(args)
+        return DETRObjectDetectionTrain(args)
 
     @staticmethod
     def make_batch():

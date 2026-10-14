@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
-"""Assembly-loader tests (design doc 28 §6.2): Apache components -> AV-DETR.
+"""Assembly-loader tests (design doc 28 §6.2): Apache components -> DETR.
 
 These tests exercise the real downloaded Apache weights when they are
 present in the local cache and skip cleanly on machines without them
@@ -21,9 +21,9 @@ pytestmark = pytest.mark.filterwarnings("ignore::UserWarning")
 
 
 def _make_model(backbone: str):
-    from autovision.tasks.detection.avdetr import AVDETRObjectDetection
+    from autovision.tasks.detection.detr import DETRObjectDetection
 
-    return AVDETRObjectDetection(
+    return DETRObjectDetection(
         num_classes=80, model_name=backbone,
         image_size=(320, 320), decoder="dfine_official",
     )
@@ -32,7 +32,7 @@ def _make_model(backbone: str):
 @pytest.mark.skipif(not DFINE_S.is_file(), reason="D-FINE COCO weights not cached")
 class TestDfineOfficialWarmStart:
     def test_width_matched_variant_transfers(self):
-        from autovision.tasks.detection.avdetr.dfine_official_warm_start import (
+        from autovision.tasks.detection.detr.dfine_official_warm_start import (
             load_dfine_official_warm_start,
         )
 
@@ -43,7 +43,7 @@ class TestDfineOfficialWarmStart:
         assert summary["discarded_backbone_tensors"] > 0
 
     def test_width_mismatched_variant_refused(self):
-        from autovision.tasks.detection.avdetr.dfine_official_warm_start import (
+        from autovision.tasks.detection.detr.dfine_official_warm_start import (
             load_dfine_official_warm_start,
         )
 
@@ -55,7 +55,7 @@ class TestDfineOfficialWarmStart:
     def test_ecvitt_backbone_loads_into_matching_variant(self):
         from autovision.registry.assets import LicenseRef
         from autovision.registry.warm_start import save_warm_start
-        from autovision.tasks.detection.avdetr.dfine_official_warm_start import (
+        from autovision.tasks.detection.detr.dfine_official_warm_start import (
             load_dfine_official_warm_start,
         )
 
@@ -72,7 +72,7 @@ class TestDfineOfficialWarmStart:
         out = save_warm_start(
             _CACHE / "smoke_warm_start.pt",
             model=model.state_dict(),
-            spec={"family": "avdetr", "classes": 80},
+            spec={"family": "detr", "classes": 80},
             license=LicenseRef(id="Apache-2.0", origin="assembly smoke"),
         )
         assert out.is_file()

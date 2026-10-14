@@ -59,8 +59,8 @@ __all__ = [
 class DistillParams:
     """Shared-component distillation contract (design doc 23 §4.1).
 
-    Built from the task-family config (``AVDETRDistillArgs``) by the train
-    wrapper, keeping the components layer free of avdetr imports — the
+    Built from the task-family config (``DETRDistillArgs``) by the train
+    wrapper, keeping the components layer free of detr imports — the
     ``SSLParams`` precedent. Coefficients ride the criterion's
     ``weight_dict`` (applied once); the legs are computed at the final
     decoder layer only.

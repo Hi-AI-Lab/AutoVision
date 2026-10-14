@@ -1,30 +1,24 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
-"""VisDrone LT-DETR at 800x800 — FULL COCO-detector warm start (baseline arch).
+"""VisDrone LT-DETR at 800x800 — COCO-full warm start + box-aware eraser (A/B twin).
 
-Loads the published lightly-train LT-DETR COCO detector checkpoint
-(``dinov3_convnext_tiny_ltdetr_coco_251218_35bbc4fb.pt``, SHA256 verified)
-into backbone + encoder + decoder. The checkpoint's architecture dictates
-the model — the BASELINE shapes, not the Dome-S twin's:
+Bit-identical copy of ``visdrone_ltdetr_800_baseline_coco.py`` except for the
+box-aware eraser (design doc 16) being switched ON in TRANSFORM_ARGS:
 
-- decoder ``rtdetrv2`` with 6 layers (the published head family; the local
-  spec default of 3 layers is the D-FINE CNNTiny depth);
-- encoder width 384 (variant spec default) with decoder width 256
-  (baseline decouples the two; ``decoder_hidden_dim=256``);
-- 3-level pyramid, 300 queries / 300 top queries.
+    random_erase_prob 0.5 / ratio 0.4 / interior=True / min_keep=2,
+    step_stop AUG_STOP_STEP (same Dome aug-stop cadence as every other aug).
 
-Class-count-dependent decoder heads (score heads + denoising embed) stay
-fresh for VisDrone's 10 classes; everything else (632 tensors) loads from
-COCO. Training recipe otherwise matches the running 50-epoch pilot
-(lr 1.4e-4 @ reference batch 16, EMA 0.9999/1000, augs from step 0,
-aug-stop 108/160, batch 8, 50 epochs) so the WEIGHT SOURCE is the only
-added variable against it — the architecture difference is dictated by
-the checkpoint and recorded here.
+Everything else — COCO FULL detector checkpoint (backbone + encoder +
+decoder), checkpoint-mandated baseline architecture (rtdetrv2 6 layers,
+encoder 384 / decoder 256, 300 queries), LR/EMA/aug/schedule recipe, batch,
+steps — is untouched, so against ``runs/visdrone_ltdetr_convnextt_800_cocofull``
+(best mAP 0.3465 @ 36k) the ERASER is the only added variable. Val stays
+erase-free (the loader clears random_erase_prob).
 
 Launch:
 
     cd /home/hdjs/Research/Project/AutoVision && \
-    setsid nohup .venv/bin/python scripts/visdrone_ltdetr_800_baseline_coco.py \
-        > runs/visdrone_ltdetr_convnextt_800_cocofull_console.log 2>&1 &
+    setsid nohup .venv/bin/python scripts/visdrone_ltdetr_800_baseline_coco_erase.py \
+        > runs/visdrone_ltdetr_convnextt_800_cocofull_erase_console.log 2>&1 &
 """
 
 import time
@@ -97,6 +91,15 @@ TRANSFORM_ARGS = {
     "photometric_step_stop": AUG_STOP_STEP,
     "zoom_out_step_stop": AUG_STOP_STEP,
     "iou_crop_step_stop": AUG_STOP_STEP,
+    # Box-aware background eraser, doc 16 (design doc 16 / rf-detr-ssl-v2
+    # doc 8): prob 0.5 / ratio 0.4, constrained-interior mode (every object
+    # keeps >= 2 patches). Val stays erase-free (the loader clears
+    # random_erase_prob). The stop follows the Dome aug-stop cadence
+    # (doc 16 P1.5). THE ONLY DIFF against the cocofull baseline script.
+    "random_erase_prob": 0.5,
+    "random_erase_ratio": 0.4,
+    "random_erase_interior": True,
+    "random_erase_min_keep": 2,
     "random_erase_step_stop": AUG_STOP_STEP,
     "scale_jitter": {"sizes": [800], "step_stop": AUG_STOP_STEP},
 }
@@ -107,9 +110,9 @@ def main() -> None:
 
     start = time.perf_counter()
     result = train_object_detection(
-        out="runs/visdrone_ltdetr_convnextt_800_cocofull",
+        out="runs/visdrone_ltdetr_convnextt_800_cocofull_erase",
         data=DATA_ARGS,
-        model="avdetr/dinov3-convnext-tiny",
+        model="detr/dinov3-convnext-tiny",
         steps=STEPS,
         batch_size=GLOBAL_BATCH,
         gradient_accumulation_steps=1,
@@ -120,7 +123,7 @@ def main() -> None:
         save_checkpoint_args={"save_every_num_steps": 2000},
     )
     print("\n" + "=" * 60)
-    print(f"VisDrone LT-DETR 800px {EPOCHS} epochs (COCO FULL warm start)")
+    print(f"VisDrone LT-DETR 800px {EPOCHS} epochs (COCO FULL warm start + box-aware eraser)")
     print("=" * 60)
     print(f"steps:        {result.steps_run}")
     print(f"best ckpt:    {result.best_checkpoint_path}")

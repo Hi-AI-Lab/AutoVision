@@ -24,10 +24,10 @@ from autovision.augment.detection import (
 )
 from autovision.config.validate import pydantic_model_validate
 from autovision.data.two_view import TwoViewObjectDetectionDataset
-from autovision.tasks.detection.avdetr import (
-    AVDETRObjectDetectionTrain,
-    AVDETRObjectDetectionTrainArgs,
-    AVDETRSSLArgs,
+from autovision.tasks.detection.detr import (
+    DETRObjectDetectionTrain,
+    DETRObjectDetectionTrainArgs,
+    DETRSSLArgs,
 )
 from autovision.tasks.detection.shared.dfine_criterion import (
     DFINECriterionV2,
@@ -59,25 +59,25 @@ VARIANT_ARGS = dict(
 
 
 # ── fixtures ────────────────────────────────────────────────────────────
-def make_ssl_train_model(**ssl_overrides) -> AVDETRObjectDetectionTrain:
+def make_ssl_train_model(**ssl_overrides) -> DETRObjectDetectionTrain:
     ssl = dict(mode="unsup", view="two_crop", loss_coef=0.1)
     ssl.update(ssl_overrides)
-    args = AVDETRObjectDetectionTrainArgs(**VARIANT_ARGS, ssl=ssl)
-    return AVDETRObjectDetectionTrain(args)
+    args = DETRObjectDetectionTrainArgs(**VARIANT_ARGS, ssl=ssl)
+    return DETRObjectDetectionTrain(args)
 
 
-def make_baseline_train_model() -> AVDETRObjectDetectionTrain:
-    args = AVDETRObjectDetectionTrainArgs(**VARIANT_ARGS)
-    return AVDETRObjectDetectionTrain(args)
+def make_baseline_train_model() -> DETRObjectDetectionTrain:
+    args = DETRObjectDetectionTrainArgs(**VARIANT_ARGS)
+    return DETRObjectDetectionTrain(args)
 
 
 @pytest.fixture(scope="module")
-def ssl_train_model() -> AVDETRObjectDetectionTrain:
+def ssl_train_model() -> DETRObjectDetectionTrain:
     return make_ssl_train_model()
 
 
 @pytest.fixture(scope="module")
-def baseline_train_model() -> AVDETRObjectDetectionTrain:
+def baseline_train_model() -> DETRObjectDetectionTrain:
     return make_baseline_train_model()
 
 
@@ -714,12 +714,12 @@ def test_ssl_off_dropout_view_integration():
 
 
 def test_dome_and_ssl_combined():
-    args = AVDETRObjectDetectionTrainArgs(
+    args = DETRObjectDetectionTrainArgs(
         **VARIANT_ARGS,
         density={"max_num_select": 50, "mwas_window_size": 5},
         ssl={"mode": "unsup", "view": "two_crop", "loss_coef": 0.1},
     )
-    model = AVDETRObjectDetectionTrain(args)
+    model = DETRObjectDetectionTrain(args)
     batch = make_two_crop_batch(pairs=2, matching=True, seed=5)
     result = model.training_step(batch, step=0)
     assert torch.isfinite(result.loss)
@@ -730,34 +730,34 @@ def test_dome_and_ssl_combined():
 # ── config validation ───────────────────────────────────────────────────
 def test_config_zero_coef_with_active_mode_raises():
     with pytest.raises(ValueError, match="loss_coef"):
-        AVDETRSSLArgs(mode="unsup", loss_coef=0.0)
+        DETRSSLArgs(mode="unsup", loss_coef=0.0)
 
 
 def test_config_zero_coef_with_off_mode_is_the_baseline():
-    args = AVDETRSSLArgs(mode="off", loss_coef=0.0, view="two_crop")
+    args = DETRSSLArgs(mode="off", loss_coef=0.0, view="two_crop")
     assert args.view == "two_crop"
 
 
 def test_config_same_image_requires_two_crop():
     with pytest.raises(ValueError, match="two_crop"):
-        AVDETRSSLArgs(mode="sup", view="dropout", same_image_positive_only=True)
+        DETRSSLArgs(mode="sup", view="dropout", same_image_positive_only=True)
 
 
 def test_config_route_b_requires_unsup_and_dropout():
     """Route B (encoder_candidates) is label-free: unsup + dropout only."""
-    args = AVDETRSSLArgs(
+    args = DETRSSLArgs(
         mode="unsup", view="dropout", instance_source="encoder_candidates"
     )
     assert args.instance_source == "encoder_candidates"
     assert args.to_ssl_params().instance_source == "encoder_candidates"
     with pytest.raises(ValueError, match="unsup"):
-        AVDETRSSLArgs(mode="sup", view="dropout", instance_source="encoder_candidates")
+        DETRSSLArgs(mode="sup", view="dropout", instance_source="encoder_candidates")
     with pytest.raises(ValueError, match="dropout"):
-        AVDETRSSLArgs(mode="unsup", view="two_crop", instance_source="encoder_candidates")
+        DETRSSLArgs(mode="unsup", view="two_crop", instance_source="encoder_candidates")
     # The stride gate interleaves SSL with the detection losses — there is
     # nothing to interleave with in SSL-only mode, so reject a silent no-op.
     with pytest.raises(ValueError, match="every_n_steps"):
-        AVDETRSSLArgs(
+        DETRSSLArgs(
             mode="unsup", view="dropout", instance_source="encoder_candidates",
             every_n_steps=3,
         )
@@ -765,16 +765,16 @@ def test_config_route_b_requires_unsup_and_dropout():
 
 def test_config_unknown_key_rejected():
     with pytest.raises(Exception):
-        pydantic_model_validate(AVDETRSSLArgs, {"mode": "unsup", "bogus": 1})
+        pydantic_model_validate(DETRSSLArgs, {"mode": "unsup", "bogus": 1})
 
 
 def test_task_model_rejects_ssl_with_rtdetrv2_decoder():
-    from autovision.tasks.detection.avdetr.task_model import (
-        AVDETRObjectDetection,
+    from autovision.tasks.detection.detr.task_model import (
+        DETRObjectDetection,
     )
 
     with pytest.raises(ValueError, match="D-FINE"):
-        AVDETRObjectDetection(
+        DETRObjectDetection(
             num_classes=2,
             model_name="dinov2-vittest-notpretrained",
             image_size=(224, 224),
@@ -1193,8 +1193,8 @@ def test_ema_checkpoint_roundtrip_covers_ssl_head():
 
 
 # ── Route B: label-free SSL-only pretraining (design doc 14 §4.10) ──────
-def make_route_b_train_model() -> AVDETRObjectDetectionTrain:
-    args = AVDETRObjectDetectionTrainArgs(
+def make_route_b_train_model() -> DETRObjectDetectionTrain:
+    args = DETRObjectDetectionTrainArgs(
         **VARIANT_ARGS,
         ssl={
             "mode": "unsup",
@@ -1203,7 +1203,7 @@ def make_route_b_train_model() -> AVDETRObjectDetectionTrain:
             "instance_source": "encoder_candidates",
         },
     )
-    return AVDETRObjectDetectionTrain(args)
+    return DETRObjectDetectionTrain(args)
 
 
 def test_route_b_component_pool_is_all_candidates():
@@ -1295,7 +1295,7 @@ def test_route_b_validation_keeps_head_dropout_active():
     probe instead of the train objective's two-view estimate. The val step
     must run the forward with the head in train mode (restored right after)
     and the two stochastic draws must actually differ."""
-    args = AVDETRObjectDetectionTrainArgs(
+    args = DETRObjectDetectionTrainArgs(
         **VARIANT_ARGS,
         ssl={
             "mode": "unsup",
@@ -1305,7 +1305,7 @@ def test_route_b_validation_keeps_head_dropout_active():
             "projector_dropout": 0.5,  # identical-draw probability 0.5^64 ≈ 0
         },
     )
-    model = AVDETRObjectDetectionTrain(args)
+    model = DETRObjectDetectionTrain(args)
     model.model.eval()
     val_model = model.ema_model.model if model.ema_model is not None else model.model
     batch = {
@@ -1346,12 +1346,12 @@ def test_route_b_stage2_load_drops_pretraining_head():
 
 
 def test_route_b_rejects_density():
-    from autovision.tasks.detection.avdetr import (
-        AVDETRObjectDetectionTrainArgs as Args,
+    from autovision.tasks.detection.detr import (
+        DETRObjectDetectionTrainArgs as Args,
     )
 
     with pytest.raises(ValueError, match="density"):
-        AVDETRObjectDetectionTrain(
+        DETRObjectDetectionTrain(
             Args(
                 **VARIANT_ARGS,
                 density={"max_num_select": 50, "mwas_window_size": 5},

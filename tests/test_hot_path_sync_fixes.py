@@ -30,7 +30,7 @@ import math
 
 import torch
 
-from autovision.tasks.detection.avdetr.dome_decoder import (
+from autovision.tasks.detection.detr.dome_decoder import (
     DomeDFINEv2Decoder,
 )
 from autovision.tasks.detection.shared.denoising import (

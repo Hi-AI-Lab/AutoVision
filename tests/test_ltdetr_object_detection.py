@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
-"""Tests for the AV-DETR object detection family (SSL-backbone finetuning)."""
+"""Tests for the DETR object detection family (SSL-backbone finetuning)."""
 
 import random
 
@@ -16,13 +16,13 @@ from tests.test_train_object_detection import (
 from autovision import load_task_model as load_model
 from autovision import train_object_detection
 from autovision.encoders.dinov2.dinov2_wrapper import TransformersDinov2Wrapper
-from autovision.tasks.detection.avdetr import (
-    AVDETRObjectDetectionTrain,
-    AVDETRObjectDetectionTrainArgs,
-    list_avdetr_model_names,
-    resolve_avdetr_variant,
+from autovision.tasks.detection.detr import (
+    DETRObjectDetectionTrain,
+    DETRObjectDetectionTrainArgs,
+    list_detr_model_names,
+    resolve_detr_variant,
 )
-from autovision.tasks.detection.avdetr.task_model import (
+from autovision.tasks.detection.detr.task_model import (
     _relabel_prefix_drift,
 )
 
@@ -39,8 +39,8 @@ def make_tiny_hf_model() -> TransformersDinov2Wrapper:
     return TransformersDinov2Wrapper(transformers.Dinov2Model(config))
 
 
-def make_train_model(**overrides) -> AVDETRObjectDetectionTrain:
-    args = AVDETRObjectDetectionTrainArgs(
+def make_train_model(**overrides) -> DETRObjectDetectionTrain:
+    args = DETRObjectDetectionTrainArgs(
         num_classes=2,
         backbone="dinov2-vittest-notpretrained",
         image_size=(224, 224),
@@ -48,7 +48,7 @@ def make_train_model(**overrides) -> AVDETRObjectDetectionTrain:
         num_top_queries=20,
         **overrides,
     )
-    return AVDETRObjectDetectionTrain(args)
+    return DETRObjectDetectionTrain(args)
 
 
 def make_batch(size: int = 224, images: int = 2):
@@ -66,73 +66,73 @@ def make_batch(size: int = 224, images: int = 2):
 
 class TestRegistry:
     def test_names_sorted_with_prefix(self):
-        names = list_avdetr_model_names()
+        names = list_detr_model_names()
         assert names == sorted(names)
-        assert all(name.startswith("avdetr/") for name in names)
-        assert "avdetr/dinov2-vits14" in names
-        assert "avdetr/dinov2-vits14-notpretrained" in names
-        assert "avdetr/dinov2-vittest-notpretrained" in names
+        assert all(name.startswith("detr/") for name in names)
+        assert "detr/dinov2-vits14" in names
+        assert "detr/dinov2-vits14-notpretrained" in names
+        assert "detr/dinov2-vittest-notpretrained" in names
         # Baseline-faithful expansions.
-        assert "avdetr/dinov3-vitt16-notpretrained" in names
-        assert "avdetr/dinov3-vits16" in names
-        assert "avdetr/edgecrafter-ecvitt" in names
+        assert "detr/dinov3-vitt16-notpretrained" in names
+        assert "detr/dinov3-vits16" in names
+        assert "detr/edgecrafter-ecvitt" in names
 
     def test_resolve_variant(self):
-        key, spec = resolve_avdetr_variant("avdetr/dinov2-vits14")
+        key, spec = resolve_detr_variant("detr/dinov2-vits14")
         assert key == "dinov2-vits14"
         assert spec.family == "vit"
         assert spec.patch_size == 14
         assert spec.interaction_indexes == (5, 8, 11)
 
     def test_unknown_variant_raises(self):
-        with pytest.raises(ValueError, match="Unknown AV-DETR"):
-            resolve_avdetr_variant("avdetr/nope")
-        with pytest.raises(ValueError, match="Unknown AV-DETR"):
-            resolve_avdetr_variant("rtdetr/resnet18")
+        with pytest.raises(ValueError, match="Unknown DETR"):
+            resolve_detr_variant("detr/nope")
+        with pytest.raises(ValueError, match="Unknown DETR"):
+            resolve_detr_variant("rtdetr/resnet18")
 
     def test_dinov2_variants_are_nosta_with_baseline_recipes(self):
         """Baseline: DINOv2 ViT variants use NO spatial prior, and the
         vits14 recipe projects to hidden 224 with a 4-layer decoder."""
-        _, spec = resolve_avdetr_variant("avdetr/dinov2-vits14")
+        _, spec = resolve_detr_variant("detr/dinov2-vits14")
         assert spec.use_sta is False
         assert spec.conv_inplane == 2 * 14
         assert spec.hidden_dim == 224
         assert spec.dec_layers == 4
         assert spec.enc_dim_feedforward == 896
         assert spec.dec_dim_feedforward == 1792
-        _, base = resolve_avdetr_variant("avdetr/dinov2-vitb14")
+        _, base = resolve_detr_variant("detr/dinov2-vitb14")
         assert base.conv_inplane == 4 * 14 and base.hidden_dim == 768
-        _, giant = resolve_avdetr_variant("avdetr/dinov2-vitg14")
+        _, giant = resolve_detr_variant("detr/dinov2-vitg14")
         assert giant.interaction_indexes == (19, 29, 39)
 
     def test_dinov3_variants_use_sta(self):
         """Baseline: DINOv3 ViT variants fuse the CNN spatial prior with
         conv_inplane = factor x patch_size (16)."""
-        _, tiny = resolve_avdetr_variant("avdetr/dinov3-vitt16")
+        _, tiny = resolve_detr_variant("detr/dinov3-vitt16")
         assert tiny.use_sta is True
         assert tiny.conv_inplane == 1 * 16
         assert tiny.hidden_dim == 192
         assert tiny.enc_expansion == 0.34 and tiny.enc_depth_mult == 0.67
         assert tiny.requires_dinov3 is True
-        _, small = resolve_avdetr_variant("avdetr/dinov3-vits16")
+        _, small = resolve_detr_variant("detr/dinov3-vits16")
         assert small.conv_inplane == 2 * 16 and small.hidden_dim == 224
 
     def test_eupe_names_are_aliases(self):
-        base = resolve_avdetr_variant("avdetr/dinov3-vits16")[1]
-        alias = resolve_avdetr_variant("avdetr/dinov3-vits16-eupe")[1]
+        base = resolve_detr_variant("detr/dinov3-vits16")[1]
+        alias = resolve_detr_variant("detr/dinov3-vits16-eupe")[1]
         assert alias is base
 
     def test_ecvit_variants_default_to_official_dfine(self):
-        _, spec = resolve_avdetr_variant("avdetr/edgecrafter-ecvitt")
+        _, spec = resolve_detr_variant("detr/edgecrafter-ecvitt")
         assert spec.family == "ecvit"
         assert spec.decoder_default == "dfine_official"
         assert spec.hidden_dim == 192
-        _, plus = resolve_avdetr_variant("avdetr/edgecrafter-ecvittplus")
+        _, plus = resolve_detr_variant("detr/edgecrafter-ecvittplus")
         assert plus.backbone_lr_factor == 0.0025
         assert plus.decoder_default == "dfine_official"
 
     def test_convnext_recipes(self):
-        _, large = resolve_avdetr_variant("avdetr/dinov3-convnext-large")
+        _, large = resolve_detr_variant("detr/dinov3-convnext-large")
         assert large.family == "convnext"
         assert large.dec_layers == 6
         assert large.dec_num_points == (4, 4, 4)
@@ -377,7 +377,7 @@ class TestOptimizerGroups:
 
         assert isinstance(scheduler, MultiStepWarmupScheduler)
         assert scheduler.milestones == ()
-        cnn_args = AVDETRObjectDetectionTrainArgs(
+        cnn_args = DETRObjectDetectionTrainArgs(
             num_classes=2,
             backbone="dinov3-convnext-tiny",
             image_size=(224, 224),
@@ -386,7 +386,7 @@ class TestOptimizerGroups:
             num_top_queries=20,
             backbone_pretrained=False,
         )
-        cnn_train_model = AVDETRObjectDetectionTrain(cnn_args)
+        cnn_train_model = DETRObjectDetectionTrain(cnn_args)
         _, cnn_scheduler = cnn_train_model.get_optimizer(
             total_steps=100, global_batch_size=16
         )
@@ -398,13 +398,13 @@ class TestCocoCheckpointLoader:
 
     @staticmethod
     def _model(num_classes: int):
-        from autovision.tasks.detection.avdetr.task_model import (
-            AVDETRObjectDetection,
+        from autovision.tasks.detection.detr.task_model import (
+            DETRObjectDetection,
         )
 
-        return AVDETRObjectDetection(
+        return DETRObjectDetection(
             num_classes=num_classes,
-            model_name="avdetr/dinov3-convnext-tiny",
+            model_name="detr/dinov3-convnext-tiny",
             image_size=(224, 224),
             decoder="rtdetrv2",
             dec_layers=6,
@@ -446,7 +446,7 @@ class TestCocoCheckpointLoader:
     def test_round_trip_80_classes(self, tmp_path):
         import torch
 
-        from autovision.tasks.detection.avdetr.coco_checkpoint import (
+        from autovision.tasks.detection.detr.coco_checkpoint import (
             load_baseline_coco_checkpoint,
         )
 
@@ -470,7 +470,7 @@ class TestCocoCheckpointLoader:
     def test_skips_class_count_heads(self, tmp_path):
         import torch
 
-        from autovision.tasks.detection.avdetr.coco_checkpoint import (
+        from autovision.tasks.detection.detr.coco_checkpoint import (
             load_baseline_coco_checkpoint,
         )
 
@@ -496,8 +496,8 @@ class TestCocoCheckpointLoader:
     def test_decoder_hidden_dim_decoupling(self):
         # Default (None) keeps the shared width; explicit 256 decouples it
         # (checkpoint contract) without touching the encoder width.
-        from autovision.tasks.detection.avdetr.task_model import (
-            AVDETRObjectDetection,
+        from autovision.tasks.detection.detr.task_model import (
+            DETRObjectDetection,
         )
 
         model = self._model(num_classes=10)
@@ -506,8 +506,8 @@ class TestCocoCheckpointLoader:
         assert sd["decoder.decoder.layers.0.self_attn.in_proj_weight"].shape == (768, 256)
         assert sd["decoder.dec_score_head.0.weight"].shape == (10, 256)
         # default shared-width model still behaves as before
-        shared = AVDETRObjectDetection(
-            num_classes=10, model_name="avdetr/dinov3-convnext-tiny",
+        shared = DETRObjectDetection(
+            num_classes=10, model_name="detr/dinov3-convnext-tiny",
             image_size=(224, 224), decoder="rtdetrv2", dec_layers=6,
             num_queries=20, pyramid_levels=3, load_weights=False,
         )
@@ -520,13 +520,13 @@ class TestCocoCheckpointLoaderViT:
 
     @staticmethod
     def _model(num_classes: int, variant: str = "vitt16", **kwargs):
-        from autovision.tasks.detection.avdetr.task_model import (
-            AVDETRObjectDetection,
+        from autovision.tasks.detection.detr.task_model import (
+            DETRObjectDetection,
         )
 
-        return AVDETRObjectDetection(
+        return DETRObjectDetection(
             num_classes=num_classes,
-            model_name=f"avdetr/dinov3-{variant}-notpretrained",
+            model_name=f"detr/dinov3-{variant}-notpretrained",
             image_size=(128, 128),
             decoder="rtdetrv2",
             num_queries=20,
@@ -614,7 +614,7 @@ class TestCocoCheckpointLoaderViT:
         return {"train_model": {f"ema_model.model.{k}": v for k, v in out.items()}}
 
     def test_round_trip_80_classes(self, tmp_path):
-        from autovision.tasks.detection.avdetr.coco_checkpoint import (
+        from autovision.tasks.detection.detr.coco_checkpoint import (
             load_baseline_coco_checkpoint,
         )
 
@@ -645,7 +645,7 @@ class TestCocoCheckpointLoaderViT:
             assert torch.equal(tgt_sd[key], src_sd[key]), key
 
     def test_skips_class_count_heads(self, tmp_path):
-        from autovision.tasks.detection.avdetr.coco_checkpoint import (
+        from autovision.tasks.detection.detr.coco_checkpoint import (
             load_baseline_coco_checkpoint,
         )
 
@@ -668,7 +668,7 @@ class TestCocoCheckpointLoaderViT:
         )
 
     def test_geometry_mismatch_raises(self, tmp_path):
-        from autovision.tasks.detection.avdetr.coco_checkpoint import (
+        from autovision.tasks.detection.detr.coco_checkpoint import (
             load_baseline_coco_checkpoint,
         )
 
@@ -694,13 +694,13 @@ class TestCocoCheckpointLoaderEdgeCrafter:
 
     @staticmethod
     def _model(num_classes: int, variant: str = "ecvitt", **kwargs):
-        from autovision.tasks.detection.avdetr.task_model import (
-            AVDETRObjectDetection,
+        from autovision.tasks.detection.detr.task_model import (
+            DETRObjectDetection,
         )
 
-        return AVDETRObjectDetection(
+        return DETRObjectDetection(
             num_classes=num_classes,
-            model_name=f"avdetr/edgecrafter-{variant}",
+            model_name=f"detr/edgecrafter-{variant}",
             image_size=(128, 128),
             num_queries=20,
             load_weights=False,
@@ -735,7 +735,7 @@ class TestCocoCheckpointLoaderEdgeCrafter:
         assert p5.shape[-3:] == (192, 4, 4)
 
     def test_round_trip_80_classes(self, tmp_path):
-        from autovision.tasks.detection.avdetr.coco_checkpoint import (
+        from autovision.tasks.detection.detr.coco_checkpoint import (
             load_baseline_coco_checkpoint,
         )
 
@@ -763,7 +763,7 @@ class TestCocoCheckpointLoaderEdgeCrafter:
             assert torch.equal(tgt_sd[key], src_sd[key]), key
 
     def test_skips_class_count_heads(self, tmp_path):
-        from autovision.tasks.detection.avdetr.coco_checkpoint import (
+        from autovision.tasks.detection.detr.coco_checkpoint import (
             load_baseline_coco_checkpoint,
         )
 
@@ -876,10 +876,10 @@ class TestGradientClipping:
 
 class TestVariantRecipes:
     """Baseline recipe dispatch is by model-name prefix (dinov2 V2 args vs
-    the AVDETR args everything else shares) — not by network family."""
+    the DETR args everything else shares) — not by network family."""
 
     def _resolved(self, backbone: str, **kwargs):
-        args = AVDETRObjectDetectionTrainArgs(
+        args = DETRObjectDetectionTrainArgs(
             num_classes=2, backbone=backbone, image_size=(224, 224), **kwargs
         )
         args.resolve_auto(
@@ -897,7 +897,7 @@ class TestVariantRecipes:
 
     def test_dinov3_vit_walks_ltdetr_recipe(self):
         # The bug this locks: dinov3 ViT used to inherit the dinov2 V2
-        # recipe (1e-4 / 1e-2 / linear) instead of the AVDETR recipe.
+        # recipe (1e-4 / 1e-2 / linear) instead of the DETR recipe.
         args = self._resolved("dinov3-vits16-notpretrained")
         assert args.lr == 5e-4
         assert args.backbone_lr_factor == 0.05
@@ -927,29 +927,29 @@ class TestVariantRecipes:
         assert args.lr_reference_batch == 16
 
     def test_default_batch_size_helper(self):
-        from autovision.tasks.detection.avdetr import (
-            avdetr_default_batch_size,
+        from autovision.tasks.detection.detr import (
+            detr_default_batch_size,
         )
 
-        assert avdetr_default_batch_size("dinov2-vits14") == 16
-        assert avdetr_default_batch_size("dinov2-vittest-notpretrained") == 16
-        assert avdetr_default_batch_size("dinov3-convnext-tiny") == 32
-        assert avdetr_default_batch_size("dinov3-vits16-notpretrained") == 32
-        assert avdetr_default_batch_size("edgecrafter-ecvitt") == 32
+        assert detr_default_batch_size("dinov2-vits14") == 16
+        assert detr_default_batch_size("dinov2-vittest-notpretrained") == 16
+        assert detr_default_batch_size("dinov3-convnext-tiny") == 32
+        assert detr_default_batch_size("dinov3-vits16-notpretrained") == 32
+        assert detr_default_batch_size("edgecrafter-ecvitt") == 32
 
 
 class TestConvNextOptimizerScaling:
     def test_lr_sqrt_scaling_uses_variant_reference_batch(self):
         # Baseline denominator: 32 for the ConvNeXt variant (the dinov2
         # V2 args keep 16). 5e-4 * sqrt(16/32) ~ 3.536e-4.
-        args = AVDETRObjectDetectionTrainArgs(
+        args = DETRObjectDetectionTrainArgs(
             num_classes=2,
             backbone="dinov3-convnext-tiny",
             image_size=(224, 224),
             decoder="dfine",
             backbone_pretrained=False,
         )
-        train_model = AVDETRObjectDetectionTrain(args)
+        train_model = DETRObjectDetectionTrain(args)
         optimizer, _ = train_model.get_optimizer(
             total_steps=100, global_batch_size=16
         )
@@ -1001,14 +1001,14 @@ class TestDecoders:
             DFINEOfficialDecoder,
         )
 
-        args = AVDETRObjectDetectionTrainArgs(
+        args = DETRObjectDetectionTrainArgs(
             num_classes=2,
             backbone="edgecrafter-ecvitt",
             image_size=(224, 224),
             num_queries=20,
             num_top_queries=20,
         )
-        train_model = AVDETRObjectDetectionTrain(args)
+        train_model = DETRObjectDetectionTrain(args)
         assert train_model.model.decoder_name == "dfine_official"
         assert type(train_model.model.decoder) is DFINEOfficialDecoder
         assert isinstance(train_model.criterion, DFINECriterionV2)
@@ -1033,26 +1033,26 @@ class TestDecoders:
 
 class TestImageSize:
     def test_default_snaps_to_patch_grid(self):
-        args = AVDETRObjectDetectionTrainArgs(num_classes=2)
+        args = DETRObjectDetectionTrainArgs(num_classes=2)
         assert args.image_size == (640, 640)
         args.resolve_image_size()
         # 640 -> 644: next multiple of 2 x patch 14.
         assert args.image_size == (644, 644)
 
     def test_patch16_default_unchanged(self):
-        args = AVDETRObjectDetectionTrainArgs(
+        args = DETRObjectDetectionTrainArgs(
             num_classes=2, backbone="edgecrafter-ecvitt"
         )
         args.resolve_image_size()
         assert args.image_size == (640, 640)
 
     def test_explicit_divisible_size_kept(self):
-        args = AVDETRObjectDetectionTrainArgs(num_classes=2, image_size=(644, 644))
+        args = DETRObjectDetectionTrainArgs(num_classes=2, image_size=(644, 644))
         args.resolve_image_size()
         assert args.image_size == (644, 644)
 
     def test_indivisible_explicit_size_raises(self):
-        args = AVDETRObjectDetectionTrainArgs(num_classes=2, image_size=(640, 640))
+        args = DETRObjectDetectionTrainArgs(num_classes=2, image_size=(640, 640))
         args.backbone = "edgecrafter-ecvitt"  # divisor 32 -> 640 still fine
         args.resolve_image_size()
         args.image_size = (500, 500)
@@ -1060,12 +1060,12 @@ class TestImageSize:
             args.resolve_image_size()
 
     def test_task_model_rejects_bad_size(self):
-        from autovision.tasks.detection.avdetr.task_model import (
-            AVDETRObjectDetection,
+        from autovision.tasks.detection.detr.task_model import (
+            DETRObjectDetection,
         )
 
         with pytest.raises(ValueError, match="divisible by 28"):
-            AVDETRObjectDetection(
+            DETRObjectDetection(
                 num_classes=2,
                 model_name="dinov2-vittest-notpretrained",
                 image_size=(64, 64),
@@ -1101,14 +1101,14 @@ class TestECViT:
             assert torch.allclose(reloaded.backbone.state_dict()[key], value)
 
     def test_ecvit_train_step(self):
-        args = AVDETRObjectDetectionTrainArgs(
+        args = DETRObjectDetectionTrainArgs(
             num_classes=2,
             backbone="edgecrafter-ecvitt",
             image_size=(224, 224),
             num_queries=20,
             num_top_queries=20,
         )
-        train_model = AVDETRObjectDetectionTrain(args)
+        train_model = DETRObjectDetectionTrain(args)
         batch = make_batch()
         result = train_model.training_step(
             {
@@ -1122,38 +1122,38 @@ class TestECViT:
         result.loss.backward()
 
 
-class TestAVDETRTransforms:
+class TestDETRTransforms:
     def test_scale_jitter_ladder_aligns_to_patch_grid(self):
-        from autovision.tasks.detection.avdetr.transforms import (
-            avdetr_scale_jitter_sizes,
+        from autovision.tasks.detection.detr.transforms import (
+            detr_scale_jitter_sizes,
         )
 
         # Patch 16 at 640 reproduces the stock 480..800 ladder.
-        sizes = avdetr_scale_jitter_sizes((640, 640), 32)
+        sizes = detr_scale_jitter_sizes((640, 640), 32)
         assert sizes[:11] == [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800]
         assert all(s % 32 == 0 for s in sizes)
         # Patch 14 ladder snaps to multiples of 28 around 644.
-        sizes14 = avdetr_scale_jitter_sizes((644, 644), 28)
+        sizes14 = detr_scale_jitter_sizes((644, 644), 28)
         assert all(s % 28 == 0 for s in sizes14)
         assert 644 in sizes14 and 476 in sizes14 and 812 in sizes14
 
     def test_build_args_enables_mosaic(self):
-        from autovision.tasks.detection.avdetr.transforms import (
-            build_avdetr_train_transform_args,
+        from autovision.tasks.detection.detr.transforms import (
+            build_detr_train_transform_args,
         )
 
-        args = build_avdetr_train_transform_args((644, 644), "dinov2-vits14")
+        args = build_detr_train_transform_args((644, 644), "dinov2-vits14")
         assert args.mosaic_prob == 0.5
         assert args.image_size == (644, 644)
         assert all(s % 28 == 0 for s in args.scale_jitter.sizes)
         # EdgeCrafter "v2" recipe raises mosaic prob (baseline).
-        args_v2 = build_avdetr_train_transform_args((640, 640), "edgecrafter-ecvitt")
+        args_v2 = build_detr_train_transform_args((640, 640), "edgecrafter-ecvitt")
         assert args_v2.mosaic_prob == 0.75
-        # ... AND the mixup prob (baseline AVDETRv2 args: 0.75; v1 keeps 0.5).
+        # ... AND the mixup prob (baseline DETRv2 args: 0.75; v1 keeps 0.5).
         assert args_v2.mixup_prob == 0.75
         assert args.mixup_prob == 0.5
         # User overrides win.
-        args_off = build_avdetr_train_transform_args(
+        args_off = build_detr_train_transform_args(
             (644, 644), "dinov2-vits14", {"mosaic_prob": None}
         )
         assert args_off.mosaic_prob is None
@@ -1421,7 +1421,7 @@ class TestE2E:
         result = train_object_detection(
             out=tmp_path / "ltdetr1",
             data=data_config(train_json, val_json, images_dir),
-            model="avdetr/dinov2-vittest-notpretrained",
+            model="detr/dinov2-vittest-notpretrained",
             steps=4,
             batch_size=2,
             num_workers=0,
@@ -1446,7 +1446,7 @@ class TestE2E:
         result = train_object_detection(
             out=tmp_path / "ltdetr2",
             data=data_config(train_json, val_json, images_dir),
-            model="avdetr/dinov2-vittest-notpretrained",
+            model="detr/dinov2-vittest-notpretrained",
             steps=2,
             batch_size=2,
             num_workers=0,
@@ -1471,12 +1471,12 @@ class TestEncoderOverrides:
         """The official Dome-S 'S' encoder recipe (1024/0.5/0.34) must land
         in the built HybridEncoder instead of the variant spec's heavy
         defaults (2048/1.0/1.0)."""
-        from autovision.tasks.detection.avdetr import (
-            AVDETRObjectDetection,
-            AVDETRObjectDetectionTrainArgs,
+        from autovision.tasks.detection.detr import (
+            DETRObjectDetection,
+            DETRObjectDetectionTrainArgs,
         )
 
-        args = AVDETRObjectDetectionTrainArgs(
+        args = DETRObjectDetectionTrainArgs(
             num_classes=10,
             backbone="dinov3-convnext-tiny",
             image_size=(64, 64),
@@ -1487,7 +1487,7 @@ class TestEncoderOverrides:
             enc_expansion=0.5,
             enc_depth_mult=0.34,
         )
-        model = AVDETRObjectDetection(
+        model = DETRObjectDetection(
             num_classes=args.num_classes,
             model_name=args.backbone,
             image_size=args.image_size,
@@ -1503,12 +1503,12 @@ class TestEncoderOverrides:
         assert model.encoder.enc_depth_mult == 0.34
 
     def test_enc_auto_follows_variant_spec(self):
-        from autovision.tasks.detection.avdetr import (
-            AVDETRObjectDetection,
-            AVDETRObjectDetectionTrainArgs,
+        from autovision.tasks.detection.detr import (
+            DETRObjectDetection,
+            DETRObjectDetectionTrainArgs,
         )
 
-        args = AVDETRObjectDetectionTrainArgs(
+        args = DETRObjectDetectionTrainArgs(
             num_classes=10,
             backbone="dinov3-convnext-tiny",
             image_size=(64, 64),
@@ -1516,7 +1516,7 @@ class TestEncoderOverrides:
             num_queries=10,
             num_top_queries=10,
         )
-        model = AVDETRObjectDetection(
+        model = DETRObjectDetection(
             num_classes=args.num_classes,
             model_name=args.backbone,
             image_size=args.image_size,
@@ -1533,11 +1533,11 @@ class TestSIoUBoxRegression:
     """box_regression_iou='siou' config surface (design doc 15 §4.4-4.5)."""
 
     def test_default_config_keeps_giou(self):
-        from autovision.tasks.detection.avdetr import (
-            AVDETRObjectDetectionTrainArgs,
+        from autovision.tasks.detection.detr import (
+            DETRObjectDetectionTrainArgs,
         )
 
-        args = AVDETRObjectDetectionTrainArgs(num_classes=2)
+        args = DETRObjectDetectionTrainArgs(num_classes=2)
         assert args.box_regression_iou == "giou"
         assert args.siou_loss_coef is None
         assert args.siou_theta == pytest.approx(4.0)
@@ -1545,14 +1545,14 @@ class TestSIoUBoxRegression:
     def test_config_rejects_invalid_siou_values(self):
         from pydantic import ValidationError
 
-        from autovision.tasks.detection.avdetr import (
-            AVDETRObjectDetectionTrainArgs,
+        from autovision.tasks.detection.detr import (
+            DETRObjectDetectionTrainArgs,
         )
 
         with pytest.raises(ValidationError):
-            AVDETRObjectDetectionTrainArgs(num_classes=2, siou_theta=0.0)
+            DETRObjectDetectionTrainArgs(num_classes=2, siou_theta=0.0)
         with pytest.raises(ValidationError):
-            AVDETRObjectDetectionTrainArgs(num_classes=2, siou_loss_coef=-0.1)
+            DETRObjectDetectionTrainArgs(num_classes=2, siou_loss_coef=-0.1)
 
     def test_siou_requires_dfine_decoder(self):
         with pytest.raises(ValueError, match="box_regression_iou='siou'"):
@@ -1601,22 +1601,22 @@ class TestFamilyKeyAlias:
     def test_legacy_key_resolves_with_deprecation(self):
         import warnings
 
-        from autovision.tasks.detection.avdetr.config import (
-            resolve_avdetr_variant,
+        from autovision.tasks.detection.detr.config import (
+            resolve_detr_variant,
         )
 
-        canonical = resolve_avdetr_variant("avdetr/dinov3-vits16")
+        canonical = resolve_detr_variant("detr/dinov3-vits16")
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            legacy = resolve_avdetr_variant("ltdetr/dinov3-vits16")
+            legacy = resolve_detr_variant("ltdetr/dinov3-vits16")
         assert legacy[0] == canonical[0]
         assert legacy[1] == canonical[1]
         assert any(issubclass(w.category, DeprecationWarning) for w in caught)
 
     def test_listed_names_use_new_prefix(self):
-        from autovision.tasks.detection.avdetr.config import (
-            list_avdetr_model_names,
+        from autovision.tasks.detection.detr.config import (
+            list_detr_model_names,
         )
 
-        names = list_avdetr_model_names()
-        assert names and all(name.startswith("avdetr/") for name in names)
+        names = list_detr_model_names()
+        assert names and all(name.startswith("detr/") for name in names)

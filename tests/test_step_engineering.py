@@ -18,9 +18,9 @@ from autovision.geometry.box_ops import (
     generalized_box_iou_loss,
 )
 from autovision.optim import build_adamw
-from autovision.tasks.detection.avdetr import (
-    AVDETRObjectDetectionTrain,
-    AVDETRObjectDetectionTrainArgs,
+from autovision.tasks.detection.detr import (
+    DETRObjectDetectionTrain,
+    DETRObjectDetectionTrainArgs,
 )
 from autovision.tasks.detection.shared.dfine_criterion import (
     DFINECriterionV2,
@@ -108,13 +108,13 @@ class TestBuildAdamW:
 
 class TestLtdetrFusedFlag:
     def test_flag_off_by_default(self):
-        args = AVDETRObjectDetectionTrainArgs(**VARIANT_ARGS)
+        args = DETRObjectDetectionTrainArgs(**VARIANT_ARGS)
         assert args.fused_optimizer is False
         assert args.criterion_flat_losses is False
 
     def test_optimizer_plumbing(self):
-        args = AVDETRObjectDetectionTrainArgs(**VARIANT_ARGS, fused_optimizer=True)
-        wrapper = AVDETRObjectDetectionTrain(args)
+        args = DETRObjectDetectionTrainArgs(**VARIANT_ARGS, fused_optimizer=True)
+        wrapper = DETRObjectDetectionTrain(args)
         optimizer, scheduler = wrapper.get_optimizer(total_steps=100, global_batch_size=8)
         # CPU test env: the fused request falls back — construction and the
         # scheduler interplay must work either way (warning visible).
@@ -266,6 +266,6 @@ class TestCriterionFlatPaths:
 
 class TestLtdetrFlatFlag:
     def test_wrapper_plumbs_flag(self):
-        args = AVDETRObjectDetectionTrainArgs(**VARIANT_ARGS, criterion_flat_losses=True)
-        wrapper = AVDETRObjectDetectionTrain(args)
+        args = DETRObjectDetectionTrainArgs(**VARIANT_ARGS, criterion_flat_losses=True)
+        wrapper = DETRObjectDetectionTrain(args)
         assert wrapper.criterion.flat_losses is True

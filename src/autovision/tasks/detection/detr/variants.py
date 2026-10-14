@@ -1,11 +1,11 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
-"""AV-DETR variant registry: ``avdetr/<backbone>`` architecture specs.
+"""DETR variant registry: ``detr/<backbone>`` architecture specs.
 
-Model names follow ``avdetr/<backbone>`` where ``<backbone>`` resolves
+Model names follow ``detr/<backbone>`` where ``<backbone>`` resolves
 against the backbone packages (``dinov2``, ``dinov3``, ``edgecrafter``),
-e.g. ``avdetr/dinov2-vits14`` or ``avdetr/dinov3-convnext-tiny``. All
+e.g. ``detr/dinov2-vits14`` or ``detr/dinov3-convnext-tiny``. All
 DINOv2 sizes accept the package suffixes (``-noreg``, ``-notpretrained``).
-``avdetr/dinov2-vittest-notpretrained`` is a tiny offline test variant
+``detr/dinov2-vittest-notpretrained`` is a tiny offline test variant
 (mirrors the baseline ``ViTTest``).
 
 Variants mirror the baseline registry (lightly-train 0.17.0):
@@ -21,7 +21,7 @@ Variants mirror the baseline registry (lightly-train 0.17.0):
 
 Encoder/decoder recipes (hidden dims, FFN widths, expansion/depth
 multipliers, sampling points, layer counts) are carried per variant in
-:class:`AVDETRVariantSpec` so the assembled network matches the baseline
+:class:`DETRVariantSpec` so the assembled network matches the baseline
 configs instead of a single global default.
 
 Train-argument dataclasses live in :mod:`.config`, which re-exports the
@@ -35,19 +35,19 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 __all__ = [
-    "AVDETR_MODEL_REGISTRY",
-    "AVDETRVariantSpec",
+    "DETR_MODEL_REGISTRY",
+    "DETRVariantSpec",
     "FAMILY_PREFIX",
-    "avdetr_default_batch_size",
-    "avdetr_image_size_divisor",
+    "detr_default_batch_size",
+    "detr_image_size_divisor",
     "check_image_size",
-    "list_avdetr_model_names",
-    "resolve_avdetr_variant",
+    "list_detr_model_names",
+    "resolve_detr_variant",
 ]
 
 
 @dataclass(frozen=True)
-class AVDETRVariantSpec:
+class DETRVariantSpec:
     """Static per-variant architecture recipe (baseline-faithful)."""
 
     backbone_package: str  # "dinov2" | "dinov3" | "edgecrafter"
@@ -89,7 +89,7 @@ class AVDETRVariantSpec:
 
 
 # Baseline ViT recipes. conv_inplane = factor × patch_size, per the
-# AVDETRRTDETRBackboneWrapperConfig table (ViTSmall factor 2, Base/Large/
+# DETRRTDETRBackboneWrapperConfig table (ViTSmall factor 2, Base/Large/
 # Giant factor 4, ViTTiny(+Plus) factor 1).
 _VIT_SIZES: dict[str, dict[str, Any]] = {
     "vits14": dict(
@@ -212,14 +212,14 @@ _ECVIT_SIZES: dict[str, dict[str, Any]] = {
 }
 
 
-def _build_registry() -> dict[str, AVDETRVariantSpec]:
-    registry: dict[str, AVDETRVariantSpec] = {}
+def _build_registry() -> dict[str, DETRVariantSpec]:
+    registry: dict[str, DETRVariantSpec] = {}
 
     # DINOv2 ViT variants (NoSTA per baseline): base + package suffixes
     # (-noreg, -notpretrained).
     for size, info in _VIT_SIZES.items():
         for suffix in ("", "-noreg", "-notpretrained"):
-            registry[f"dinov2-{size}{suffix}"] = AVDETRVariantSpec(
+            registry[f"dinov2-{size}{suffix}"] = DETRVariantSpec(
                 backbone_package="dinov2",
                 backbone_name=f"{size}{suffix}",
                 family="vit",
@@ -237,7 +237,7 @@ def _build_registry() -> dict[str, AVDETRVariantSpec]:
     # from a local HF config, random init. Intentionally keeps the STA
     # fusion ACTIVE (unlike every real DINOv2 variant) so the fusion code
     # path stays covered by the offline test suite.
-    registry["dinov2-vittest-notpretrained"] = AVDETRVariantSpec(
+    registry["dinov2-vittest-notpretrained"] = DETRVariantSpec(
         backbone_package="dinov2",
         backbone_name="vittest-notpretrained",
         family="vit",
@@ -256,7 +256,7 @@ def _build_registry() -> dict[str, AVDETRVariantSpec]:
     for size, info in _DINOV3_VIT_SIZES.items():
         for suffix in ("", "-notpretrained"):
             name = f"dinov3-{size}{suffix}"
-            registry[name] = AVDETRVariantSpec(
+            registry[name] = DETRVariantSpec(
                 backbone_package="dinov3",
                 backbone_name=f"{size}{suffix}",
                 family="vit",
@@ -273,7 +273,7 @@ def _build_registry() -> dict[str, AVDETRVariantSpec]:
             )
     # DINOv3 ConvNeXt variants (usable once transformers ships DINOv3).
     for size, info in _CONVNEXT_SIZES.items():
-        registry[f"dinov3-{size}"] = AVDETRVariantSpec(
+        registry[f"dinov3-{size}"] = DETRVariantSpec(
             backbone_package="dinov3",
             backbone_name=size,
             family="convnext",
@@ -290,7 +290,7 @@ def _build_registry() -> dict[str, AVDETRVariantSpec]:
     # EdgeCrafter ECViT variants (baseline "v2"): pass-through backbone,
     # D-FINE decoder by default.
     for size, info in _ECVIT_SIZES.items():
-        registry[f"edgecrafter-{size}"] = AVDETRVariantSpec(
+        registry[f"edgecrafter-{size}"] = DETRVariantSpec(
             backbone_package="edgecrafter",
             backbone_name=size,
             family="ecvit",
@@ -325,79 +325,82 @@ def _build_registry() -> dict[str, AVDETRVariantSpec]:
     return registry
 
 
-AVDETR_MODEL_REGISTRY: dict[str, AVDETRVariantSpec] = _build_registry()
+DETR_MODEL_REGISTRY: dict[str, DETRVariantSpec] = _build_registry()
 
 
-#: Legacy family key (R16 rename): "ltdetr/<backbone>" keeps working for
-#: one release and emits a DeprecationWarning.
-_LEGACY_FAMILY_PREFIX = "ltdetr/"
-FAMILY_PREFIX = "avdetr/"
+#: Deprecated family keys, each accepted with a DeprecationWarning for
+#: one release after its rename: "avdetr/" (2026-10-15 detr rename),
+#: "ltdetr/" (R16 rename).
+_LEGACY_FAMILY_PREFIXES = ("avdetr/", "ltdetr/")
+FAMILY_PREFIX = "detr/"
 
 
-def resolve_avdetr_variant(name: str) -> tuple[str, AVDETRVariantSpec]:
-    """Split ``avdetr/<backbone>`` into (backbone key, spec).
+def resolve_detr_variant(name: str) -> tuple[str, DETRVariantSpec]:
+    """Split ``detr/<backbone>`` into (backbone key, spec).
 
-    Idempotent: accepts ``avdetr/<backbone>`` (public model name) and
+    Idempotent: accepts ``detr/<backbone>`` (public model name) and
     ``<backbone>`` (init-args form, e.g. from exported checkpoints). The
-    pre-rename family key ``ltdetr/<backbone>`` is accepted as a
-    deprecated alias.
+    pre-rename family keys ``avdetr/<backbone>`` and ``ltdetr/<backbone>``
+    are accepted as deprecated aliases.
     """
-    if name.startswith(_LEGACY_FAMILY_PREFIX):
-        warnings.warn(
-            f'Model family key "{_LEGACY_FAMILY_PREFIX}..." is deprecated; '
-            f'use "{FAMILY_PREFIX}..." instead.',
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        name = FAMILY_PREFIX + name[len(_LEGACY_FAMILY_PREFIX) :]
+    for legacy in _LEGACY_FAMILY_PREFIXES:
+        if name.startswith(legacy):
+            warnings.warn(
+                f'Model family key "{legacy}..." is deprecated; '
+                f'use "{FAMILY_PREFIX}..." instead.',
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            name = FAMILY_PREFIX + name[len(legacy) :]
+            break
     key = name[len(FAMILY_PREFIX) :] if name.startswith(FAMILY_PREFIX) else name
     if not key or key.startswith(FAMILY_PREFIX) or "/" in key:
         raise ValueError(
-            f"Unknown AV-DETR model: '{name}' (expected '{FAMILY_PREFIX}<backbone>')."
+            f"Unknown DETR model: '{name}' (expected '{FAMILY_PREFIX}<backbone>')."
         )
-    spec = AVDETR_MODEL_REGISTRY.get(key)
+    spec = DETR_MODEL_REGISTRY.get(key)
     if spec is None:
-        supported = ", ".join(sorted(AVDETR_MODEL_REGISTRY))
-        raise ValueError(f"Unknown AV-DETR backbone: '{key}'. Supported: {supported}.")
+        supported = ", ".join(sorted(DETR_MODEL_REGISTRY))
+        raise ValueError(f"Unknown DETR backbone: '{key}'. Supported: {supported}.")
     return key, spec
 
 
-def list_avdetr_model_names() -> list[str]:
-    return sorted(f"{FAMILY_PREFIX}{key}" for key in AVDETR_MODEL_REGISTRY)
+def list_detr_model_names() -> list[str]:
+    return sorted(f"{FAMILY_PREFIX}{key}" for key in DETR_MODEL_REGISTRY)
 
 
-def avdetr_default_batch_size(backbone: str) -> int:
+def detr_default_batch_size(backbone: str) -> int:
     """Baseline reference batch: 32 across the family, 16 for dinov2.
 
     Early resolution for ``batch_size="auto"`` — the train command needs
     the value before the step-based ``resolve_auto`` runs.
     """
-    _, spec = resolve_avdetr_variant(f"avdetr/{backbone}")
+    _, spec = resolve_detr_variant(f"detr/{backbone}")
     return 16 if spec.backbone_package == "dinov2" else 32
 
 
-def avdetr_image_size_divisor(spec: AVDETRVariantSpec) -> int:
+def detr_image_size_divisor(spec: DETRVariantSpec) -> int:
     """Image sizes must divide by ``2 × patch_size`` (baseline rule)."""
     return 2 * spec.patch_size
 
 
-def check_image_size(image_size: tuple[int, int], spec: AVDETRVariantSpec) -> None:
+def check_image_size(image_size: tuple[int, int], spec: DETRVariantSpec) -> None:
     """Raise unless ``image_size`` is square and divides by ``2 × patch``.
 
     The detection pipeline is square-only end to end (the scale-jitter
     ladder and the batch resize are square), and the ViT patch grid plus
     the STA/encoder pyramids assume the 2 × patch divisibility.
     """
-    divisor = avdetr_image_size_divisor(spec)
+    divisor = detr_image_size_divisor(spec)
     height, width = image_size
     if height != width:
         raise ValueError(
-            f"AV-DETR image_size {(height, width)} must be square (the "
+            f"DETR image_size {(height, width)} must be square (the "
             "detection pipeline resizes to square batches)."
         )
     if height % divisor or width % divisor:
         raise ValueError(
-            f"AV-DETR image_size {(height, width)} must be divisible by "
+            f"DETR image_size {(height, width)} must be divisible by "
             f"{divisor} (= 2 x patch_size for the '{spec.backbone_name}' "
             f"backbone); e.g. use ({-(-height // divisor) * divisor}, "
             f"{-(-width // divisor) * divisor})."

@@ -7,16 +7,16 @@
 #   (design doc 29: config.py variant registry split into variants.py — both
 #   files carry historical baseline comments; R16 naming itself has landed.)
 src/autovision/features/embed.py :: lightly_csv format name pending R15 rename
-src/autovision/tasks/detection/avdetr/config.py :: historical baseline comments (R16 landed; docs 28 §2 notes)
-src/autovision/tasks/detection/avdetr/variants.py :: historical baseline comments (moved from config.py, design doc 29)
-src/autovision/tasks/detection/avdetr/task_model.py :: LT-DETR family naming pending R16
+src/autovision/tasks/detection/detr/config.py :: historical baseline comments (R16 landed; docs 28 §2 notes)
+src/autovision/tasks/detection/detr/variants.py :: historical baseline comments (moved from config.py, design doc 30)
+src/autovision/tasks/detection/detr/task_model.py :: historical baseline comments (R16 landed; family renamed detr 2026-10-15)
 
 # — pending Phase 4 asset switch (ledger P3-1): legacy warm-start weights and
 #   their download registry keep the reference host/keys until replaced by
 #   self-trained AVWarmStart assets. Review 2026-11-14.
-src/autovision/tasks/detection/avdetr/coco_checkpoint.py :: legacy checkpoint registry pending Phase 4
-scripts/visdrone_avdetr_800_baseline_coco.py :: legacy warm-start weight paths pending Phase 4
-scripts/visdrone_avdetr_800_baseline_coco_erase.py :: legacy warm-start weight paths pending Phase 4
-scripts/visdrone_avdetr_1280_baseline_coco.py :: legacy warm-start weight paths pending Phase 4
-scripts/visdrone_avdetr_1280_baseline_coco_erase.py :: legacy warm-start weight paths pending Phase 4
-scripts/visdrone_avdetr_800_cocofull_openvocab.py :: legacy warm-start weight paths pending Phase 4
+src/autovision/tasks/detection/detr/coco_checkpoint.py :: legacy checkpoint registry pending Phase 4
+scripts/visdrone_detr_800_baseline_coco.py :: legacy warm-start weight paths pending Phase 4
+scripts/visdrone_detr_800_baseline_coco_erase.py :: legacy warm-start weight paths pending Phase 4
+scripts/visdrone_detr_1280_baseline_coco.py :: legacy warm-start weight paths pending Phase 4
+scripts/visdrone_detr_1280_baseline_coco_erase.py :: legacy warm-start weight paths pending Phase 4
+scripts/visdrone_detr_800_cocofull_openvocab.py :: legacy warm-start weight paths pending Phase 4

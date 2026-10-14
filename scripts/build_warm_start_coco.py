@@ -21,7 +21,7 @@ route) decided. The save/export path below is final and already tested.
 Usage (once unblocked):
     python scripts/build_warm_start_coco.py \
         --family ltdetr --backbone ecvitt --classes 80 \
-        --out weights/avdetr_ecvitt_coco_warmstart.pt \
+        --out weights/detr_ecvitt_coco_warmstart.pt \
         --spec-note "built from Apache upstream init"
 """
 

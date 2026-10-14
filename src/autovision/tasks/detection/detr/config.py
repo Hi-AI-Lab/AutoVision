@@ -1,14 +1,14 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
-"""AV-DETR object detection: train-argument dataclasses.
+"""DETR object detection: train-argument dataclasses.
 
-The ``avdetr/<backbone>`` variant registry lives in :mod:`.variants` and is
+The ``detr/<backbone>`` variant registry lives in :mod:`.variants` and is
 re-exported here so ``config`` stays the single import surface.
 
-Model names follow ``avdetr/<backbone>`` where ``<backbone>`` resolves
+Model names follow ``detr/<backbone>`` where ``<backbone>`` resolves
 against the backbone packages (``dinov2``, ``dinov3``, ``edgecrafter``),
-e.g. ``avdetr/dinov2-vits14`` or ``avdetr/dinov3-convnext-tiny``. All
+e.g. ``detr/dinov2-vits14`` or ``detr/dinov3-convnext-tiny``. All
 DINOv2 sizes accept the package suffixes (``-noreg``, ``-notpretrained``).
-``avdetr/dinov2-vittest-notpretrained`` is a tiny offline test variant
+``detr/dinov2-vittest-notpretrained`` is a tiny offline test variant
 (mirrors the baseline ``ViTTest``).
 
 Variants mirror the baseline registry (lightly-train 0.17.0):
@@ -24,7 +24,7 @@ Variants mirror the baseline registry (lightly-train 0.17.0):
 
 Encoder/decoder recipes (hidden dims, FFN widths, expansion/depth
 multipliers, sampling points, layer counts) are carried per variant in
-:class:`AVDETRVariantSpec` so the assembled network matches the baseline
+:class:`DETRVariantSpec` so the assembled network matches the baseline
 configs instead of a single global default.
 """
 
@@ -36,15 +36,15 @@ from typing import Any, ClassVar, Literal
 from pydantic import Field, model_validator
 
 from autovision.config.base import PydanticConfig
-from autovision.tasks.detection.avdetr.variants import (  # noqa: F401 (re-export)
-    AVDETR_MODEL_REGISTRY,
+from autovision.tasks.detection.detr.variants import (  # noqa: F401 (re-export)
+    DETR_MODEL_REGISTRY,
     FAMILY_PREFIX,
-    AVDETRVariantSpec,
-    avdetr_default_batch_size,
-    avdetr_image_size_divisor,
+    DETRVariantSpec,
     check_image_size,
-    list_avdetr_model_names,
-    resolve_avdetr_variant,
+    detr_default_batch_size,
+    detr_image_size_divisor,
+    list_detr_model_names,
+    resolve_detr_variant,
 )
 from autovision.tasks.detection.shared.distillation import (
     DistillParams,
@@ -56,20 +56,20 @@ from autovision.tasks.train_model import TrainModelArgs
 from autovision.types import ImageSizeTuple
 
 __all__ = [
-    "AVDETR_MODEL_REGISTRY",
-    "AVDETRDensityArgs",
-    "AVDETRDistillArgs",
-    "AVDETROpenVocabArgs",
-    "AVDETRSSLArgs",
-    "AVDETRVariantSpec",
-    "AVDETRObjectDetectionTrainArgs",
-    "list_avdetr_model_names",
-    "avdetr_default_batch_size",
-    "resolve_avdetr_variant",
+    "DETR_MODEL_REGISTRY",
+    "DETRDensityArgs",
+    "DETRDistillArgs",
+    "DETROpenVocabArgs",
+    "DETRSSLArgs",
+    "DETRVariantSpec",
+    "DETRObjectDetectionTrainArgs",
+    "list_detr_model_names",
+    "detr_default_batch_size",
+    "resolve_detr_variant",
 ]
 
 
-class AVDETRDensityArgs(PydanticConfig):
+class DETRDensityArgs(PydanticConfig):
     """Density-guided query/feature branch (Dome-DETR port, doc 13 §4.7).
 
     ``None`` (the default on the train args) keeps the baseline contract
@@ -110,7 +110,7 @@ class AVDETRDensityArgs(PydanticConfig):
         return int(self.min_num_select)
 
 
-class AVDETRSSLArgs(PydanticConfig):
+class DETRSSLArgs(PydanticConfig):
     """Per-object contrastive SSL branch (RF-DETR-SSL port, doc 14 §4.7).
 
     ``None`` (the default on the train args) keeps the baseline contract
@@ -189,7 +189,7 @@ class AVDETRSSLArgs(PydanticConfig):
     instance_source: Literal["matched_gt", "encoder_candidates"] = "matched_gt"
 
     @model_validator(mode="after")
-    def _validate_ssl_configuration(self) -> "AVDETRSSLArgs":
+    def _validate_ssl_configuration(self) -> "DETRSSLArgs":
         if self.mode != "off" and self.loss_coef <= 0.0:
             raise ValueError(
                 f"ssl mode={self.mode!r} requires loss_coef > 0, got {self.loss_coef}."
@@ -278,7 +278,7 @@ class AVDETRSSLArgs(PydanticConfig):
         )
 
 
-class AVDETRTokenDropArgs(PydanticConfig):
+class DETRTokenDropArgs(PydanticConfig):
     """Window-granularity in-backbone background token dropping (doc 17).
 
     ``None`` (the default on the train args) keeps the baseline contract
@@ -314,7 +314,7 @@ class AVDETRTokenDropArgs(PydanticConfig):
     step_stop: int | None | Literal["auto"] = "auto"
 
 
-class AVDETRDistillArgs(PydanticConfig):
+class DETRDistillArgs(PydanticConfig):
     """Cross-model distillation branch (design doc 23).
 
     ``None`` (the default on the train args) keeps the baseline contract
@@ -379,7 +379,7 @@ class AVDETRDistillArgs(PydanticConfig):
     require_same_class_space: bool = True
 
     @model_validator(mode="after")
-    def _validate_distill_configuration(self) -> "AVDETRDistillArgs":
+    def _validate_distill_configuration(self) -> "DETRDistillArgs":
         if self.teacher_checkpoint is None and not self.teacher_model:
             raise ValueError(
                 "distill requires teacher_checkpoint or a non-empty "
@@ -413,7 +413,7 @@ class AVDETRDistillArgs(PydanticConfig):
         )
 
 
-class AVDETROpenVocabArgs(PydanticConfig):
+class DETROpenVocabArgs(PydanticConfig):
     """Text-contrastive open-vocabulary branch (design doc 27).
 
     ``None`` (the default on the train args) keeps the baseline contract
@@ -479,7 +479,7 @@ class AVDETROpenVocabArgs(PydanticConfig):
     novel_eval_classes: tuple[str, ...] | None = None
 
     @model_validator(mode="after")
-    def _validate_open_vocab_configuration(self) -> "AVDETROpenVocabArgs":
+    def _validate_open_vocab_configuration(self) -> "DETROpenVocabArgs":
         if not self.class_names:
             raise ValueError("open_vocab requires a non-empty class_names tuple.")
         if len(set(self.class_names)) != len(self.class_names):
@@ -526,16 +526,16 @@ class AVDETROpenVocabArgs(PydanticConfig):
         return self
 
 
-class AVDETRObjectDetectionTrainArgs(TrainModelArgs, PydanticConfig):
-    """Training/architecture args for the AV-DETR detection family."""
+class DETRObjectDetectionTrainArgs(TrainModelArgs, PydanticConfig):
+    """Training/architecture args for the DETR detection family."""
 
     model_config = {"extra": "forbid"}
 
     #: Reference batch for the ``lr × sqrt(global/default)`` LR scaling.
-    #: Baseline: 32 across the AVDETR family, 16 only for the dinov2 V2
+    #: Baseline: 32 across the DETR family, 16 only for the dinov2 V2
     #: args — "auto" resolves by backbone package in :meth:`resolve_auto`
     #: (``batch_size="auto"`` resolves through
-    #: :func:`avdetr_default_batch_size` with the same rule).
+    #: :func:`detr_default_batch_size` with the same rule).
     lr_reference_batch: int | Literal["auto"] = "auto"
     default_steps: ClassVar[int] = 12_000
     backbone: str = "dinov2-vits14-notpretrained"
@@ -553,7 +553,7 @@ class AVDETRObjectDetectionTrainArgs(TrainModelArgs, PydanticConfig):
     #: baseline checkpoints share the spec width, so ``None`` is correct
     #: there (vitt16 192 / vits16 224 / vitt16plus 256).
     decoder_hidden_dim: int | None = None
-    #: Optional path to a published baseline AV-DETR detector checkpoint
+    #: Optional path to a published baseline DETR detector checkpoint
     #: (lightly-train "…-ltdetr-coco" .pt): warm-starts backbone + encoder
     #: + decoder for both families (ConvNeXt via the old-ConvNeXt remap,
     #: ViT via the Meta-ViT remap including the STA wrapper extras).
@@ -675,30 +675,30 @@ class AVDETRObjectDetectionTrainArgs(TrainModelArgs, PydanticConfig):
 
     #: Density-guided dynamic queries / DeFE / MWAS branch (Dome-DETR).
     #: ``None`` keeps the baseline contract bit-for-bit.
-    density: AVDETRDensityArgs | None = None
+    density: DETRDensityArgs | None = None
 
     #: Per-object contrastive SSL branch (design doc 14). ``None`` keeps
     #: the baseline contract bit-for-bit; ``mode="off"`` + ``view=
     #: "two_crop"`` is the batch-matched no-SSL baseline.
-    ssl: AVDETRSSLArgs | None = None
+    ssl: DETRSSLArgs | None = None
 
     #: In-backbone background token dropping (design doc 17, ViT family
     #: only). ``None`` keeps the baseline contract bit-for-bit; the
     #: validation/export paths are always dense regardless.
-    token_drop: AVDETRTokenDropArgs | None = None
+    token_drop: DETRTokenDropArgs | None = None
 
     #: Cross-model distillation branch (design doc 23). ``None`` keeps the
     #: baseline contract bit-for-bit; the teacher never enters the
     #: state_dict / optimizer / EMA / export surfaces.
-    distill: AVDETRDistillArgs | None = None
+    distill: DETRDistillArgs | None = None
 
     #: Text-contrastive open-vocabulary branch (design doc 27). ``None``
     #: keeps the baseline contract bit-for-bit: the per-class Linear score
     #: heads stay, no text asset is built.
-    open_vocab: AVDETROpenVocabArgs | None = None
+    open_vocab: DETROpenVocabArgs | None = None
 
     @model_validator(mode="after")
-    def _validate_avdetr_train_args(self) -> "AVDETRObjectDetectionTrainArgs":
+    def _validate_detr_train_args(self) -> "DETRObjectDetectionTrainArgs":
         if self.open_vocab is not None:
             expected = len(self.open_vocab.class_names)
             if expected != self.num_classes:
@@ -716,11 +716,11 @@ class AVDETRObjectDetectionTrainArgs(TrainModelArgs, PydanticConfig):
             resolve_flat_cosine_windows,
         )
 
-        key, spec = resolve_avdetr_variant(f"avdetr/{self.backbone}")
+        key, spec = resolve_detr_variant(f"detr/{self.backbone}")
         # Baseline recipe split is by MODEL-NAME PREFIX, not by network
         # family: only `dinov2/*` walks the "V2 args" (lr 1e-4, backbone
         # factor 1e-2, linear schedule, warmup 2000, reference batch 16).
-        # dinov3 ViT and ConvNeXt variants share the AVDETR recipe (5e-4 /
+        # dinov3 ViT and ConvNeXt variants share the DETR recipe (5e-4 /
         # 0.05 spec default / flat-cosine / schedule warmup / batch 32);
         # the large ECViT variants carry 0.0025 in the spec table.
         package_is_dinov2 = spec.backbone_package == "dinov2"
@@ -773,8 +773,8 @@ class AVDETRObjectDetectionTrainArgs(TrainModelArgs, PydanticConfig):
         patch 16). An explicitly set size must already be divisible — the
         ViT patch grid and the STA/encoder pyramids both assume it.
         """
-        _, spec = resolve_avdetr_variant(f"avdetr/{self.backbone}")
-        divisor = avdetr_image_size_divisor(spec)
+        _, spec = resolve_detr_variant(f"detr/{self.backbone}")
+        divisor = detr_image_size_divisor(spec)
         height, width = self.image_size
         if (height, width) == (640, 640):
             self.image_size = (

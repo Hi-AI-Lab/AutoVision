@@ -742,7 +742,7 @@ class RTDETRv2Decoder(nn.Module):
         """One classification head: the baseline per-class Linear, or the
         text-contrastive head when the open-vocab branch is enabled (the
         logit-scale/bias hyperparameters ride the decoder ctor kwargs the
-        task model fills from AVDETROpenVocabArgs)."""
+        task model fills from DETROpenVocabArgs)."""
         if self._ov_text_embed_dim is not None:
             return ContrastiveClassHead(
                 in_dim,

@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
-"""Density-guided AV-DETR encoder: DeFE + MWAS wiring (doc 13 §4.2/§4.6).
+"""Density-guided DETR encoder: DeFE + MWAS wiring (doc 13 §4.2/§4.6).
 
 Subclasses the shared :class:`HybridEncoder` and mirrors the baseline Dome
 ``HybridEncoder.forward`` density branch (``src/zoo/dome/hybrid_encoder.py:
@@ -28,8 +28,8 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from autovision.tasks.detection.avdetr.config import (
-    AVDETRDensityArgs,
+from autovision.tasks.detection.detr.config import (
+    DETRDensityArgs,
 )
 from autovision.tasks.detection.shared.defe import (
     GaussHeatmapGenerator,
@@ -58,7 +58,7 @@ class DomeHybridEncoder(HybridEncoder):
         expansion: float = 1.0,
         depth_mult: float = 1.0,
         use_encoder_idx=None,
-        density: AVDETRDensityArgs | None = None,
+        density: DETRDensityArgs | None = None,
     ) -> None:
         super().__init__(
             in_channels,

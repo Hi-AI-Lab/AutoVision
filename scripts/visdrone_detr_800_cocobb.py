@@ -47,7 +47,7 @@ result = train_object_detection(
         "val": {"annotations": str(VISDRONE / "annotations/visdrone_val.json"),
                 "images": str(VISDRONE / "VisDrone2019-DET-val/images")},
     },
-    model="avdetr/dinov3-convnext-tiny",
+    model="detr/dinov3-convnext-tiny",
     steps=29_000,
     batch_size=4,
     gradient_accumulation_steps=4,

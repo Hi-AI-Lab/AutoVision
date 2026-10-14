@@ -27,12 +27,12 @@ def test_round_trip(tmp_path):
     out = save_warm_start(
         tmp_path / "ws" / "warm.pt",
         model=model.state_dict(),
-        spec={"family": "avdetr", "classes": 80},
+        spec={"family": "detr", "classes": 80},
         license=LICENSE,
     )
     payload = load_warm_start(out)
     assert payload.license == LICENSE
-    assert payload.spec["family"] == "avdetr"
+    assert payload.spec["family"] == "detr"
     for key, value in model.state_dict().items():
         assert torch.equal(payload.model[key], value)
 

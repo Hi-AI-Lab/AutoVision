@@ -118,7 +118,7 @@ def main() -> None:
     result = train_object_detection(
         out="runs/visdrone_ltdetr_convnextt_1280_cocofull",
         data=DATA_ARGS,
-        model="avdetr/dinov3-convnext-tiny",
+        model="detr/dinov3-convnext-tiny",
         steps=STEPS,
         batch_size=MICRO_BATCH,
         gradient_accumulation_steps=GRAD_ACCUM,

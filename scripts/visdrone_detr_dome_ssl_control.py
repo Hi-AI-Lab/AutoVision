@@ -119,7 +119,7 @@ def main() -> None:
                 "images": str(VISDRONE / "VisDrone2019-DET-val/images"),
             },
         },
-        model="avdetr/dinov3-convnext-tiny",
+        model="detr/dinov3-convnext-tiny",
         steps=STEPS,
         batch_size=namespace.micro_batch,
         gradient_accumulation_steps=namespace.grad_accum,

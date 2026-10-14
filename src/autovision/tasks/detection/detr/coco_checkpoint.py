@@ -98,15 +98,15 @@ _PUBLISHED_CKPT_BASE_URL = (
 #: pre-remediation package layout and the pre-migration underscore layout.
 LEGACY_CLASS_PATH_REMAP: dict[str, str] = {
     "lightly_train._task_models.ltdetr_object_detection.task_model.": (
-        "autovision.tasks.detection.avdetr.task_model."
+        "autovision.tasks.detection.detr.task_model."
     ),
     "autovision._task_models.ltdetr_object_detection.task_model.": (
-        "autovision.tasks.detection.avdetr.task_model."
+        "autovision.tasks.detection.detr.task_model."
     ),
     # Generation 3: checkpoints saved between the Phase 3 package
     # migration and the R16 family rename (design doc 28).
     "autovision.tasks.detection.ltdetr_object_detection.task_model.": (
-        "autovision.tasks.detection.avdetr.task_model."
+        "autovision.tasks.detection.detr.task_model."
     ),
 }
 

@@ -62,7 +62,7 @@ _PROJECTION_HEAD_KINDS = ("simcse", "mlp2")
 class SSLParams:
     """Immutable SSL contract shared by the model head and the criterion.
 
-    Built from the task-family config (e.g. ``AVDETRSSLArgs``) so this
+    Built from the task-family config (e.g. ``DETRSSLArgs``) so this
     components layer stays free of task-model imports. ``loss_coef`` rides
     the criterion's ``weight_dict`` (``"loss_ssl"``), applied once — the
     objective is computed at the final decoder layer only.

@@ -13,12 +13,12 @@ import torch
 import torch.nn.functional as F
 from tests.test_ltdetr_ssl import VARIANT_ARGS
 
-from autovision.tasks.detection.avdetr import (
-    AVDETRObjectDetectionTrain,
-    AVDETRObjectDetectionTrainArgs,
+from autovision.tasks.detection.detr import (
+    DETRObjectDetectionTrain,
+    DETRObjectDetectionTrainArgs,
 )
-from autovision.tasks.detection.avdetr.config import AVDETRDistillArgs
-from autovision.tasks.detection.avdetr.train_model import (
+from autovision.tasks.detection.detr.config import DETRDistillArgs
+from autovision.tasks.detection.detr.train_model import (
     _build_gt_to_teacher_query,
 )
 from autovision.tasks.detection.shared.dfine_criterion import (
@@ -91,11 +91,11 @@ def _run_criterion(harness, distill_params=None, distill_targets=None, train=Tru
     return criterion, losses
 
 
-def make_distill_train_model(**distill_overrides) -> AVDETRObjectDetectionTrain:
+def make_distill_train_model(**distill_overrides) -> DETRObjectDetectionTrain:
     distill = {"teacher_model": "self:ema", "start_step": 0}
     distill.update(distill_overrides)
-    args = AVDETRObjectDetectionTrainArgs(**VARIANT_ARGS, distill=distill)
-    return AVDETRObjectDetectionTrain(args)
+    args = DETRObjectDetectionTrainArgs(**VARIANT_ARGS, distill=distill)
+    return DETRObjectDetectionTrain(args)
 
 
 def make_single_view_batch(seed: int = 0) -> dict:
@@ -109,7 +109,7 @@ def make_single_view_batch(seed: int = 0) -> dict:
     return {"image": torch.stack(images), "bboxes": batch_boxes, "classes": batch_classes}
 
 
-def _export_payload(wrapper: AVDETRObjectDetectionTrain) -> dict:
+def _export_payload(wrapper: DETRObjectDetectionTrain) -> dict:
     return {
         "schema_version": 1,
         "kind": "task_model",
@@ -122,46 +122,46 @@ def _export_payload(wrapper: AVDETRObjectDetectionTrain) -> dict:
 
 
 @pytest.fixture(scope="module")
-def distill_train_model() -> AVDETRObjectDetectionTrain:
+def distill_train_model() -> DETRObjectDetectionTrain:
     return make_distill_train_model()
 
 
 @pytest.fixture(scope="module")
-def baseline_train_model() -> AVDETRObjectDetectionTrain:
-    return AVDETRObjectDetectionTrain(AVDETRObjectDetectionTrainArgs(**VARIANT_ARGS))
+def baseline_train_model() -> DETRObjectDetectionTrain:
+    return DETRObjectDetectionTrain(DETRObjectDetectionTrainArgs(**VARIANT_ARGS))
 
 
 # ── config ──────────────────────────────────────────────────────────────
 class TestDistillConfig:
     def test_off_by_default(self):
-        args = AVDETRObjectDetectionTrainArgs(**VARIANT_ARGS)
+        args = DETRObjectDetectionTrainArgs(**VARIANT_ARGS)
         assert args.distill is None
 
     def test_empty_teacher_source_rejected(self):
         with pytest.raises(ValueError, match="teacher_checkpoint"):
-            AVDETRDistillArgs(teacher_model="")
+            DETRDistillArgs(teacher_model="")
 
     def test_nonpositive_temperature_rejected(self):
         with pytest.raises(ValueError, match="ddf_temperature"):
-            AVDETRDistillArgs(teacher_model="self:ema", ddf_temperature=0.0)
+            DETRDistillArgs(teacher_model="self:ema", ddf_temperature=0.0)
 
     def test_class_space_rules(self):
-        args = AVDETRDistillArgs(teacher_model="self:ema", cls_coef=0.7)
+        args = DETRDistillArgs(teacher_model="self:ema", cls_coef=0.7)
         assert args.resolved_cls_coef(2, 2) == 0.7
         with pytest.raises(ValueError, match="require_same_class_space"):
             args.resolved_cls_coef(5, 2)
-        relaxed = AVDETRDistillArgs(
+        relaxed = DETRDistillArgs(
             teacher_model="self:ema", require_same_class_space=False
         )
         assert relaxed.resolved_cls_coef(5, 2) == 0.0
 
     def test_args_round_trip(self):
-        args = AVDETRObjectDetectionTrainArgs(
+        args = DETRObjectDetectionTrainArgs(
             **VARIANT_ARGS,
             distill={"teacher_model": "self:ema", "cls_coef": 0.5},
         )
         dumped = args.model_dump()["distill"]
-        re_coerced = AVDETRDistillArgs(**dumped)
+        re_coerced = DETRDistillArgs(**dumped)
         assert re_coerced.cls_coef == 0.5
         assert re_coerced.teacher_model == "self:ema"
 
@@ -291,7 +291,7 @@ class TestDistillLegs:
 # ── wrapper-level ───────────────────────────────────────────────────────
 class TestDistillWrapper:
     def test_off_by_default(self):
-        args = AVDETRObjectDetectionTrainArgs(**VARIANT_ARGS)
+        args = DETRObjectDetectionTrainArgs(**VARIANT_ARGS)
         assert args.distill is None
 
     def test_self_ema_teacher_aliases_ema_copy(
@@ -344,21 +344,21 @@ class TestDistillWrapper:
         assert set(teacher.state_dict().keys()) == set(ema_state.keys())
 
     def test_class_space_mismatch_rejected(self, baseline_train_model, tmp_path):
-        three_class = AVDETRObjectDetectionTrain(
-            AVDETRObjectDetectionTrainArgs(**{**VARIANT_ARGS, "num_classes": 3})
+        three_class = DETRObjectDetectionTrain(
+            DETRObjectDetectionTrainArgs(**{**VARIANT_ARGS, "num_classes": 3})
         )
         checkpoint = tmp_path / "teacher3.pt"
         torch.save(_export_payload(three_class), checkpoint)
-        student_args = AVDETRObjectDetectionTrainArgs(
+        student_args = DETRObjectDetectionTrainArgs(
             **VARIANT_ARGS,
             distill={"teacher_model": "", "teacher_checkpoint": checkpoint},
         )
         with pytest.raises(ValueError, match="require_same_class_space"):
-            AVDETRObjectDetectionTrain(student_args)
+            DETRObjectDetectionTrain(student_args)
 
     def test_class_space_relaxed_drops_cls_leg(self, baseline_train_model, tmp_path):
-        three_class = AVDETRObjectDetectionTrain(
-            AVDETRObjectDetectionTrainArgs(**{**VARIANT_ARGS, "num_classes": 3})
+        three_class = DETRObjectDetectionTrain(
+            DETRObjectDetectionTrainArgs(**{**VARIANT_ARGS, "num_classes": 3})
         )
         checkpoint = tmp_path / "teacher3.pt"
         torch.save(_export_payload(three_class), checkpoint)
@@ -372,30 +372,30 @@ class TestDistillWrapper:
         assert wrapper.criterion.weight_dict["loss_distill_box"] > 0
 
     def test_self_ema_requires_ema(self):
-        args = AVDETRObjectDetectionTrainArgs(
+        args = DETRObjectDetectionTrainArgs(
             **VARIANT_ARGS,
             use_ema_model=False,
             distill={"teacher_model": "self:ema"},
         )
         with pytest.raises(ValueError, match="use_ema_model"):
-            AVDETRObjectDetectionTrain(args)
+            DETRObjectDetectionTrain(args)
 
     def test_decoder_gate(self):
-        args = AVDETRObjectDetectionTrainArgs(
+        args = DETRObjectDetectionTrainArgs(
             **{**VARIANT_ARGS, "decoder": "rtdetrv2"},
             distill={"teacher_model": "self:ema"},
         )
         with pytest.raises(ValueError, match="D-FINE decoder"):
-            AVDETRObjectDetectionTrain(args)
+            DETRObjectDetectionTrain(args)
 
     def test_teacher_not_in_export(self, distill_train_model):
         export = distill_train_model.get_export_state_dict()
         assert not any("_distill_teacher" in key for key in export)
 
     def test_public_weight_teacher_not_implemented(self):
-        args = AVDETRObjectDetectionTrainArgs(
+        args = DETRObjectDetectionTrainArgs(
             **VARIANT_ARGS,
             distill={"teacher_model": "deimv2/deimv2-dinov3-s"},
         )
         with pytest.raises(NotImplementedError, match="teacher_model"):
-            AVDETRObjectDetectionTrain(args)
+            DETRObjectDetectionTrain(args)

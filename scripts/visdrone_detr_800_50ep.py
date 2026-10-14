@@ -74,7 +74,7 @@ def main() -> None:
     result = pilot.train_object_detection(
         out=OUT,
         data=pilot.DATA_ARGS,
-        model="avdetr/dinov3-convnext-tiny",
+        model="detr/dinov3-convnext-tiny",
         steps=STEPS,
         batch_size=GLOBAL_BATCH,
         gradient_accumulation_steps=1,

@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
-"""Tests for the AV-DETR density-guided branch (Dome-DETR port, doc 13 §7).
+"""Tests for the DETR density-guided branch (Dome-DETR port, doc 13 §7).
 
 All cases run offline against the tiny ``dinov2-vittest-notpretrained``
 variant (hermetic, CPU-friendly), mirroring the conventions of
@@ -14,16 +14,16 @@ import pytest
 import torch
 from torch import nn
 
-from autovision.tasks.detection.avdetr import (
-    AVDETRDensityArgs,
-    AVDETRObjectDetectionTrain,
-    AVDETRObjectDetectionTrainArgs,
+from autovision.tasks.detection.detr import (
+    DETRDensityArgs,
+    DETRObjectDetectionTrain,
+    DETRObjectDetectionTrainArgs,
 )
-from autovision.tasks.detection.avdetr.dome_decoder import (
+from autovision.tasks.detection.detr.dome_decoder import (
     _PADDED_LOGIT,
     DomeDFINEv2Decoder,
 )
-from autovision.tasks.detection.avdetr.dome_encoder import (
+from autovision.tasks.detection.detr.dome_encoder import (
     DomeHybridEncoder,
 )
 from autovision.tasks.detection.shared.defe import (
@@ -44,14 +44,14 @@ from autovision.tasks.detection.shared.mwas import (
 PADDED_LOGIT = -1e4
 
 
-def make_density_args(**overrides) -> AVDETRDensityArgs:
+def make_density_args(**overrides) -> DETRDensityArgs:
     defaults: dict = dict(max_num_select=50, mwas_window_size=5)
     defaults.update(overrides)
-    return AVDETRDensityArgs(**defaults)
+    return DETRDensityArgs(**defaults)
 
 
-def make_dome_train_model(**density_overrides) -> AVDETRObjectDetectionTrain:
-    args = AVDETRObjectDetectionTrainArgs(
+def make_dome_train_model(**density_overrides) -> DETRObjectDetectionTrain:
+    args = DETRObjectDetectionTrainArgs(
         num_classes=2,
         backbone="dinov2-vittest-notpretrained",
         image_size=(224, 224),
@@ -60,11 +60,11 @@ def make_dome_train_model(**density_overrides) -> AVDETRObjectDetectionTrain:
         decoder="dfine",
         density=make_density_args(**density_overrides),
     )
-    return AVDETRObjectDetectionTrain(args)
+    return DETRObjectDetectionTrain(args)
 
 
-def make_baseline_train_model() -> AVDETRObjectDetectionTrain:
-    args = AVDETRObjectDetectionTrainArgs(
+def make_baseline_train_model() -> DETRObjectDetectionTrain:
+    args = DETRObjectDetectionTrainArgs(
         num_classes=2,
         backbone="dinov2-vittest-notpretrained",
         image_size=(224, 224),
@@ -72,7 +72,7 @@ def make_baseline_train_model() -> AVDETRObjectDetectionTrain:
         num_top_queries=20,
         decoder="dfine",
     )
-    return AVDETRObjectDetectionTrain(args)
+    return DETRObjectDetectionTrain(args)
 
 
 def make_batch(images: int = 2, size: int = 224):
@@ -119,7 +119,7 @@ class TestDensityArgs:
 
     def test_extra_fields_forbidden(self):
         with pytest.raises(ValueError):
-            AVDETRDensityArgs(unknown_field=1)
+            DETRDensityArgs(unknown_field=1)
 
 
 class TestDeFE:
@@ -390,7 +390,7 @@ class TestDomeTaskModel:
         assert type(train_model.model.decoder).__name__ == "DomeDFINEv2Decoder"
 
     def test_density_requires_dfine_decoder(self):
-        args = AVDETRObjectDetectionTrainArgs(
+        args = DETRObjectDetectionTrainArgs(
             num_classes=2,
             backbone="dinov2-vittest-notpretrained",
             image_size=(224, 224),
@@ -398,22 +398,22 @@ class TestDomeTaskModel:
             decoder="rtdetrv2",
         )
         with pytest.raises(ValueError, match="requires the D-FINE decoder"):
-            AVDETRObjectDetectionTrain(args)
+            DETRObjectDetectionTrain(args)
 
     def test_pyramid4_requires_convnext_family(self):
-        from autovision.tasks.detection.avdetr.task_model import (
-            AVDETRObjectDetection,
+        from autovision.tasks.detection.detr.task_model import (
+            DETRObjectDetection,
         )
 
         with pytest.raises(ValueError, match="ConvNeXt-family"):
-            AVDETRObjectDetection(
+            DETRObjectDetection(
                 num_classes=2,
                 model_name="dinov2-vittest-notpretrained",
                 image_size=(224, 224),
                 pyramid_levels=4,
             )
         with pytest.raises(ValueError, match="pyramid_levels must be 3 or 4"):
-            AVDETRObjectDetection(
+            DETRObjectDetection(
                 num_classes=2,
                 model_name="dinov2-vittest-notpretrained",
                 image_size=(224, 224),
@@ -430,10 +430,10 @@ class TestDomeTaskModel:
         from autovision.encoders.dinov3.dinov3_wrapper import (
             TransformersDinov3ConvNextWrapper,
         )
-        from autovision.tasks.detection.avdetr.backbone_wrappers import (
+        from autovision.tasks.detection.detr.backbone_wrappers import (
             ConvNeXtDetectionBackbone,
         )
-        from autovision.tasks.detection.avdetr.dome_decoder import (
+        from autovision.tasks.detection.detr.dome_decoder import (
             DomeDFINEv2Decoder,
         )
 
@@ -497,7 +497,7 @@ class TestDomeTaskModel:
         assert all(20 <= n <= 50 for n in out["batch_queries_num"])
 
     def test_num_queries_must_fit_max_select(self):
-        args = AVDETRObjectDetectionTrainArgs(
+        args = DETRObjectDetectionTrainArgs(
             num_classes=2,
             backbone="dinov2-vittest-notpretrained",
             image_size=(224, 224),
@@ -506,7 +506,7 @@ class TestDomeTaskModel:
             decoder="dfine",
         )
         with pytest.raises(ValueError, match="max_num_select"):
-            AVDETRObjectDetectionTrain(args)
+            DETRObjectDetectionTrain(args)
 
     def test_training_step_losses_and_backward(self):
         train_model = make_dome_train_model()
@@ -686,8 +686,8 @@ class TestDomeTaskModel:
         baseline = make_baseline_train_model()
         report = baseline.validation_report({"val_metric/map": 0.0})
         assert "VFL/bbox/GIoU only" in report
-        siou_train = AVDETRObjectDetectionTrain(
-            AVDETRObjectDetectionTrainArgs(
+        siou_train = DETRObjectDetectionTrain(
+            DETRObjectDetectionTrainArgs(
                 num_classes=2,
                 backbone="dinov2-vittest-notpretrained",
                 image_size=(224, 224),
@@ -861,8 +861,8 @@ class TestScriptTwin:
         return module
 
     def test_base_is_density_off_twin_of_dome(self):
-        base = self._load_script("visdrone_avdetr_800.py")
-        dome = self._load_script("visdrone_avdetr_dome_800.py")
+        base = self._load_script("visdrone_detr_800.py")
+        dome = self._load_script("visdrone_detr_dome_800.py")
         assert set(dome.MODEL_ARGS) - set(base.MODEL_ARGS) == {"density"}
         for key, value in base.MODEL_ARGS.items():
             assert value == dome.MODEL_ARGS[key], f"model_args.{key} diverged"
@@ -898,13 +898,13 @@ class TestScriptTwin:
         from autovision.augment.detection.args import (
             RTDETRDetectionTransformArgs,
         )
-        from autovision.tasks.detection.avdetr import (
-            AVDETRObjectDetectionTrainArgs,
+        from autovision.tasks.detection.detr import (
+            DETRObjectDetectionTrainArgs,
         )
 
-        for name in ("visdrone_avdetr_800.py", "visdrone_avdetr_dome_800.py"):
+        for name in ("visdrone_detr_800.py", "visdrone_detr_dome_800.py"):
             module = self._load_script(name)
-            args = AVDETRObjectDetectionTrainArgs(**module.MODEL_ARGS)
+            args = DETRObjectDetectionTrainArgs(**module.MODEL_ARGS)
             args.resolve_image_size()
             transform = RTDETRDetectionTransformArgs.model_validate(
                 {**module.TRANSFORM_ARGS, "image_size": (800, 800)}

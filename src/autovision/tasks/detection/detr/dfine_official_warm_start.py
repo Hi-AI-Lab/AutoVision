@@ -1,11 +1,11 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
 """Warm-start assembly from Apache upstream components (design doc 28, §6.2).
 
-:func:`load_dfine_official_warm_start` initializes an AV-DETR task model
+:func:`load_dfine_official_warm_start` initializes an DETR task model
 from two Apache-2.0 sources:
 
 - **encoder + decoder** ← an official D-FINE COCO checkpoint
-  (``Peterande/D-FINE``, e.g. asset ``d-fine/dfine_s_coco``): the AV-DETR
+  (``Peterande/D-FINE``, e.g. asset ``d-fine/dfine_s_coco``): the DETR
   hybrid encoder and official D-FINE decoder are re-ports of the same
   architecture, so tensors transfer through a small key-normalization
   (``cv1/cv2`` → ``conv1/conv2`` block renames and the upstream
@@ -16,7 +16,7 @@ from two Apache-2.0 sources:
 - **backbone** ← the EdgeCrafter ECViT backbone weights via the wrapper's
   own strict loader (``encoders/ecvit/ecvit.py``).
 
-Widths are a property of the AV-DETR variant, not of this loader: variants
+Widths are a property of the DETR variant, not of this loader: variants
 whose encoder/decoder hidden width differs from the D-FINE checkpoint (256)
 simply keep those parts at their fresh initialization and the coverage
 report says so. The returned summary dict is what
@@ -40,11 +40,11 @@ __all__ = ["load_dfine_official_warm_start"]
 logger = logging.getLogger("autovision")
 
 #: Submodule renames between the upstream D-FINE block naming and the
-#: AV-DETR re-port (``CSPRepLayer.cv1/cv2`` → ``conv1/conv2``).
+#: DETR re-port (``CSPRepLayer.cv1/cv2`` → ``conv1/conv2``).
 _BLOCK_RENAMES = ((".cv1.", ".conv1."), (".cv2.", ".conv2."))
 
 #: D-FINE wraps ``downsample_convs`` entries in ``Sequential(...)[0]`` with
-#: an inner ``cv1``; the AV-DETR port keeps the bare conv/norm pair.
+#: an inner ``cv1``; the DETR port keeps the bare conv/norm pair.
 _DOWNSAMPLE_NESTING = re.compile(r"^(encoder\.downsample_convs\.\d+)\.0\.cv1\.")
 
 #: Class-count-dependent decoder heads — shape mismatches against the COCO
@@ -58,7 +58,7 @@ _CLASS_COUNT_MARKERS = (
 
 
 def _normalize_dfine_key(key: str) -> str:
-    """Map an official-checkpoint key onto the AV-DETR layout."""
+    """Map an official-checkpoint key onto the DETR layout."""
     key = _DOWNSAMPLE_NESTING.sub(r"\1.", key)
     for dfine_name, av_name in _BLOCK_RENAMES:
         if ".fpn_blocks." in key or ".pan_blocks." in key:
@@ -83,7 +83,7 @@ def load_dfine_official_warm_start(
     """Initialize ``task_model`` from Apache upstream components, in place.
 
     Args:
-        task_model: an ``AVDETRObjectDetection`` instance whose decoder is
+        task_model: an ``DETRObjectDetection`` instance whose decoder is
             the official D-FINE one (``decoder="dfine_official"``).
         dfine_checkpoint: official D-FINE COCO checkpoint — an asset name
             (``d-fine/dfine_s_coco``, resolved through the licensed asset
@@ -140,7 +140,7 @@ def load_dfine_official_warm_start(
         raise WarmStartError(
             f"D-FINE decoder coverage {coverage:.0%} ({decoder_loaded}/"
             f"{dfine_decoder_total}) is below the required "
-            f"{min_decoder_coverage:.0%}; the checkpoint and this AV-DETR "
+            f"{min_decoder_coverage:.0%}; the checkpoint and this DETR "
             f"variant are too far apart for a warm start. Skipped by shape: "
             f"{skipped_shape[:6]}"
         )

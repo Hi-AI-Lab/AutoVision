@@ -45,7 +45,7 @@ def main() -> None:
     result = train_object_detection(
         out=RUN_DIR,
         data=arm.DATA_ARGS,
-        model="avdetr/dinov3-convnext-tiny",
+        model="detr/dinov3-convnext-tiny",
         steps=arm.STEPS,
         batch_size=arm.GLOBAL_BATCH,
         gradient_accumulation_steps=1,

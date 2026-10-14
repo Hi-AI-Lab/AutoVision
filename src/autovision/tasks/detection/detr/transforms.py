@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
-"""AV-DETR detection transform recipe.
+"""DETR detection transform recipe.
 
-Two things set the AV-DETR family apart from the generic RT-DETR recipe
+Two things set the DETR family apart from the generic RT-DETR recipe
 (baseline ``ltdetr_transforms``):
 
 - **Patch-grid arithmetic**: the image size is divisible by ``2 ×
@@ -25,15 +25,15 @@ from autovision.augment.detection.args import (
 )
 from autovision.types import ImageSizeTuple
 
-from .config import resolve_avdetr_variant
+from .config import resolve_detr_variant
 
 __all__ = [
-    "build_avdetr_train_transform_args",
-    "avdetr_scale_jitter_sizes",
+    "build_detr_train_transform_args",
+    "detr_scale_jitter_sizes",
 ]
 
 
-def avdetr_scale_jitter_sizes(
+def detr_scale_jitter_sizes(
     image_size: ImageSizeTuple, divisor: int, total: int = 30
 ) -> list[int]:
     """Scale-jitter ladder aligned to ``2 × patch_size`` (baseline rule).
@@ -54,23 +54,23 @@ def avdetr_scale_jitter_sizes(
     return sizes + [base] * max(0, total - len(sizes))
 
 
-def build_avdetr_train_transform_args(
+def build_detr_train_transform_args(
     image_size: ImageSizeTuple,
     backbone: str,
     overrides: dict[str, Any] | None = None,
 ) -> RTDETRDetectionTransformArgs:
-    """AV-DETR train transform args: patch-aligned jitter + mosaic on."""
-    _, spec = resolve_avdetr_variant(f"avdetr/{backbone}")
+    """DETR train transform args: patch-aligned jitter + mosaic on."""
+    _, spec = resolve_detr_variant(f"detr/{backbone}")
     mosaic_prob = 0.75 if spec.family == "ecvit" else 0.5
     payload: dict[str, Any] = {
         "image_size": tuple(image_size),
         "mosaic_prob": mosaic_prob,
-        # Baseline AVDETRv2ObjectDetectionTrainTransformArgs: the ECViT
+        # Baseline DETRv2ObjectDetectionTrainTransformArgs: the ECViT
         # "v2" family lifts BOTH mixup and mosaic to 0.75 (the v1 family
         # keeps the 0.5 default).
         "mixup_prob": 0.75 if spec.family == "ecvit" else 0.5,
         "scale_jitter": {
-            "sizes": avdetr_scale_jitter_sizes(tuple(image_size), 2 * spec.patch_size),
+            "sizes": detr_scale_jitter_sizes(tuple(image_size), 2 * spec.patch_size),
             "step_stop": "auto",
         },
         **(overrides or {}),

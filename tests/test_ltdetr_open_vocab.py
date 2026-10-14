@@ -12,12 +12,12 @@ import pytest
 import torch
 
 from autovision.optim.optimizer_helpers import get_weight_decay_parameters
-from autovision.tasks.detection.avdetr import (
-    AVDETRDensityArgs,
-    AVDETRObjectDetection,
-    AVDETRObjectDetectionTrain,
-    AVDETRObjectDetectionTrainArgs,
-    AVDETROpenVocabArgs,
+from autovision.tasks.detection.detr import (
+    DETRDensityArgs,
+    DETRObjectDetection,
+    DETRObjectDetectionTrain,
+    DETRObjectDetectionTrainArgs,
+    DETROpenVocabArgs,
 )
 from autovision.tasks.detection.shared import open_vocab as ov
 from autovision.tasks.detection.shared.open_vocab import (
@@ -42,15 +42,15 @@ VARIANT_ARGS = dict(
 VOCAB = ("car", "person", "bus")
 
 
-def make_ov_args(**overrides) -> AVDETROpenVocabArgs:
+def make_ov_args(**overrides) -> DETROpenVocabArgs:
     defaults: dict = dict(text_encoder="identity", class_names=VOCAB)
     defaults.update(overrides)
-    return AVDETROpenVocabArgs(**defaults)
+    return DETROpenVocabArgs(**defaults)
 
 
-def make_task_model(decoder: str = "dfine", **ov_overrides) -> AVDETRObjectDetection:
+def make_task_model(decoder: str = "dfine", **ov_overrides) -> DETRObjectDetection:
     torch.manual_seed(0)
-    return AVDETRObjectDetection(
+    return DETRObjectDetection(
         num_classes=3,
         model_name="dinov2-vittest-notpretrained",
         image_size=(224, 224),
@@ -62,7 +62,7 @@ def make_task_model(decoder: str = "dfine", **ov_overrides) -> AVDETRObjectDetec
     )
 
 
-def make_train_model(decoder: str = "dfine", **overrides) -> AVDETRObjectDetectionTrain:
+def make_train_model(decoder: str = "dfine", **overrides) -> DETRObjectDetectionTrain:
     torch.manual_seed(0)
     args_kwargs = dict(
         num_classes=3,
@@ -71,17 +71,17 @@ def make_train_model(decoder: str = "dfine", **overrides) -> AVDETRObjectDetecti
         open_vocab=make_ov_args(**overrides.pop("ov_overrides", {})),
     )
     args_kwargs.update(overrides)
-    return AVDETRObjectDetectionTrain(
-        AVDETRObjectDetectionTrainArgs(**VARIANT_ARGS, **args_kwargs)
+    return DETRObjectDetectionTrain(
+        DETRObjectDetectionTrainArgs(**VARIANT_ARGS, **args_kwargs)
     )
 
 
-def make_baseline_train_model(**overrides) -> AVDETRObjectDetectionTrain:
+def make_baseline_train_model(**overrides) -> DETRObjectDetectionTrain:
     torch.manual_seed(0)
     args_kwargs = dict(num_classes=3, decoder="dfine", num_denoising=4)
     args_kwargs.update(overrides)
-    return AVDETRObjectDetectionTrain(
-        AVDETRObjectDetectionTrainArgs(**VARIANT_ARGS, **args_kwargs)
+    return DETRObjectDetectionTrain(
+        DETRObjectDetectionTrainArgs(**VARIANT_ARGS, **args_kwargs)
     )
 
 
@@ -281,7 +281,7 @@ def test_dome_dynamic_selection_with_text_head_smoke():
     """R3 mitigation: the Dome dynamic path (per-class NMS over the
     reduced view) runs end to end with the open-vocab heads on."""
     torch.manual_seed(0)
-    args = AVDETRObjectDetectionTrainArgs(
+    args = DETRObjectDetectionTrainArgs(
         num_classes=3,
         backbone="dinov2-vittest-notpretrained",
         image_size=(224, 224),
@@ -289,10 +289,10 @@ def test_dome_dynamic_selection_with_text_head_smoke():
         num_top_queries=12,
         decoder="dfine",
         num_denoising=4,
-        density=AVDETRDensityArgs(max_num_select=20, mwas_window_size=5),
+        density=DETRDensityArgs(max_num_select=20, mwas_window_size=5),
         open_vocab=make_ov_args(language_guided_selection=True),
     )
-    wrapper = AVDETRObjectDetectionTrain(args)
+    wrapper = DETRObjectDetectionTrain(args)
     result = wrapper.training_step(smoke_batch(), step=0)
     assert torch.isfinite(result.loss)
 
@@ -437,7 +437,7 @@ def test_unfilled_buffer_forward_raises():
 
 def test_train_args_reject_vocabulary_count_mismatch():
     with pytest.raises(ValueError, match="num_classes"):
-        AVDETRObjectDetectionTrainArgs(
+        DETRObjectDetectionTrainArgs(
             **VARIANT_ARGS,
             num_classes=2,
             decoder="dfine",
@@ -466,8 +466,8 @@ def test_novel_eval_full_set_is_the_g4_self_check():
     reproduction check) and the empty base subset reports the -1 sentinel."""
     args = make_ov_args(novel_eval_classes=VOCAB)
     assert args.novel_eval_classes == VOCAB
-    from autovision.tasks.detection.avdetr.train_model import (
-        AVDETRObjectDetectionTrain as Train,
+    from autovision.tasks.detection.detr.train_model import (
+        DETRObjectDetectionTrain as Train,
     )
 
     rows = [
@@ -496,8 +496,8 @@ class _StubEvaluator:
 
 
 def test_base_novel_ap_aggregation():
-    from autovision.tasks.detection.avdetr.train_model import (
-        AVDETRObjectDetectionTrain as Train,
+    from autovision.tasks.detection.detr.train_model import (
+        DETRObjectDetectionTrain as Train,
     )
 
     args = make_ov_args(novel_eval_classes=("bus",))
@@ -691,7 +691,7 @@ def test_init_args_snapshot_round_trip():
     model = make_task_model()
     snapshot = model._init_args["open_vocab"]
     assert isinstance(snapshot, dict)
-    restored = AVDETROpenVocabArgs(**snapshot)
+    restored = DETROpenVocabArgs(**snapshot)
     assert restored.class_names == VOCAB
     assert restored.text_encoder == "identity"
     assert restored.language_guided_selection is False

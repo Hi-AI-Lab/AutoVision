@@ -8,7 +8,7 @@ pipeline). A warm-start checkpoint is a plain, self-describing payload:
         "format": "av_warm_start_v1",
         "model": state_dict,      # target-network parameter names
         "spec": {                 # free-form provenance metadata
-            "family": "avdetr", "backbone": "...", "classes": 80,
+            "family": "detr", "backbone": "...", "classes": 80,
             "created": "2026-10-14", ...
         },
         "license": {"id": ..., "origin": ...},   # REQUIRED (rule R7)

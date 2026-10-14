@@ -132,3 +132,20 @@ registry/CLI 键名与 `LEGACY_CLASS_PATH_REMAP` 全部历史键。
 `scripts/*fsdc*` 运行脚本移除；deimv2 的离线测试变体 `fsdc-vittest`
 更名 `deimv2-vittest`（纯测试用，无发布模型）。旧 FSDC 导出/checkpoint
 自此不可加载（类已不存在）。历史设计文档 21/22 保留。
+
+## 检测器族更名：AV-DETR → DETR（2026-10-15）
+
+R16 之后家族再次更名（`detection/avdetr/` → `detection/detr/`），规格同
+R16：registry 新键 `detr/<backbone>`；旧键 `avdetr/<backbone>` 与
+`ltdetr/<backbone>` 均作为弃用别名保留一个版本（发 DeprecationWarning）。
+类名 `AVDETR*` → `DETR*`（9 个公开类），函数
+`resolve_detr_variant / list_detr_model_names / detr_default_batch_size /
+detr_image_size_divisor`；19 个 `scripts/visdrone_avdetr_*` 更名
+`visdrone_detr_*`。
+
+兼容：`task_model_helpers` 增模块前缀映射
+（`detection.avdetr. → detection.detr.`，第五代）+ 改名类的精确
+`_CLASS_PATH_MIGRATIONS` 条目（`AVDETRX → DETRX`）；
+`LEGACY_CLASS_PATH_REMAP` 三代历史键的**目标**更新为 detr 路径，
+键不变。基线资产文件名（`*_ltdetr_coco_*.pt`，Lightly S3 外部键）
+照旧不改。历史表述"LT-DETR / AV-DETR"在 docs/ 历史分册中保留。

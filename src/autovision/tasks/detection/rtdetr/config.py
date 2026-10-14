@@ -32,7 +32,7 @@ class RTDETRObjectDetectionTrainArgs(TrainModelArgs, PydanticConfig):
     # width); 100 caps recall on dense datasets like VisDrone.
     num_top_queries: int = 300
     # COCO eval per-image detection cap. Dense datasets (VisDrone) want 500
-    # — parity with the avdetr/rfdetr families' eval_max_dets.
+    # — parity with the detr/rfdetr families' eval_max_dets.
     eval_max_dets: int = 100
 
     # Contrastive denoising (CDN): noised GT queries accelerate early box

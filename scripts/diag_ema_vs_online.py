@@ -43,9 +43,9 @@ from autovision.data.coco_object_detection_dataset import (
     COCOObjectDetectionDataArgs,
 )
 from autovision.data.object_detection_dataset import ObjectDetectionDataset
-from autovision.tasks.detection.avdetr import (
-    AVDETRObjectDetectionTrain,
-    AVDETRObjectDetectionTrainArgs,
+from autovision.tasks.detection.detr import (
+    DETRObjectDetectionTrain,
+    DETRObjectDetectionTrainArgs,
 )
 
 REPO = Path(__file__).resolve().parents[1]
@@ -92,11 +92,11 @@ def main() -> None:
     )["categories"]
     num_classes = len(categories)
 
-    args = AVDETRObjectDetectionTrainArgs(
+    args = DETRObjectDetectionTrainArgs(
         num_classes=num_classes, **base.MODEL_ARGS
     )
     args.resolve_image_size()
-    train_model = AVDETRObjectDetectionTrain(args).to(arguments.device)
+    train_model = DETRObjectDetectionTrain(args).to(arguments.device)
 
     # Online weights: the checkpoint's TrainModel state_dict (`model.*`).
     checkpoint = torch.load(

@@ -1,8 +1,8 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
-"""AV-DETR object detection training wrapper.
+"""DETR object detection training wrapper.
 
 Mirrors the RT-DETR training wrapper (criterion, EMA, flat-cosine,
-metrics) with baseline AV-DETR LR grouping:
+metrics) with baseline DETR LR grouping:
 
 - ViT variants: only the pretrained ViT trains at the backbone LR — the
   STA prior and the 1x1 projection layers are randomly initialized and
@@ -26,17 +26,17 @@ from autovision.augment.detection.box_aware_eraser import (
     sample_erase_mask,
 )
 from autovision.metrics.map_evaluator import COCOMAPEvaluator
-from autovision.tasks.detection.avdetr.config import (
-    AVDETRDistillArgs,
-    AVDETRObjectDetectionTrainArgs,
-    AVDETRTokenDropArgs,
-    resolve_avdetr_variant,
+from autovision.tasks.detection.detr.config import (
+    DETRDistillArgs,
+    DETRObjectDetectionTrainArgs,
+    DETRTokenDropArgs,
+    resolve_detr_variant,
 )
-from autovision.tasks.detection.avdetr.optimizer import (
-    build_avdetr_optimizer,
+from autovision.tasks.detection.detr.optimizer import (
+    build_detr_optimizer,
 )
-from autovision.tasks.detection.avdetr.task_model import (
-    AVDETRObjectDetection,
+from autovision.tasks.detection.detr.task_model import (
+    DETRObjectDetection,
 )
 from autovision.tasks.detection.shared.dfine_criterion import (
     DFINECriterionV2,
@@ -57,7 +57,7 @@ def _build_window_keep_masks(
     boxes_list: list[torch.Tensor],
     height: int,
     width: int,
-    args: AVDETRTokenDropArgs,
+    args: DETRTokenDropArgs,
 ) -> tuple[list[torch.Tensor | None], float]:
     """Per-sample window keep masks for in-backbone token dropping (doc 17).
 
@@ -175,15 +175,15 @@ def _build_gt_to_teacher_query(
     return t_map
 
 
-__all__ = ["AVDETRObjectDetectionTrain"]
+__all__ = ["DETRObjectDetectionTrain"]
 
 
-class AVDETRObjectDetectionTrain(TrainModel):
+class DETRObjectDetectionTrain(TrainModel):
     task = "object_detection"
     watch_metric = "val_metric/map"
 
-    def __init__(self, model_args: AVDETRObjectDetectionTrainArgs) -> None:
-        task_model = AVDETRObjectDetection(
+    def __init__(self, model_args: DETRObjectDetectionTrainArgs) -> None:
+        task_model = DETRObjectDetection(
             num_classes=model_args.num_classes,
             model_name=model_args.backbone,
             image_size=model_args.image_size,
@@ -219,7 +219,7 @@ class AVDETRObjectDetectionTrain(TrainModel):
         super().__init__(task_model=task_model)
         self.model_args = model_args
         if model_args.detector_checkpoint is not None:
-            from autovision.tasks.detection.avdetr.coco_checkpoint import (
+            from autovision.tasks.detection.detr.coco_checkpoint import (
                 load_baseline_coco_checkpoint,
                 resolve_detector_checkpoint,
             )
@@ -247,7 +247,7 @@ class AVDETRObjectDetectionTrain(TrainModel):
         )
         decoder = model_args.decoder
         if decoder == "auto":
-            _, variant = resolve_avdetr_variant(f"avdetr/{model_args.backbone}")
+            _, variant = resolve_detr_variant(f"detr/{model_args.backbone}")
             decoder = variant.decoder_default
         density = model_args.density
         ssl_args = model_args.ssl
@@ -280,7 +280,7 @@ class AVDETRObjectDetectionTrain(TrainModel):
         # teacher is stored via object.__setattr__ (never a registered
         # submodule): it must stay out of state_dict / optimizer groups /
         # EMA / export for the whole run.
-        self._distill_args: AVDETRDistillArgs | None = model_args.distill
+        self._distill_args: DETRDistillArgs | None = model_args.distill
         self._distill_teacher: torch.nn.Module | None = None
         self._distill_matcher: HungarianMatcher | None = None
         self._distill_ddf_warned = False
@@ -758,7 +758,7 @@ class AVDETRObjectDetectionTrain(TrainModel):
 
     # ── cross-model distillation (design doc 23) ────────────────────────
     def _build_distill_teacher(
-        self, args: AVDETRDistillArgs, *, student_num_classes: int
+        self, args: DETRDistillArgs, *, student_num_classes: int
     ) -> torch.nn.Module:
         if args.teacher_checkpoint is not None:
             teacher = _load_teacher_from_export(args.teacher_checkpoint)
@@ -812,7 +812,7 @@ class AVDETRObjectDetectionTrain(TrainModel):
         """Teacher forward + its own Hungarian match → criterion join inputs.
 
         Runs under ``torch.inference_mode`` (zero autograd cost). The
-        AV-DETR-family teacher's decoder is flipped to train mode for the
+        DETR-family teacher's decoder is flipped to train mode for the
         forward — the side distributions (``pred_corners_list``) are a
         train-mode emission, and the fork decoder carries neither BatchNorm
         nor dropout, so the pass is deterministic — with ``num_denoising``
@@ -892,7 +892,7 @@ class AVDETRObjectDetectionTrain(TrainModel):
         train_num_batches: int = 0,
         gradient_accumulation_steps: int = 1,
     ) -> tuple[torch.optim.Optimizer, Any]:
-        return build_avdetr_optimizer(
+        return build_detr_optimizer(
             self.model,
             self.model_args,
             total_steps,

@@ -113,34 +113,36 @@ def train_object_detection(
     num_classes = len(classes)
 
     # 2. model args (num_classes inferred from the data). The model string
-    # dispatches the detection family: "rtdetr/*" (default), "avdetr/*"
-    # (SSL-backbone AV-DETR), "dfine/*" (distributional refinement),
+    # dispatches the detection family: "rtdetr/*" (default), "detr/*"
+    # (SSL-backbone DETR), "dfine/*" (distributional refinement),
     # "rfdetr/*" (RF-DETR via HF transformers), "deimv2/*" (DEIMv2 via HF
     # transformers) or "picodet/*" (dense anchor-point PicoDet).
     # "ltdetr/*" is the deprecated pre-R16 family key, kept as an alias.
-    is_avdetr = isinstance(model, str) and (
-        model.startswith("avdetr/") or model.startswith("ltdetr/")
+    is_detr = isinstance(model, str) and (
+        model.startswith("detr/") or model.startswith("ltdetr/")
     )
     is_dfine = isinstance(model, str) and model.startswith("dfine/")
     is_picodet = isinstance(model, str) and model.startswith("picodet/")
     is_rfdetr = isinstance(model, str) and model.startswith("rfdetr/")
     is_deimv2 = isinstance(model, str) and model.startswith("deimv2/")
-    if is_avdetr:
-        if isinstance(model, str) and model.startswith("ltdetr/"):
+    if is_detr:
+        if isinstance(model, str) and (
+            model.startswith("avdetr/") or model.startswith("ltdetr/")
+        ):
             warnings.warn(
-                'Model family key "ltdetr/..." is deprecated; use '
-                '"avdetr/..." instead.',
+                f'Model family key "{model.split("/", 1)[0]}/..." is '
+                'deprecated; use "detr/..." instead.',
                 DeprecationWarning,
                 stacklevel=2,
             )
-        from autovision.tasks.detection.avdetr import (
-            AVDETRObjectDetectionTrain,
-            AVDETRObjectDetectionTrainArgs,
-            avdetr_default_batch_size,
+        from autovision.tasks.detection.detr import (
+            DETRObjectDetectionTrain,
+            DETRObjectDetectionTrainArgs,
+            detr_default_batch_size,
 )
 
-        args_cls = AVDETRObjectDetectionTrainArgs
-        train_cls: type = AVDETRObjectDetectionTrain
+        args_cls = DETRObjectDetectionTrainArgs
+        train_cls: type = DETRObjectDetectionTrain
         family_model_args = {"backbone": model.split("/", 1)[1], **(model_args or {})}
     elif is_dfine:
         from autovision.tasks.detection.dfine import (
@@ -191,7 +193,7 @@ def train_object_detection(
     resolved_model_args = pydantic_model_validate(
         args_cls, {"num_classes": num_classes, **family_model_args}
     )
-    if is_avdetr or is_rfdetr or is_deimv2:
+    if is_detr or is_rfdetr or is_deimv2:
         # Snap the image size to the backbone's patch grid (640 -> 644 for
         # patch-14 backbones; "auto" -> variant-native for rfdetr/deimv2)
         # BEFORE the transform pipeline reads it.
@@ -211,11 +213,11 @@ def train_object_detection(
     )
 
     # 4. batch size / steps
-    # Baseline reference batch is variant-scoped for the AVDETR family
+    # Baseline reference batch is variant-scoped for the DETR family
     # (32 across the family, 16 for dinov2); every other family keeps its
     # class-level default.
-    if is_avdetr:
-        default_bs = avdetr_default_batch_size(resolved_model_args.backbone)
+    if is_detr:
+        default_bs = detr_default_batch_size(resolved_model_args.backbone)
     else:
         default_bs = args_cls.default_batch_size
     batch_size_resolved = (
@@ -276,14 +278,14 @@ def train_object_detection(
             raise ValueError("The training dataset is empty.")
 
         # 6. transforms (resolved after the loader length is known).
-        # AV-DETR gets the family recipe: patch-aligned scale jitter and
+        # DETR gets the family recipe: patch-aligned scale jitter and
         # mosaic on (overrides still win).
-        if is_avdetr:
-            from autovision.tasks.detection.avdetr.transforms import (
-                build_avdetr_train_transform_args,
+        if is_detr:
+            from autovision.tasks.detection.detr.transforms import (
+                build_detr_train_transform_args,
             )
 
-            train_transform_args = build_avdetr_train_transform_args(
+            train_transform_args = build_detr_train_transform_args(
                 default_image_size, resolved_model_args.backbone, transform_args
             )
         else:

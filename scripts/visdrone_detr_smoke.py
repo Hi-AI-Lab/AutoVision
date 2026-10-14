@@ -19,9 +19,9 @@ from pathlib import Path
 import torch
 
 from autovision import load_task_model, train_object_detection
-from autovision.tasks.detection.avdetr import (
-    AVDETRObjectDetectionTrain,
-    AVDETRObjectDetectionTrainArgs,
+from autovision.tasks.detection.detr import (
+    DETRObjectDetectionTrain,
+    DETRObjectDetectionTrainArgs,
 )
 
 VISDRONE = Path("/home/hdjs/Research/Project/Dino-Dome-Research/dataset/visdrone")
@@ -44,7 +44,7 @@ result = train_object_detection(
         "val": {"annotations": str(SMOKE_VAL),
                 "images": str(VISDRONE / "VisDrone2019-DET-val/images")},
     },
-    model="avdetr/dinov2-vittest-notpretrained",
+    model="detr/dinov2-vittest-notpretrained",
     steps=4,
     batch_size=2,
     num_workers=0,
@@ -74,13 +74,13 @@ print(f"[stage 1] inference on {val_images[0].name}: "
 print("STAGE 1 PASSED (pipeline end-to-end)")
 
 # ── Stage 2: real DINOv3 ConvNeXt backbone + one training step ───────────
-args = AVDETRObjectDetectionTrainArgs(
+args = DETRObjectDetectionTrainArgs(
     num_classes=10,
     backbone="dinov3-convnext-tiny",
     image_size=(320, 320),
     backbone_weights=CONVNEXT_TINY_WEIGHTS,
 )
-train_model = AVDETRObjectDetectionTrain(args)
+train_model = DETRObjectDetectionTrain(args)
 task_model = train_model.model
 print(f"\n[stage 2] decoder={task_model.decoder_name} "
       f"hidden_dim={task_model.hidden_dim} image_size={task_model.image_size}")

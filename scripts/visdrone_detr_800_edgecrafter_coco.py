@@ -44,7 +44,7 @@ DATA_ARGS = {
 #: Which published EdgeCrafter COCO checkpoint to warm-start from. The
 #: resolver accepts either a local file or a registered published name
 #: (download + sha256 verify): see
-#: ``avdetr.coco_checkpoint.resolve_detector_checkpoint``.
+#: ``detr.coco_checkpoint.resolve_detector_checkpoint``.
 ECVIT_SIZE = "ecvitt"
 DETECTOR_CHECKPOINT = Path(
     "/home/hdjs/Research/Project/Dino-Dome-Research/weight/edgecrafter"
@@ -112,7 +112,7 @@ def main() -> None:
     result = train_object_detection(
         out=f"runs/visdrone_ltdetr_edgecrafter_{ECVIT_SIZE}_800_cocofull",
         data=DATA_ARGS,
-        model=f"avdetr/edgecrafter-{ECVIT_SIZE}",
+        model=f"detr/edgecrafter-{ECVIT_SIZE}",
         steps=STEPS,
         batch_size=GLOBAL_BATCH,
         gradient_accumulation_steps=1,

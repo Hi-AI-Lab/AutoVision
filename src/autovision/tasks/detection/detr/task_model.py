@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
-"""AV-DETR object detection task model (inference/export facing).
+"""DETR object detection task model (inference/export facing).
 
 Assembly (baseline ``dinov3_ltdetr``): SSL backbone wrapper -> stride
 8/16/32 pyramid -> shared HybridEncoder -> RT-DETRv2 or D-FINE decoder.
@@ -58,18 +58,18 @@ from .backbone_wrappers import (
     ViTDetectionBackbone,
 )
 from .config import (
-    AVDETRDensityArgs,
-    AVDETROpenVocabArgs,
-    AVDETRSSLArgs,
-    AVDETRTokenDropArgs,
-    AVDETRVariantSpec,
+    DETRDensityArgs,
+    DETROpenVocabArgs,
+    DETRSSLArgs,
+    DETRTokenDropArgs,
+    DETRVariantSpec,
     check_image_size,
-    resolve_avdetr_variant,
+    resolve_detr_variant,
 )
 from .dome_decoder import DomeDFINEv2Decoder
 from .dome_encoder import DomeHybridEncoder
 
-__all__ = ["AVDETRObjectDetection"]
+__all__ = ["DETRObjectDetection"]
 
 
 def _build_vit_test_backbone() -> TransformersDinov2Wrapper:
@@ -88,7 +88,7 @@ def _build_vit_test_backbone() -> TransformersDinov2Wrapper:
 
 
 def _build_ecvit_backbone(
-    spec: AVDETRVariantSpec, backbone_weights: str | None
+    spec: DETRVariantSpec, backbone_weights: str | None
 ) -> "ECViTModelWrapper":
     from autovision.encoders.ecvit.ecvit import ECViTModelWrapper
 
@@ -121,8 +121,8 @@ def _relabel_prefix_drift(state: dict, target: torch.nn.Module) -> dict:
     return relabeled
 
 
-class AVDETRObjectDetection(ONNXExportMixin, TaskNetwork):
-    """SSL-backbone AV-DETR detector (three-stage inference contract)."""
+class DETRObjectDetection(ONNXExportMixin, TaskNetwork):
+    """SSL-backbone DETR detector (three-stage inference contract)."""
 
     onnx_export_precision_policy = ONNXExportPrecisionPolicy(
         fp32_onnx_op_types=("Softmax", "MatMul")
@@ -153,10 +153,10 @@ class AVDETRObjectDetection(ONNXExportMixin, TaskNetwork):
         backbone_weights: str | None = None,
         load_weights: bool = True,
         pyramid_levels: int = 3,
-        density: AVDETRDensityArgs | dict | None = None,
-        ssl: AVDETRSSLArgs | dict | None = None,
-        token_drop: AVDETRTokenDropArgs | dict | None = None,
-        open_vocab: AVDETROpenVocabArgs | dict | None = None,
+        density: DETRDensityArgs | dict | None = None,
+        ssl: DETRSSLArgs | dict | None = None,
+        token_drop: DETRTokenDropArgs | dict | None = None,
+        open_vocab: DETROpenVocabArgs | dict | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(
@@ -169,13 +169,13 @@ class AVDETRObjectDetection(ONNXExportMixin, TaskNetwork):
         # the round trip is lossless. Same for Path-valued args: the export
         # safe loader (weights_only=True) rejects pathlib types, and this
         # task model treats backbone_weights as a str either way.
-        if isinstance(self._init_args.get("density"), AVDETRDensityArgs):
+        if isinstance(self._init_args.get("density"), DETRDensityArgs):
             self._init_args["density"] = self._init_args["density"].model_dump()
-        if isinstance(self._init_args.get("ssl"), AVDETRSSLArgs):
+        if isinstance(self._init_args.get("ssl"), DETRSSLArgs):
             self._init_args["ssl"] = self._init_args["ssl"].model_dump()
-        if isinstance(self._init_args.get("token_drop"), AVDETRTokenDropArgs):
+        if isinstance(self._init_args.get("token_drop"), DETRTokenDropArgs):
             self._init_args["token_drop"] = self._init_args["token_drop"].model_dump()
-        if isinstance(self._init_args.get("open_vocab"), AVDETROpenVocabArgs):
+        if isinstance(self._init_args.get("open_vocab"), DETROpenVocabArgs):
             self._init_args["open_vocab"] = self._init_args["open_vocab"].model_dump()
         if isinstance(self._init_args.get("backbone_weights"), pathlib.PurePath):
             self._init_args["backbone_weights"] = str(
@@ -185,11 +185,11 @@ class AVDETRObjectDetection(ONNXExportMixin, TaskNetwork):
         self.num_top_queries = num_top_queries
         self.normalize = NormalizeArgs()
 
-        # resolve_avdetr_variant is idempotent: accepts both the public
-        # "avdetr/<backbone>" name and the bare backbone key stored in
+        # resolve_detr_variant is idempotent: accepts both the public
+        # "detr/<backbone>" name and the bare backbone key stored in
         # training init-args / exported checkpoints.
-        _, spec = resolve_avdetr_variant(model_name)
-        self.variant_spec: AVDETRVariantSpec = spec
+        _, spec = resolve_detr_variant(model_name)
+        self.variant_spec: DETRVariantSpec = spec
         if image_size is None:
             # Default 640 snapped UP to the patch grid (644 for patch 14),
             # mirroring the train-args resolution.
@@ -215,7 +215,7 @@ class AVDETRObjectDetection(ONNXExportMixin, TaskNetwork):
         if decoder == "auto":
             decoder = spec.decoder_default
         if decoder not in ("rtdetrv2", "dfine", "dfine_official"):
-            raise ValueError(f"Unknown AV-DETR decoder: '{decoder}'.")
+            raise ValueError(f"Unknown DETR decoder: '{decoder}'.")
         self.decoder_name = decoder
 
         # Density-guided branch (Dome-DETR port). ``None`` keeps the
@@ -229,7 +229,7 @@ class AVDETRObjectDetection(ONNXExportMixin, TaskNetwork):
                 f"'{spec.backbone_name}' is family '{spec.family}'."
             )
         if isinstance(density, dict):
-            density = AVDETRDensityArgs(**density)
+            density = DETRDensityArgs(**density)
         if density is not None:
             if decoder != "dfine":
                 raise ValueError(
@@ -242,7 +242,7 @@ class AVDETRObjectDetection(ONNXExportMixin, TaskNetwork):
                     f"num_queries ({num_queries}) must not exceed "
                     f"density.max_num_select ({density.max_num_select})."
                 )
-        self.density_args: AVDETRDensityArgs | None = density
+        self.density_args: DETRDensityArgs | None = density
         self._density_enabled = density is not None
 
         # Per-object contrastive SSL branch (design doc 14). ``None`` or
@@ -250,7 +250,7 @@ class AVDETRObjectDetection(ONNXExportMixin, TaskNetwork):
         # (mode="off" + two_crop is the batch-matched no-SSL baseline — the
         # doubled data pipeline runs, the loss does not).
         if isinstance(ssl, dict):
-            ssl = AVDETRSSLArgs(**ssl)
+            ssl = DETRSSLArgs(**ssl)
         if ssl is not None and decoder != "dfine":
             # v1 boundary (design doc 14 §3.3): the RT-DETRv2 decoder has
             # no query_features emission, so the whole ssl config —
@@ -260,7 +260,7 @@ class AVDETRObjectDetection(ONNXExportMixin, TaskNetwork):
                 "ssl (per-object contrastive head) requires the D-FINE "
                 "decoder in v1; pass decoder='dfine' (design doc 14 §3.3)."
             )
-        self.ssl_args: AVDETRSSLArgs | None = ssl
+        self.ssl_args: DETRSSLArgs | None = ssl
         # Route B (design doc 14 §4.10): label-free SSL-only pretraining off
         # the decoder's top-k candidate features. The density-gated selection
         # is not supported as an instance source (zero-padded candidates).
@@ -276,7 +276,7 @@ class AVDETRObjectDetection(ONNXExportMixin, TaskNetwork):
 
         if spec.requires_dinov3 and not _dinov3_supported():
             raise ValueError(
-                f"AV-DETR variant '{model_name}' needs the DINOv3 classes "
+                f"DETR variant '{model_name}' needs the DINOv3 classes "
                 "from 'transformers', which are not available in the "
                 "installed version."
             )
@@ -286,7 +286,7 @@ class AVDETRObjectDetection(ONNXExportMixin, TaskNetwork):
         # training step derives per-sample window keep masks on the final
         # canvas and the ViT backbone skips the dropped tokens.
         if isinstance(token_drop, dict):
-            token_drop = AVDETRTokenDropArgs(**token_drop)
+            token_drop = DETRTokenDropArgs(**token_drop)
         if token_drop is not None:
             if spec.family != "vit":
                 raise ValueError(
@@ -300,20 +300,20 @@ class AVDETRObjectDetection(ONNXExportMixin, TaskNetwork):
                     f"be a multiple of the backbone patch size "
                     f"({spec.patch_size})."
                 )
-        self._token_drop_args: AVDETRTokenDropArgs | None = token_drop
+        self._token_drop_args: DETRTokenDropArgs | None = token_drop
 
         # Text-contrastive open-vocabulary branch (design doc 27). ``None``
         # keeps the baseline contract bit-for-bit: no text asset is built
         # and the per-class Linear score heads stay in place.
         if isinstance(open_vocab, dict):
-            open_vocab = AVDETROpenVocabArgs(**open_vocab)
+            open_vocab = DETROpenVocabArgs(**open_vocab)
         if open_vocab is not None and len(open_vocab.class_names) != num_classes:
             raise ValueError(
                 f"open_vocab carries {len(open_vocab.class_names)} class "
                 f"names but the model builds num_classes={num_classes}; the "
                 f"vocabulary order defines the label space."
             )
-        self.open_vocab_args: AVDETROpenVocabArgs | None = open_vocab
+        self.open_vocab_args: DETROpenVocabArgs | None = open_vocab
 
         if spec.backbone_name.startswith("vittest"):
             backbone_wrapper: Any = _build_vit_test_backbone()

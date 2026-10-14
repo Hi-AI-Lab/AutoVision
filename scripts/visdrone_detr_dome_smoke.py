@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 
 from autovision import train_object_detection
-from autovision.tasks.detection.avdetr.transforms import (
+from autovision.tasks.detection.detr.transforms import (
     ltdetr_scale_jitter_sizes,
 )
 
@@ -44,7 +44,7 @@ def main() -> None:
             "val": {"annotations": str(VISDRONE / "annotations/visdrone_val.json"),
                     "images": str(VISDRONE / "VisDrone2019-DET-val/images")},
         },
-        model="avdetr/dinov3-convnext-tiny",
+        model="detr/dinov3-convnext-tiny",
         steps=STEPS,
         batch_size=4,
         gradient_accumulation_steps=1,

@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
-"""AV-DETR optimizer construction: param groups + warmup scheduler.
+"""DETR optimizer construction: param groups + warmup scheduler.
 
 Extracted verbatim from ``TrainModel.get_optimizer`` (design doc 30
 stage 4) so the grouping policy is testable without instantiating the
@@ -14,7 +14,7 @@ from typing import Any
 import torch
 
 from autovision.optim import build_adamw, get_weight_decay_parameters
-from autovision.tasks.detection.avdetr.backbone_wrappers import (
+from autovision.tasks.detection.detr.backbone_wrappers import (
     ECViTDetectionBackbone,
     ViTDetectionBackbone,
 )
@@ -24,10 +24,10 @@ from autovision.tasks.detection.shared.multistep_schedule import (
 from autovision.tasks.detection.shared.open_vocab import ContrastiveClassHead
 from autovision.tasks.shared.flat_cosine import FlatCosineLRScheduler
 
-__all__ = ["build_avdetr_optimizer"]
+__all__ = ["build_detr_optimizer"]
 
 
-def build_avdetr_optimizer(
+def build_detr_optimizer(
     model: torch.nn.Module,
     args: Any,
     total_steps: int,

@@ -14,11 +14,11 @@ from pathlib import Path
 
 import torch
 
-from autovision.tasks.detection.avdetr.config import (
-    AVDETRObjectDetectionTrainArgs,
+from autovision.tasks.detection.detr.config import (
+    DETRObjectDetectionTrainArgs,
 )
-from autovision.tasks.detection.avdetr.train_model import (
-    AVDETRObjectDetectionTrain,
+from autovision.tasks.detection.detr.train_model import (
+    DETRObjectDetectionTrain,
 )
 
 BACKBONE_WEIGHTS = Path(
@@ -76,8 +76,8 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=6)
     args_ns = parser.parse_args()
 
-    args = AVDETRObjectDetectionTrainArgs(**MODEL_ARGS)
-    wrapper = AVDETRObjectDetectionTrain(args)
+    args = DETRObjectDetectionTrainArgs(**MODEL_ARGS)
+    wrapper = DETRObjectDetectionTrain(args)
     device = torch.device("cuda")
     wrapper.to(device)
     wrapper.train()

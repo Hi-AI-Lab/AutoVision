@@ -13,7 +13,7 @@ import pytest
 import torch
 from torch import Tensor
 
-from autovision.tasks.detection.avdetr.config import AVDETRSSLArgs
+from autovision.tasks.detection.detr.config import DETRSSLArgs
 from autovision.tasks.detection.shared.dfine_criterion import (
     DFINECriterionV2,
 )
@@ -117,12 +117,12 @@ class TestConfigSurface:
     """SIGReg config contracts (design doc 16 §4.2)."""
 
     def test_defaults_are_off(self):
-        args = AVDETRSSLArgs()
+        args = DETRSSLArgs()
         assert args.sigreg_coef == 0.0
         assert args.to_ssl_params().sigreg_coef == 0.0
 
     def test_params_mapping(self):
-        args = AVDETRSSLArgs(
+        args = DETRSSLArgs(
             sigreg_coef=0.3,
             sigreg_slices=512,
             sigreg_knots=21,
@@ -135,17 +135,17 @@ class TestConfigSurface:
 
     def test_sigreg_requires_active_mode(self):
         with pytest.raises(ValueError, match="active mode"):
-            AVDETRSSLArgs(mode="off", sigreg_coef=0.3)
+            DETRSSLArgs(mode="off", sigreg_coef=0.3)
 
     def test_sigreg_requires_two_crop(self):
         with pytest.raises(ValueError, match="two_crop"):
-            AVDETRSSLArgs(view="dropout", sigreg_coef=0.3)
+            DETRSSLArgs(view="dropout", sigreg_coef=0.3)
 
     def test_sigreg_requires_matched_gt_pool(self):
         # encoder_candidates forces view="dropout" first, so pass it to
         # reach the SIGReg-specific constraint.
         with pytest.raises(ValueError, match="matched_gt"):
-            AVDETRSSLArgs(
+            DETRSSLArgs(
                 instance_source="encoder_candidates",
                 view="dropout",
                 sigreg_coef=0.3,
@@ -156,10 +156,10 @@ class TestConfigSurface:
         (-1, 1)^K — the N(0, I) target is unreachable there and the gradient
         saturates the Tanh. Fail loud at config time."""
         with pytest.raises(ValueError, match="mlp2"):
-            AVDETRSSLArgs(sigreg_coef=0.3)  # projector defaults to "simcse"
+            DETRSSLArgs(sigreg_coef=0.3)  # projector defaults to "simcse"
 
     def test_sigreg_allows_mlp2_projector(self):
-        args = AVDETRSSLArgs(
+        args = DETRSSLArgs(
             sigreg_coef=0.3,
             projector="mlp2",
             mode="unsup",

@@ -225,7 +225,7 @@ def main() -> None:
         # micro-batching are not compatible with the old run's layout).
         out="runs/visdrone_ltdetr_convnextt_base_800_ssl_erase_sr0.1",
         data=DATA_ARGS,
-        model="avdetr/dinov3-convnext-tiny",
+        model="detr/dinov3-convnext-tiny",
         steps=STEPS,
         # micro 4 x accum 2 keeps the Dome global batch 8 under the
         # two_crop doubling (see the GLOBAL_BATCH note above).
