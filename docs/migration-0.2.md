@@ -96,3 +96,29 @@ docs/ 历史分册中的 LT-DETR 表述（历史名，新文档首行已注）�
 | `ModelWrapper` 协议（`model_wrapper.py`，模块名不变） | `EncoderProtocol` |
 | `EmbeddingModel`（`embedding_model.py`，模块名不变） | `FeatureExtractor` |
 | `teachers.get_teacher` | `teachers.build_teacher` |
+
+## 0.3 任务优先目录重组（design doc 29，2026-10-15）
+
+`tasks/` 一级改为按任务类型分组、二级按模型家族，公开 API 与全部类名
+不变；旧包路径的导出/checkpoint 由
+`task_model_helpers._MODULE_PATH_MIGRATIONS` 前缀映射自动迁移（第四代
+类路径迁移，覆盖 `model_class_path` 与 `init_args` 内嵌类引用）。
+
+| 旧（0.2） | 新（0.3） |
+|---|---|
+| `tasks.dinov2_eomt_semantic_segmentation` | `tasks.semantic_segmentation.dinov2_eomt` |
+| `tasks.dinov3_eomt_semantic_segmentation` | `tasks.semantic_segmentation.dinov3_eomt` |
+| `tasks.linear_semantic_segmentation` | `tasks.semantic_segmentation.linear` |
+| `tasks.dinov2_eomt_instance_segmentation` | `tasks.instance_segmentation.dinov2_eomt` |
+| `tasks.dinov3_eomt_instance_segmentation` | `tasks.instance_segmentation.dinov3_eomt` |
+| `tasks.dinov2_eomt_panoptic_segmentation` | `tasks.panoptic_segmentation.dinov2_eomt` |
+| `tasks.dinov3_eomt_panoptic_segmentation` | `tasks.panoptic_segmentation.dinov3_eomt` |
+| `tasks.image_classification` | `tasks.classification` |
+| `tasks.detection.rtdetr_oriented_object_detection` | `tasks.oriented_detection.rtdetr` |
+| `tasks.detection.{rtdetr,dfine,deimv2,rfdetr,picodet,fsdc}_object_detection` | `tasks.detection.<家族短名>` |
+| `tasks.detection.components.{ema,flat_cosine}` | `tasks.shared.{ema,flat_cosine}` |
+| `autovision.tasks.depth_estimation` / `pose_estimation` | 新建脚手架（无家族，见包 docstring 模板） |
+
+不变：`tasks.detection.avdetr`、`tasks.eomt`（跨三任务架构核）、
+`tasks.detection.components`（阶段三继续拆分）、registry/CLI 键名与
+`LEGACY_CLASS_PATH_REMAP` 全部历史键。

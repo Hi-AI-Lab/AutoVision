@@ -44,7 +44,7 @@ from autovision.tasks.detection.components.rtdetrv2_decoder import (
 from autovision.tasks.detection.components.ssl_contrastive import (
     SSLProjectionHead,
 )
-from autovision.tasks.detection.rtdetr_object_detection.task_model import (
+from autovision.tasks.detection.rtdetr.task_model import (
     ObjectDetectionOutput,
 )
 from autovision.tasks.task_model import TaskNetwork

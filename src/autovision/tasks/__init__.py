@@ -1,7 +1,13 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
-"""Task model layer: bases + detection family."""
+"""Task model layer: bases, per-task family packages, architecture cores.
 
-from autovision.tasks.detection.rtdetr_object_detection import (
+First level = task type (detection, oriented_detection, segmentation
+tasks, classification, depth/pose scaffolds); second level = model family.
+``eomt/`` and ``shared/`` hold architecture cores / training infrastructure
+spanning multiple tasks (design doc 29).
+"""
+
+from autovision.tasks.detection.rtdetr import (
     RTDETRObjectDetection,
     RTDETRObjectDetectionTrain,
     RTDETRObjectDetectionTrainArgs,

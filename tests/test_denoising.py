@@ -13,7 +13,7 @@ from autovision.tasks.detection.components.denoising import (
 from autovision.tasks.detection.components.rtdetrv2_decoder import (
     RTDETRv2Decoder,
 )
-from autovision.tasks.detection.rtdetr_object_detection import (
+from autovision.tasks.detection.rtdetr import (
     RTDETRObjectDetectionTrain,
     RTDETRObjectDetectionTrainArgs,
 )

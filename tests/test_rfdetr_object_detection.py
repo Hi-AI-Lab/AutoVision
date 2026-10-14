@@ -18,17 +18,17 @@ import pytest
 import torch
 from torch import nn
 
-from autovision.tasks.detection.rfdetr_object_detection.config import (
+from autovision.tasks.detection.rfdetr.config import (
     RFDETREvalEraseArgs,
     RFDETRObjectDetectionTrainArgs,
     resolve_rfdetr_variant,
 )
-from autovision.tasks.detection.rfdetr_object_detection.task_model import (
+from autovision.tasks.detection.rfdetr.task_model import (
     RFDETRObjectDetection,
     _make_siou_box_loss_class,
     _reinitialize_class_head,
 )
-from autovision.tasks.detection.rfdetr_object_detection.train_model import (
+from autovision.tasks.detection.rfdetr.train_model import (
     RFDETRObjectDetectionTrain,
     _rfdetr_param_buckets,
 )
@@ -248,7 +248,7 @@ class TestConfig:
 
 class TestGating:
     def test_no_support_raises_informative(self, monkeypatch):
-        from autovision.tasks.detection.rfdetr_object_detection import task_model
+        from autovision.tasks.detection.rfdetr import task_model
 
         monkeypatch.setattr(task_model, "_od_classes", lambda: None)
         with pytest.raises(ImportError, match="transformers"):
@@ -690,7 +690,7 @@ class TestExportRebuild:
         """A 5.9-layout state dict (nested attention naming, ema-prefixed)
         loads cleanly into the 5.19-built model via load_train_state_dict;
         a matching-layout dict is a no-op passthrough."""
-        from autovision.tasks.detection.rfdetr_object_detection.task_model import (
+        from autovision.tasks.detection.rfdetr.task_model import (
             _remap_legacy_dinov2_attention_keys,
         )
 
@@ -735,7 +735,7 @@ class TestExportRebuild:
 
 
 def make_ssl_args(**overrides):
-    from autovision.tasks.detection.rfdetr_object_detection.config import (
+    from autovision.tasks.detection.rfdetr.config import (
         RFDETRSSLArgs,
     )
 
@@ -981,7 +981,7 @@ class TestRFDETRSSLSigReg:
         # Fake pool: 4 images x 16 queries = 64 rows, far below the cap.
         assert seen["rows"] == 64
         # And the cap constant really binds a two_crop-sized pool.
-        from autovision.tasks.detection.rfdetr_object_detection.train_model import (
+        from autovision.tasks.detection.rfdetr.train_model import (
             _SIGREG_POOL_CAP,
         )
 

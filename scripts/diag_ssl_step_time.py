@@ -24,10 +24,10 @@ from autovision.data.coco_object_detection_dataset import (
 )
 from autovision.data.object_detection_dataset import ObjectDetectionDataset
 from autovision.data.two_view import TwoViewObjectDetectionDataset
-from autovision.tasks.detection.rfdetr_object_detection.config import (
+from autovision.tasks.detection.rfdetr.config import (
     RFDETRObjectDetectionTrainArgs,
 )
-from autovision.tasks.detection.rfdetr_object_detection.train_model import (
+from autovision.tasks.detection.rfdetr.train_model import (
     RFDETRObjectDetectionTrain,
 )
 from autovision.augment.detection.collate import (

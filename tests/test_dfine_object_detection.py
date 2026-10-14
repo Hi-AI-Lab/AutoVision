@@ -29,7 +29,7 @@ from autovision.tasks.detection.components.dfine_utils import (
 from autovision.tasks.detection.components.matcher import (
     HungarianMatcher,
 )
-from autovision.tasks.detection.dfine_object_detection import (
+from autovision.tasks.detection.dfine import (
     DFINEObjectDetection,
     DFINEObjectDetectionTrain,
     DFINEObjectDetectionTrainArgs,

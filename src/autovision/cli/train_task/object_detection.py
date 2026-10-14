@@ -37,7 +37,7 @@ from autovision.data.yolo_object_detection_dataset import (
     YOLOObjectDetectionDataArgs,
 )
 from autovision.engine import TaskEngine
-from autovision.tasks.detection.rtdetr_object_detection import (
+from autovision.tasks.detection.rtdetr import (
     RTDETRObjectDetectionTrain,
     RTDETRObjectDetectionTrainArgs,
 )
@@ -145,7 +145,7 @@ def train_object_detection(
         train_cls: type = AVDETRObjectDetectionTrain
         family_model_args = {"backbone": model.split("/", 1)[1], **(model_args or {})}
     elif is_dfine:
-        from autovision.tasks.detection.dfine_object_detection import (
+        from autovision.tasks.detection.dfine import (
             DFINEObjectDetectionTrain,
             DFINEObjectDetectionTrainArgs,
         )
@@ -154,7 +154,7 @@ def train_object_detection(
         train_cls = DFINEObjectDetectionTrain
         family_model_args = dict(model_args or {})
     elif is_picodet:
-        from autovision.tasks.detection.picodet_object_detection import (
+        from autovision.tasks.detection.picodet import (
             PicoDetObjectDetectionTrain,
             PicoDetObjectDetectionTrainArgs,
         )
@@ -165,7 +165,7 @@ def train_object_detection(
             "backbone": model.split("/", 1)[1], **(model_args or {})
         }
     elif is_rfdetr:
-        from autovision.tasks.detection.rfdetr_object_detection import (
+        from autovision.tasks.detection.rfdetr import (
             RFDETRObjectDetectionTrain,
             RFDETRObjectDetectionTrainArgs,
         )
@@ -176,7 +176,7 @@ def train_object_detection(
             "model": model.split("/", 1)[1], **(model_args or {})
         }
     elif is_deimv2:
-        from autovision.tasks.detection.deimv2_object_detection import (
+        from autovision.tasks.detection.deimv2 import (
             Deimv2ObjectDetectionTrain,
             Deimv2ObjectDetectionTrainArgs,
         )
@@ -187,7 +187,7 @@ def train_object_detection(
             "model": model.split("/", 1)[1], **(model_args or {})
         }
     elif is_fsdc:
-        from autovision.tasks.detection.fsdc_object_detection import (
+        from autovision.tasks.detection.fsdc import (
             FsdcObjectDetectionTrain,
             FsdcObjectDetectionTrainArgs,
         )

@@ -60,11 +60,11 @@ def train_semantic_segmentation(
         SemanticSegmentationDataset,
         list_segmentation_pairs,
     )
-    from autovision.tasks.linear_semantic_segmentation import (
+    from autovision.tasks.semantic_segmentation.linear import (
         LinearSemanticSegmentationTrain,
         LinearSemanticSegmentationTrainArgs,
     )
-    from autovision.tasks.linear_semantic_segmentation.transforms import (
+    from autovision.tasks.semantic_segmentation.linear.transforms import (
         build_segmentation_transform,
     )
 
@@ -102,17 +102,17 @@ def train_semantic_segmentation(
     )
     if is_eomt:
         if model.startswith("dinov3/eomt"):
-            from autovision.tasks.dinov3_eomt_semantic_segmentation import (
+            from autovision.tasks.semantic_segmentation.dinov3_eomt import (
                 Dinov3EomtSemanticSegmentationTrain as train_cls,
             )
-            from autovision.tasks.dinov3_eomt_semantic_segmentation import (
+            from autovision.tasks.semantic_segmentation.dinov3_eomt import (
                 Dinov3EomtSemanticSegmentationTrainArgs as args_cls,
             )
         else:
-            from autovision.tasks.dinov2_eomt_semantic_segmentation import (
+            from autovision.tasks.semantic_segmentation.dinov2_eomt import (
                 Dinov2EomtSemanticSegmentationTrain as train_cls,
             )
-            from autovision.tasks.dinov2_eomt_semantic_segmentation import (
+            from autovision.tasks.semantic_segmentation.dinov2_eomt import (
                 Dinov2EomtSemanticSegmentationTrainArgs as args_cls,
             )
         resolved_model_args = pydantic_model_validate(

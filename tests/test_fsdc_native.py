@@ -26,10 +26,10 @@ from autovision.tasks.detection.components.wavelet_downsample import (
     HaarDWT2d,
     haar_idwt2,
 )
-from autovision.tasks.detection.deimv2_object_detection.train_model import (
+from autovision.tasks.detection.deimv2.train_model import (
     _deimv2_param_buckets,
 )
-from autovision.tasks.detection.fsdc_object_detection import (
+from autovision.tasks.detection.fsdc import (
     FSDC_MODEL_REGISTRY,
     FsdcArgs,
     FsdcObjectDetection,
@@ -412,7 +412,7 @@ class TestV2Erratum:
     "embed_dim: 224" is the STA wrapper's projected width."""
 
     def test_l_registry_real_vit(self):
-        from autovision.tasks.detection.deimv2_object_detection.config import (
+        from autovision.tasks.detection.deimv2.config import (
             resolve_deimv2_variant,
         )
 

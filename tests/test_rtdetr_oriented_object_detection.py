@@ -26,7 +26,7 @@ from autovision.tasks.detection.components.obb_decoder import (
     OrientedRTDETRDecoder,
     decode_oriented_detection_outputs,
 )
-from autovision.tasks.detection.rtdetr_oriented_object_detection.task_model import (
+from autovision.tasks.oriented_detection.rtdetr.task_model import (
     RTDETROrientedObjectDetection,
 )
 

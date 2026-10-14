@@ -151,7 +151,7 @@ class _EmptyLoader:
 
 
 def _tiny_detection_model():
-    from autovision.tasks.detection.rtdetr_object_detection.task_model import (
+    from autovision.tasks.detection.rtdetr.task_model import (
         RTDETRObjectDetection,
     )
 
@@ -277,10 +277,10 @@ class TestP1EffectiveBatchLrScaling:
     includes gradient accumulation (v5 ran at sqrt(8/16) of the recipe LR)."""
 
     def _train_model(self):
-        from autovision.tasks.detection.rtdetr_object_detection.config import (
+        from autovision.tasks.detection.rtdetr.config import (
             RTDETRObjectDetectionTrainArgs,
         )
-        from autovision.tasks.detection.rtdetr_object_detection.train_model import (
+        from autovision.tasks.detection.rtdetr.train_model import (
             RTDETRObjectDetectionTrain,
         )
 
@@ -313,7 +313,7 @@ class TestP1EffectiveBatchLrScaling:
         train_json, val_json, images_dir = make_coco_dataset(
             tmp_path, num_images=4
         )
-        from autovision.tasks.detection.rtdetr_object_detection.train_model import (
+        from autovision.tasks.detection.rtdetr.train_model import (
             RTDETRObjectDetectionTrain,
         )
 

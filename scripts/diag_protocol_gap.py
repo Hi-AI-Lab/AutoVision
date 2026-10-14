@@ -28,7 +28,7 @@ from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 from tqdm import tqdm
 
-from autovision.tasks.detection.rfdetr_object_detection.task_model import (
+from autovision.tasks.detection.rfdetr.task_model import (
     RFDETRObjectDetection,
 )
 from autovision.tasks.task_model_helpers import _safe_load_export

@@ -398,7 +398,7 @@ def _resolve_benchmark_model(
     the resolved model carries random weights — benchmarks measure speed, not
     accuracy.
     """
-    from autovision.tasks.detection.rtdetr_object_detection import (
+    from autovision.tasks.detection.rtdetr import (
         RTDETRObjectDetection,
     )
 

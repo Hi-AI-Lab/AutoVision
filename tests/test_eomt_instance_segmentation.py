@@ -12,7 +12,7 @@ from autovision.data.coco_instance_segmentation_dataset import (
     COCOInstanceSegmentationDataset,
 )
 from autovision.metrics.instance_segmentation import COCOMaskAPEvaluator
-from autovision.tasks.dinov2_eomt_instance_segmentation import (
+from autovision.tasks.instance_segmentation.dinov2_eomt import (
     Dinov2EomtInstanceSegmentationTrain,
     Dinov2EomtInstanceSegmentationTrainArgs,
 )

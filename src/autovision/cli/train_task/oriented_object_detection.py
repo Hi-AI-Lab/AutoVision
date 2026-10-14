@@ -85,7 +85,7 @@ def train_oriented_object_detection(
         OrientedObjectDetectionDataset,
         YOLOOrientedObjectDetectionDataArgs,
     )
-    from autovision.tasks.detection.rtdetr_oriented_object_detection import (
+    from autovision.tasks.oriented_detection.rtdetr import (
         RTDETROrientedObjectDetectionTrain,
         RTDETROrientedObjectDetectionTrainArgs,
     )

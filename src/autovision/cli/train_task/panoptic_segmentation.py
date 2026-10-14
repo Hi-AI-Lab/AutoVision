@@ -65,17 +65,17 @@ def train_panoptic_segmentation(
     )
 
     if model.startswith("dinov3/eomt"):
-        from autovision.tasks.dinov3_eomt_panoptic_segmentation import (
+        from autovision.tasks.panoptic_segmentation.dinov3_eomt import (
             Dinov3EomtPanopticSegmentationTrain as train_cls,
         )
-        from autovision.tasks.dinov3_eomt_panoptic_segmentation import (
+        from autovision.tasks.panoptic_segmentation.dinov3_eomt import (
             Dinov3EomtPanopticSegmentationTrainArgs as args_cls,
         )
     else:
-        from autovision.tasks.dinov2_eomt_panoptic_segmentation import (
+        from autovision.tasks.panoptic_segmentation.dinov2_eomt import (
             Dinov2EomtPanopticSegmentationTrain as train_cls,
         )
-        from autovision.tasks.dinov2_eomt_panoptic_segmentation import (
+        from autovision.tasks.panoptic_segmentation.dinov2_eomt import (
             Dinov2EomtPanopticSegmentationTrainArgs as args_cls,
         )
 

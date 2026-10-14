@@ -16,7 +16,7 @@ from autovision.data.mask_panoptic_segmentation_dataset import (
     split_panoptic_classes,
 )
 from autovision.metrics.panoptic_segmentation import PanopticMetricCollector
-from autovision.tasks.dinov2_eomt_panoptic_segmentation import (
+from autovision.tasks.panoptic_segmentation.dinov2_eomt import (
     Dinov2EomtPanopticSegmentation,
     Dinov2EomtPanopticSegmentationTrain,
     Dinov2EomtPanopticSegmentationTrainArgs,

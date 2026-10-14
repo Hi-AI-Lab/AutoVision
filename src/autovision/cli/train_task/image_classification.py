@@ -88,11 +88,11 @@ def train_image_classification(
         ImageClassificationDataset,
         list_classification_files,
     )
-    from autovision.tasks.image_classification import (
+    from autovision.tasks.classification import (
         ImageClassificationTrain,
         ImageClassificationTrainArgs,
     )
-    from autovision.tasks.image_classification.transforms import (
+    from autovision.tasks.classification.transforms import (
         build_classification_transform,
     )
 

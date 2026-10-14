@@ -347,11 +347,11 @@ class TestBackbonePretrained:
     def test_load_pretrained_backbone_copies_weights(self):
         import torchvision.models as tvm
 
-        from autovision.tasks.detection.rtdetr_object_detection import (
+        from autovision.tasks.detection.rtdetr import (
             RTDETRObjectDetectionTrain,
             RTDETRObjectDetectionTrainArgs,
         )
-        from autovision.tasks.detection.rtdetr_object_detection.train_model import (
+        from autovision.tasks.detection.rtdetr.train_model import (
             load_pretrained_backbone,
         )
 
@@ -375,11 +375,11 @@ class TestBackbonePretrained:
         assert torch.allclose(after, expected)
 
     def test_unsupported_package_rejected(self):
-        from autovision.tasks.detection.rtdetr_object_detection import (
+        from autovision.tasks.detection.rtdetr import (
             RTDETRObjectDetectionTrain,
             RTDETRObjectDetectionTrainArgs,
         )
-        from autovision.tasks.detection.rtdetr_object_detection.train_model import (
+        from autovision.tasks.detection.rtdetr.train_model import (
             load_pretrained_backbone,
         )
 

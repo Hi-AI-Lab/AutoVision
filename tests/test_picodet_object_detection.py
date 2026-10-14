@@ -11,27 +11,27 @@ from tests.test_train_object_detection import (
 
 from autovision import load_task_model as load_model
 from autovision import train_object_detection
-from autovision.tasks.detection.picodet_object_detection import (
+from autovision.tasks.detection.picodet import (
     PicoDetObjectDetection,
     PicoDetObjectDetectionTrain,
     PicoDetObjectDetectionTrainArgs,
 )
-from autovision.tasks.detection.picodet_object_detection.csp_pan import CSPPAN
-from autovision.tasks.detection.picodet_object_detection.esnet import (
+from autovision.tasks.detection.picodet.csp_pan import CSPPAN
+from autovision.tasks.detection.picodet.esnet import (
     ESNet,
     channel_shuffle,
     resolve_backbone_scale,
 )
-from autovision.tasks.detection.picodet_object_detection.losses import (
+from autovision.tasks.detection.picodet.losses import (
     PicoCriterion,
     distribution_focal_loss,
     varifocal_loss,
 )
-from autovision.tasks.detection.picodet_object_detection.pico_head import PicoHead
-from autovision.tasks.detection.picodet_object_detection.postprocessor import (
+from autovision.tasks.detection.picodet.pico_head import PicoHead
+from autovision.tasks.detection.picodet.postprocessor import (
     decode_pico_outputs,
 )
-from autovision.tasks.detection.picodet_object_detection.sim_ota_assigner import (
+from autovision.tasks.detection.picodet.sim_ota_assigner import (
     SimOTAAssigner,
     TaskAlignedAssigner,
 )

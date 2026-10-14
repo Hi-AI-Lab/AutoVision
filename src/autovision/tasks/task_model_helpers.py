@@ -25,6 +25,54 @@ logger = logging.getLogger("autovision")
 # Class-path migration table: old exports keep loading after refactors.
 _CLASS_PATH_MIGRATIONS: dict[str, str] = {}
 
+# Module-path prefix migrations: exports/checkpoints embed the class path
+# of the code that trained them; when a task package moves, old payloads
+# keep loading by rewriting the module prefix (class names unchanged).
+# Design doc 29 (task-first layout, 2026-10-15): flat packages regrouped
+# under per-task directories; detection families drop the redundant
+# ``_object_detection`` suffix.
+_MODULE_PATH_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("autovision.tasks.dinov2_eomt_semantic_segmentation.",
+     "autovision.tasks.semantic_segmentation.dinov2_eomt."),
+    ("autovision.tasks.dinov3_eomt_semantic_segmentation.",
+     "autovision.tasks.semantic_segmentation.dinov3_eomt."),
+    ("autovision.tasks.linear_semantic_segmentation.",
+     "autovision.tasks.semantic_segmentation.linear."),
+    ("autovision.tasks.dinov2_eomt_instance_segmentation.",
+     "autovision.tasks.instance_segmentation.dinov2_eomt."),
+    ("autovision.tasks.dinov3_eomt_instance_segmentation.",
+     "autovision.tasks.instance_segmentation.dinov3_eomt."),
+    ("autovision.tasks.dinov2_eomt_panoptic_segmentation.",
+     "autovision.tasks.panoptic_segmentation.dinov2_eomt."),
+    ("autovision.tasks.dinov3_eomt_panoptic_segmentation.",
+     "autovision.tasks.panoptic_segmentation.dinov3_eomt."),
+    ("autovision.tasks.image_classification.",
+     "autovision.tasks.classification."),
+    ("autovision.tasks.detection.rtdetr_oriented_object_detection.",
+     "autovision.tasks.oriented_detection.rtdetr."),
+    ("autovision.tasks.detection.rtdetr_object_detection.",
+     "autovision.tasks.detection.rtdetr."),
+    ("autovision.tasks.detection.dfine_object_detection.",
+     "autovision.tasks.detection.dfine."),
+    ("autovision.tasks.detection.deimv2_object_detection.",
+     "autovision.tasks.detection.deimv2."),
+    ("autovision.tasks.detection.rfdetr_object_detection.",
+     "autovision.tasks.detection.rfdetr."),
+    ("autovision.tasks.detection.picodet_object_detection.",
+     "autovision.tasks.detection.picodet."),
+    ("autovision.tasks.detection.fsdc_object_detection.",
+     "autovision.tasks.detection.fsdc."),
+)
+
+
+def _migrate_class_path(class_path: str) -> str:
+    """Rewrite a checkpoint's class path onto the current tree."""
+    class_path = _CLASS_MIGRATIONS.get(class_path, class_path)
+    for old_prefix, new_prefix in _MODULE_PATH_MIGRATIONS:
+        if class_path.startswith(old_prefix):
+            return new_prefix + class_path[len(old_prefix):]
+    return class_path
+
 # Allowlist for dynamically imported model classes: exported files carry
 # ``model_class_path`` and are untrusted input, so only concrete TaskNetwork
 # classes inside this package may ever be reconstructed (a tampered file
@@ -64,6 +112,7 @@ def _verify_autovision_global(qualname: str) -> Any | None:
     """
     if not qualname.startswith("autovision."):
         return None
+    qualname = _migrate_class_path(qualname)
     module_path, _, attr = qualname.rpartition(".")
     if not module_path.startswith("autovision."):
         return None
@@ -140,9 +189,7 @@ def load_task_model(
         raise CheckpointError(
             f"File '{path}' is not an exported Autovision task model."
         )
-    class_path: str = _CLASS_MIGRATIONS.get(
-        checkpoint["model_class_path"], checkpoint["model_class_path"]
-    )
+    class_path: str = _migrate_class_path(checkpoint["model_class_path"])
     if not isinstance(class_path, str) or not class_path.startswith(
         _TASK_MODEL_PACKAGE_PREFIX
     ):

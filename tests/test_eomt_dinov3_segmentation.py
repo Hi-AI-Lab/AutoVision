@@ -22,30 +22,30 @@ from autovision import (
     train_panoptic_segmentation,
     train_semantic_segmentation,
 )
-from autovision.tasks.dinov2_eomt_instance_segmentation import (
+from autovision.tasks.instance_segmentation.dinov2_eomt import (
     Dinov2EomtInstanceSegmentation,
     Dinov2EomtInstanceSegmentationTrain,
 )
-from autovision.tasks.dinov2_eomt_panoptic_segmentation import (
+from autovision.tasks.panoptic_segmentation.dinov2_eomt import (
     Dinov2EomtPanopticSegmentation,
     Dinov2EomtPanopticSegmentationTrain,
 )
-from autovision.tasks.dinov2_eomt_semantic_segmentation import (
+from autovision.tasks.semantic_segmentation.dinov2_eomt import (
     Dinov2EomtSemanticSegmentation,
     Dinov2EomtSemanticSegmentationTrain,
     Dinov2EomtSemanticSegmentationTrainArgs,
 )
-from autovision.tasks.dinov3_eomt_instance_segmentation import (
+from autovision.tasks.instance_segmentation.dinov3_eomt import (
     Dinov3EomtInstanceSegmentation,
     Dinov3EomtInstanceSegmentationTrain,
     Dinov3EomtInstanceSegmentationTrainArgs,
 )
-from autovision.tasks.dinov3_eomt_panoptic_segmentation import (
+from autovision.tasks.panoptic_segmentation.dinov3_eomt import (
     Dinov3EomtPanopticSegmentation,
     Dinov3EomtPanopticSegmentationTrain,
     Dinov3EomtPanopticSegmentationTrainArgs,
 )
-from autovision.tasks.dinov3_eomt_semantic_segmentation import (
+from autovision.tasks.semantic_segmentation.dinov3_eomt import (
     Dinov3EomtSemanticSegmentation,
     Dinov3EomtSemanticSegmentationTrain,
     Dinov3EomtSemanticSegmentationTrainArgs,

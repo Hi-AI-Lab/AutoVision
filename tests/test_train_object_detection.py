@@ -190,10 +190,10 @@ class TestEvalMaxDets:
 
     def test_rtdetr_wiring(self, monkeypatch):
         from autovision.metrics.map_evaluator import COCOMAPEvaluator
-        from autovision.tasks.detection.rtdetr_object_detection.config import (
+        from autovision.tasks.detection.rtdetr.config import (
             RTDETRObjectDetectionTrainArgs,
         )
-        from autovision.tasks.detection.rtdetr_object_detection.train_model import (
+        from autovision.tasks.detection.rtdetr.train_model import (
             RTDETRObjectDetectionTrain,
         )
 
@@ -205,7 +205,7 @@ class TestEvalMaxDets:
             return real(categories, max_dets=max_dets)
 
         monkeypatch.setattr(
-            "autovision.tasks.detection.rtdetr_object_detection.train_model.COCOMAPEvaluator",
+            "autovision.tasks.detection.rtdetr.train_model.COCOMAPEvaluator",
             spy,
         )
         args = RTDETRObjectDetectionTrainArgs(

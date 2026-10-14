@@ -17,16 +17,16 @@ import pytest
 import torch
 from torch import nn
 
-from autovision.tasks.detection.deimv2_object_detection.config import (
+from autovision.tasks.detection.deimv2.config import (
     DEIMV2_MODEL_REGISTRY,
     Deimv2ObjectDetectionTrainArgs,
     resolve_deimv2_variant,
 )
-from autovision.tasks.detection.deimv2_object_detection.task_model import (
+from autovision.tasks.detection.deimv2.task_model import (
     Deimv2ObjectDetection,
     _reinitialize_class_head,
 )
-from autovision.tasks.detection.deimv2_object_detection.train_model import (
+from autovision.tasks.detection.deimv2.train_model import (
     Deimv2ObjectDetectionTrain,
     _deimv2_param_buckets,
 )
@@ -228,7 +228,7 @@ class TestConfig:
 
 class TestGating:
     def test_no_support_raises_informative(self, monkeypatch):
-        from autovision.tasks.detection.deimv2_object_detection import task_model
+        from autovision.tasks.detection.deimv2 import task_model
 
         monkeypatch.setattr(task_model, "_deimv2_classes", lambda: None)
         with pytest.raises(ImportError, match="transformers"):

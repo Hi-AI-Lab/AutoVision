@@ -62,7 +62,7 @@ class TestTrainModelForwardAlias:
 
     def test_watch_metric_defaults_to_none(self):
         assert _TinyTrainModel.watch_metric is None
-        from autovision.tasks.detection.rtdetr_object_detection import (
+        from autovision.tasks.detection.rtdetr import (
             RTDETRObjectDetectionTrain,
         )
 

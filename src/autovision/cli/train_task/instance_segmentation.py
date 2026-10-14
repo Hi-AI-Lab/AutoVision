@@ -63,17 +63,17 @@ def train_instance_segmentation(
     )
 
     if model.startswith("dinov3/eomt"):
-        from autovision.tasks.dinov3_eomt_instance_segmentation import (
+        from autovision.tasks.instance_segmentation.dinov3_eomt import (
             Dinov3EomtInstanceSegmentationTrain as train_cls,
         )
-        from autovision.tasks.dinov3_eomt_instance_segmentation import (
+        from autovision.tasks.instance_segmentation.dinov3_eomt import (
             Dinov3EomtInstanceSegmentationTrainArgs as args_cls,
         )
     else:
-        from autovision.tasks.dinov2_eomt_instance_segmentation import (
+        from autovision.tasks.instance_segmentation.dinov2_eomt import (
             Dinov2EomtInstanceSegmentationTrain as train_cls,
         )
-        from autovision.tasks.dinov2_eomt_instance_segmentation import (
+        from autovision.tasks.instance_segmentation.dinov2_eomt import (
             Dinov2EomtInstanceSegmentationTrainArgs as args_cls,
         )
 
