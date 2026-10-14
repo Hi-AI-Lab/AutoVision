@@ -22,30 +22,30 @@ from autovision.encoders import get_wrapped_model
 from autovision.encoders.dinov2.dinov2_wrapper import TransformersDinov2Wrapper
 from autovision.errors import CheckpointError
 from autovision.export import ONNXExportMixin, ONNXExportPrecisionPolicy
-from autovision.tasks.detection.components.decode import (
+from autovision.tasks.detection.rtdetr.task_model import (
+    ObjectDetectionOutput,
+)
+from autovision.tasks.detection.shared.decode import (
     decode_detection_outputs,
 )
-from autovision.tasks.detection.components.dfine_decoder import (
+from autovision.tasks.detection.shared.dfine_decoder import (
     DFINEv2Decoder,
 )
-from autovision.tasks.detection.components.dfine_official_decoder import (
+from autovision.tasks.detection.shared.dfine_official_decoder import (
     DFINEOfficialDecoder,
 )
-from autovision.tasks.detection.components.hybrid_encoder import (
+from autovision.tasks.detection.shared.hybrid_encoder import (
     HybridEncoder,
 )
-from autovision.tasks.detection.components.open_vocab import (
+from autovision.tasks.detection.shared.open_vocab import (
     encode_class_names,
     resolve_text_embed_dim,
 )
-from autovision.tasks.detection.components.rtdetrv2_decoder import (
+from autovision.tasks.detection.shared.rtdetrv2_decoder import (
     RTDETRv2Decoder,
 )
-from autovision.tasks.detection.components.ssl_contrastive import (
+from autovision.tasks.detection.shared.ssl_contrastive import (
     SSLProjectionHead,
-)
-from autovision.tasks.detection.rtdetr.task_model import (
-    ObjectDetectionOutput,
 )
 from autovision.tasks.task_model import TaskNetwork
 

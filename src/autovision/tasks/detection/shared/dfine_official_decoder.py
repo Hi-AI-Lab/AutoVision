@@ -53,18 +53,18 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.init as init
 
-from autovision.tasks.detection.components.denoising import (
+from autovision.tasks.detection.shared.denoising import (
     get_contrastive_denoising_training_group,
 )
-from autovision.tasks.detection.components.dfine_utils import (
+from autovision.tasks.detection.shared.dfine_utils import (
     distance2bbox,
     weighting_function,
 )
-from autovision.tasks.detection.components.open_vocab import (
+from autovision.tasks.detection.shared.open_vocab import (
     ContrastiveClassHead,
     TextCrossAttention,
 )
-from autovision.tasks.detection.components.rtdetrv2_decoder import (
+from autovision.tasks.detection.shared.rtdetrv2_decoder import (
     MLP,
     _score_head_logits,
     bias_init_with_prob,

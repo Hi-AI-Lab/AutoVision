@@ -14,13 +14,13 @@ import torch
 from torch import Tensor
 
 from autovision.tasks.detection.avdetr.config import AVDETRSSLArgs
-from autovision.tasks.detection.components.dfine_criterion import (
+from autovision.tasks.detection.shared.dfine_criterion import (
     DFINECriterionV2,
 )
-from autovision.tasks.detection.components.matcher import (
+from autovision.tasks.detection.shared.matcher import (
     HungarianMatcher,
 )
-from autovision.tasks.detection.components.ssl_contrastive import (
+from autovision.tasks.detection.shared.ssl_contrastive import (
     SSLParams,
     SSLProjectionHead,
     epps_pulley_sigreg,
@@ -184,7 +184,7 @@ class TestCriterionSigregPool:
     """The criterion-side SIGReg wiring."""
 
     def test_pool_covers_all_queries_without_mask(self, monkeypatch):
-        import autovision.tasks.detection.components.dfine_criterion as dc
+        import autovision.tasks.detection.shared.dfine_criterion as dc
 
         captured: list[int] = []
         real = dc.epps_pulley_sigreg
@@ -215,7 +215,7 @@ class TestCriterionSigregPool:
         """Dynamic-query padding rows are decoder computations on zero
         content queries — they must not enter the distribution target (the
         matched-pool contrastive already filters the same rows)."""
-        import autovision.tasks.detection.components.dfine_criterion as dc
+        import autovision.tasks.detection.shared.dfine_criterion as dc
 
         captured: list[int] = []
         real = dc.epps_pulley_sigreg

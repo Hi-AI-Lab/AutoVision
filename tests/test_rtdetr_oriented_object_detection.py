@@ -10,24 +10,24 @@ import pytest
 import torch
 from tests.conftest import create_image
 
-from autovision.metrics.oriented_detection import (
-    OrientedDetectionMetricCollector,
-)
-from autovision.tasks.detection.components.obb import (
+from autovision.geometry.obb import (
     probiou_matrix,
     xywhr_to_xyxyxyxy,
 )
-from autovision.tasks.detection.components.obb_criterion import (
+from autovision.metrics.oriented_detection import (
+    OrientedDetectionMetricCollector,
+)
+from autovision.tasks.oriented_detection.rtdetr.task_model import (
+    RTDETROrientedObjectDetection,
+)
+from autovision.tasks.oriented_detection.shared.obb_criterion import (
     OrientedHungarianMatcher,
     OrientedRTDETRCriterion,
     loss_boxes_oriented,
 )
-from autovision.tasks.detection.components.obb_decoder import (
+from autovision.tasks.oriented_detection.shared.obb_decoder import (
     OrientedRTDETRDecoder,
     decode_oriented_detection_outputs,
-)
-from autovision.tasks.oriented_detection.rtdetr.task_model import (
-    RTDETROrientedObjectDetection,
 )
 
 # Normalized square corners in a 64x64 frame: (16,16)-(32,32) px.

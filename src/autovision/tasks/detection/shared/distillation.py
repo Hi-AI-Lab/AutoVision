@@ -36,15 +36,15 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
-from autovision.tasks.detection.components.box_ops import (
+from autovision.geometry.box_ops import (
     clip_normalize_boxes,
     elementwise_box_iou,
     elementwise_giou_loss,
 )
-from autovision.tasks.detection.components.denoising import (
+from autovision.tasks.detection.shared.denoising import (
     box_cxcywh_to_xyxy,
 )
-from autovision.tasks.detection.components.dfine_utils import (
+from autovision.tasks.detection.shared.dfine_utils import (
     flatten_match_indices,
 )
 

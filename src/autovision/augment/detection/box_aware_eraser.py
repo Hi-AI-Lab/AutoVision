@@ -23,7 +23,7 @@ from __future__ import annotations
 import torch
 from torch import Tensor
 
-from autovision.tasks.detection.components.box_ops import (
+from autovision.geometry.box_ops import (
     box_cxcywh_norm_to_xyxy,
 )
 

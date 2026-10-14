@@ -13,7 +13,7 @@ from typing import Any
 
 from torchvision.ops import nms
 
-from autovision.tasks.detection.components.box_ops import (
+from autovision.geometry.box_ops import (
     box_cxcywh_norm_to_xyxy,
 )
 

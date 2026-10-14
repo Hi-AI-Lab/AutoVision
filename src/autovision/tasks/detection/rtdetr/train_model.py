@@ -11,17 +11,17 @@ import torch
 
 from autovision.metrics.map_evaluator import COCOMAPEvaluator
 from autovision.optim import get_weight_decay_parameters
-from autovision.tasks.detection.components.matcher import (
-    HungarianMatcher,
-)
-from autovision.tasks.detection.components.rtdetrv2_criterion import (
-    RTDETRCriterionV2,
-)
 from autovision.tasks.detection.rtdetr.config import (
     RTDETRObjectDetectionTrainArgs,
 )
 from autovision.tasks.detection.rtdetr.task_model import (
     RTDETRObjectDetection,
+)
+from autovision.tasks.detection.shared.matcher import (
+    HungarianMatcher,
+)
+from autovision.tasks.detection.shared.rtdetrv2_criterion import (
+    RTDETRCriterionV2,
 )
 from autovision.tasks.shared.ema import ModelEMA
 from autovision.tasks.shared.flat_cosine import (

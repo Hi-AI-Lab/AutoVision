@@ -29,13 +29,13 @@ from autovision.tasks.detection.avdetr import (
     AVDETRObjectDetectionTrainArgs,
     AVDETRSSLArgs,
 )
-from autovision.tasks.detection.components.dfine_criterion import (
+from autovision.tasks.detection.shared.dfine_criterion import (
     DFINECriterionV2,
 )
-from autovision.tasks.detection.components.matcher import (
+from autovision.tasks.detection.shared.matcher import (
     HungarianMatcher,
 )
-from autovision.tasks.detection.components.ssl_contrastive import (
+from autovision.tasks.detection.shared.ssl_contrastive import (
     SSLParams,
     SSLProjectionHead,
     cosine_logits,
@@ -933,10 +933,10 @@ def test_gather_distributed_single_rank_gloo_keeps_grad():
 def _ssl_ddp_worker(rank: int, world_size: int, init_file: str, result_dir: str) -> None:
     import datetime
 
-    from autovision.tasks.detection.components.ssl_contrastive import (
+    from autovision.tasks.detection.shared.ssl_contrastive import (
         SSLParams as WorkerSSLParams,
     )
-    from autovision.tasks.detection.components.ssl_contrastive import (
+    from autovision.tasks.detection.shared.ssl_contrastive import (
         ssl_contrastive_loss as worker_ssl_contrastive_loss,
     )
 
@@ -1033,10 +1033,10 @@ def _ssl_extras_worker(rank: int, world_size: int, init_file: str, result_dir: s
     """
     import datetime
 
-    from autovision.tasks.detection.components.ssl_contrastive import (
+    from autovision.tasks.detection.shared.ssl_contrastive import (
         SSLParams as WorkerSSLParams,
     )
-    from autovision.tasks.detection.components.ssl_contrastive import (
+    from autovision.tasks.detection.shared.ssl_contrastive import (
         ssl_contrastive_loss as worker_ssl_contrastive_loss,
     )
 

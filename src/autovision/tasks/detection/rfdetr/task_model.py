@@ -22,18 +22,18 @@ from torch import nn
 from autovision.augment.transform_args import NormalizeArgs
 from autovision.encoders.weight_verification import load_pretrained_verified
 from autovision.export import ONNXExportMixin
-from autovision.tasks.detection.components.box_ops import (
+from autovision.geometry.box_ops import (
     elementwise_siou,
-)
-from autovision.tasks.detection.components.decode import (
-    decode_detection_outputs,
-)
-from autovision.tasks.detection.components.ssl_contrastive import (
-    SSLProjectionHead,
 )
 from autovision.tasks.detection.rfdetr.config import (
     RFDETRSSLArgs,
     resolve_rfdetr_variant,
+)
+from autovision.tasks.detection.shared.decode import (
+    decode_detection_outputs,
+)
+from autovision.tasks.detection.shared.ssl_contrastive import (
+    SSLProjectionHead,
 )
 from autovision.tasks.task_model import TaskNetwork
 from autovision.tasks.task_model_io import BaseModelOutput

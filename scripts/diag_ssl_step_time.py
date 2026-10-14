@@ -17,8 +17,16 @@ from __future__ import annotations
 import time
 from collections import defaultdict
 
-import torch
-
+from autovision.augment.detection.args import (
+    RTDETRDetectionTransformArgs,
+)
+from autovision.augment.detection.collate import (
+    RTDETRDetectionCollateFunction,
+    TwoViewDetectionCollateFunction,
+)
+from autovision.augment.detection.transform import (
+    RTDETRDetectionTransform,
+)
 from autovision.data.coco_object_detection_dataset import (
     COCOObjectDetectionDataArgs,
 )
@@ -29,16 +37,6 @@ from autovision.tasks.detection.rfdetr.config import (
 )
 from autovision.tasks.detection.rfdetr.train_model import (
     RFDETRObjectDetectionTrain,
-)
-from autovision.augment.detection.collate import (
-    RTDETRDetectionCollateFunction,
-    TwoViewDetectionCollateFunction,
-)
-from autovision.augment.detection.args import (
-    RTDETRDetectionTransformArgs,
-)
-from autovision.augment.detection.transform import (
-    RTDETRDetectionTransform,
 )
 
 VISDRONE = "/home/hdjs/Research/Project/Dino-Dome-Research/dataset/visdrone"
@@ -128,7 +126,7 @@ def run(with_ssl: bool) -> None:
                 train_model.model._model.config.group_detr,
             )
             marks["matcher"] = time.perf_counter()
-            from autovision.tasks.detection.components.ssl_contrastive import (
+            from autovision.tasks.detection.shared.ssl_contrastive import (
                 ssl_contrastive_loss,
             )
 

@@ -33,23 +33,23 @@ import torch
 from autovision.tasks.detection.avdetr.dome_decoder import (
     DomeDFINEv2Decoder,
 )
-from autovision.tasks.detection.components.denoising import (
+from autovision.tasks.detection.shared.denoising import (
     box_cxcywh_to_xyxy,
 )
-from autovision.tasks.detection.components.dfine_criterion import (
+from autovision.tasks.detection.shared.dfine_criterion import (
     DFINECriterionV2,
 )
-from autovision.tasks.detection.components.dfine_utils import (
+from autovision.tasks.detection.shared.dfine_utils import (
     ddf_loss,
 )
-from autovision.tasks.detection.components.dynamic_nms import (
+from autovision.tasks.detection.shared.dynamic_nms import (
     per_class_dynamic_nms,
 )
-from autovision.tasks.detection.components.matcher import (
+from autovision.tasks.detection.shared.matcher import (
     HungarianMatcher,
     forward_match,
 )
-from autovision.tasks.detection.components.mwas import (
+from autovision.tasks.detection.shared.mwas import (
     adaptive_window_mask,
 )
 
@@ -63,7 +63,7 @@ def _reference_match_per_image(matcher, outputs, targets):
     """Pre-refactor forward_match: one host transfer per image."""
     from scipy.optimize import linear_sum_assignment
 
-    from autovision.tasks.detection.components.box_ops import (
+    from autovision.geometry.box_ops import (
         generalized_box_iou_loss,
     )
 
@@ -188,7 +188,7 @@ def _reference_ddf_loss(
     """Pre-refactor ddf_loss (float() scalars + .any() guards)."""
     from torch import nn
 
-    from autovision.tasks.detection.components.dfine_utils import (
+    from autovision.tasks.detection.shared.dfine_utils import (
         matched_pair_iou,
     )
 
@@ -704,7 +704,7 @@ class TestDDFOnDeviceScalars:
 
 class TestPairTwoCropPacking:
     def test_pairs_and_unpaired_unchanged(self):
-        from autovision.tasks.detection.components.ssl_contrastive import (
+        from autovision.tasks.detection.shared.ssl_contrastive import (
             _pair_two_crop,
         )
 
@@ -750,7 +750,7 @@ class TestTranslateGtWhereRewrite:
     @staticmethod
     def _reference_translate_gt(gt, reg_max, reg_scale, up):
         """Pre-refactor body (boolean-mask writes)."""
-        from autovision.tasks.detection.components.dfine_utils import (
+        from autovision.tasks.detection.shared.dfine_utils import (
             weighting_function,
         )
 
@@ -786,7 +786,7 @@ class TestTranslateGtWhereRewrite:
         return indices, weight_right, weight_left
 
     def test_value_identical_on_all_lane_classes(self):
-        from autovision.tasks.detection.components.dfine_utils import (
+        from autovision.tasks.detection.shared.dfine_utils import (
             translate_gt,
         )
 
@@ -794,7 +794,7 @@ class TestTranslateGtWhereRewrite:
         for reg_max, reg_scale in ((8, 4.0), (32, 4.0), (16, 2.0)):
             # spread across: below W[0], inside the span, above the top,
             # and EXACTLY on knots (historical NaN path)
-            from autovision.tasks.detection.components.dfine_utils import (
+            from autovision.tasks.detection.shared.dfine_utils import (
                 weighting_function,
             )
 
@@ -816,7 +816,7 @@ class TestTranslateGtWhereRewrite:
                 assert torch.equal(g, w_)
 
     def test_cpu_values_sane(self):
-        from autovision.tasks.detection.components.dfine_utils import (
+        from autovision.tasks.detection.shared.dfine_utils import (
             translate_gt,
         )
 
@@ -836,7 +836,7 @@ class TestMwasWindowScatter:
     def test_matches_per_window_slice_add(self):
         import torch.nn.functional as F
 
-        from autovision.tasks.detection.components.mwas import (
+        from autovision.tasks.detection.shared.mwas import (
             WindowProcessor,
             window_grid_size,
         )
@@ -917,7 +917,7 @@ class TestDenoisingMaxGtCap:
 
     @staticmethod
     def _build(num_gt_per_image, max_gt_cap=None):
-        from autovision.tasks.detection.components.denoising import (
+        from autovision.tasks.detection.shared.denoising import (
             get_contrastive_denoising_training_group,
         )
 
@@ -959,7 +959,7 @@ class TestDenoisingMaxGtCap:
         assert dn_content.shape[1] == num_dn
         assert attn_mask.shape[0] == num_dn + 10
         # matched indices stay consistent with the truncated targets
-        from autovision.tasks.detection.components.denoising import (
+        from autovision.tasks.detection.shared.denoising import (
             get_cdn_matched_indices,
         )
 

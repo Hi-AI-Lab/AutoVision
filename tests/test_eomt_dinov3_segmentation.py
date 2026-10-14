@@ -22,35 +22,35 @@ from autovision import (
     train_panoptic_segmentation,
     train_semantic_segmentation,
 )
+from autovision.tasks.eomt.modeling import build_eomt_model
 from autovision.tasks.instance_segmentation.dinov2_eomt import (
     Dinov2EomtInstanceSegmentation,
     Dinov2EomtInstanceSegmentationTrain,
-)
-from autovision.tasks.panoptic_segmentation.dinov2_eomt import (
-    Dinov2EomtPanopticSegmentation,
-    Dinov2EomtPanopticSegmentationTrain,
-)
-from autovision.tasks.semantic_segmentation.dinov2_eomt import (
-    Dinov2EomtSemanticSegmentation,
-    Dinov2EomtSemanticSegmentationTrain,
-    Dinov2EomtSemanticSegmentationTrainArgs,
 )
 from autovision.tasks.instance_segmentation.dinov3_eomt import (
     Dinov3EomtInstanceSegmentation,
     Dinov3EomtInstanceSegmentationTrain,
     Dinov3EomtInstanceSegmentationTrainArgs,
 )
+from autovision.tasks.panoptic_segmentation.dinov2_eomt import (
+    Dinov2EomtPanopticSegmentation,
+    Dinov2EomtPanopticSegmentationTrain,
+)
 from autovision.tasks.panoptic_segmentation.dinov3_eomt import (
     Dinov3EomtPanopticSegmentation,
     Dinov3EomtPanopticSegmentationTrain,
     Dinov3EomtPanopticSegmentationTrainArgs,
+)
+from autovision.tasks.semantic_segmentation.dinov2_eomt import (
+    Dinov2EomtSemanticSegmentation,
+    Dinov2EomtSemanticSegmentationTrain,
+    Dinov2EomtSemanticSegmentationTrainArgs,
 )
 from autovision.tasks.semantic_segmentation.dinov3_eomt import (
     Dinov3EomtSemanticSegmentation,
     Dinov3EomtSemanticSegmentationTrain,
     Dinov3EomtSemanticSegmentationTrainArgs,
 )
-from autovision.tasks.eomt.modeling import build_eomt_model
 
 # Small HF-compatible EOMT layout (hidden 16 / queries 4 / blocks 3 crash).
 MODEL_KWARGS = {

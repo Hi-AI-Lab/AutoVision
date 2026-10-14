@@ -15,7 +15,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from autovision.tasks.detection.components.box_ops import (
+from autovision.geometry.box_ops import (
     box_cxcywh_norm_to_xyxy,
     generalized_box_iou_loss,
 )

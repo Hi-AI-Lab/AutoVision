@@ -13,13 +13,13 @@ from torchvision.models.feature_extraction import create_feature_extractor
 from autovision.augment.transform_args import NormalizeArgs
 from autovision.encoders import get_wrapped_model
 from autovision.export import ONNXExportMixin, ONNXExportPrecisionPolicy
-from autovision.tasks.detection.components.decode import (
+from autovision.tasks.detection.shared.decode import (
     decode_detection_outputs,
 )
-from autovision.tasks.detection.components.hybrid_encoder import (
+from autovision.tasks.detection.shared.hybrid_encoder import (
     HybridEncoder,
 )
-from autovision.tasks.detection.components.rtdetrv2_decoder import (
+from autovision.tasks.detection.shared.rtdetrv2_decoder import (
     RTDETRv2Decoder,
 )
 from autovision.tasks.task_model import TaskNetwork
@@ -187,7 +187,7 @@ class RTDETRObjectDetection(ONNXExportMixin, TaskNetwork):
         Delegates to the shared DETR-family decoder; the coordinate
         contract (normalized cxcywh -> original pixels, exactly one
         scaling) lives in
-        :mod:`autovision.tasks.detection.components.decode`.
+        :mod:`autovision.tasks.detection.shared.decode`.
         """
         return decode_detection_outputs(
             raw_outputs,

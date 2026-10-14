@@ -62,9 +62,6 @@ HARD_BANS: set[tuple[str, str]] = {
 #: Sanctioned upward imports: (source module prefix, target module prefix,
 #: reason). Keep this table SHORT — entries are debt markers, not policy.
 ALLOWED_UPWARD: dict[tuple[str, str], str] = {
-    ("augment.detection", "tasks.detection.components"): (
-        "shared detection box math (box_ops); move to a common layer later"
-    ),
     ("features.embed", "cli.common_helpers"): (
         "embed is a command implementation reusing CLI helpers"
     ),
@@ -73,9 +70,6 @@ ALLOWED_UPWARD: dict[tuple[str, str], str] = {
     ),
     ("data.image_dataset", "augment.method_transform"): (
         "dataset consumes the multi-view transform protocol"
-    ),
-    ("metrics.oriented_detection", "tasks.detection.components"): (
-        "shared OBB math (obb.py); move to a common layer later"
     ),
     ("registry", "encoders.weight_verification"): (
         "sha256 utility currently lives under encoders; relocate later"
@@ -93,6 +87,7 @@ ALLOWED_UPWARD: dict[tuple[str, str], str] = {
         "benchmark drives the training engine for speed measurement"
     ),
 }
+
 
 def layer_of(top_segment: str) -> int | None:
     return LAYERS.get(top_segment, _TOP_LEVEL_RANK)

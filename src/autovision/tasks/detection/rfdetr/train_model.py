@@ -24,15 +24,15 @@ from autovision.augment.detection.box_aware_eraser import (
     erase_background,
 )
 from autovision.metrics.map_evaluator import COCOMAPEvaluator
-from autovision.tasks.detection.components.ssl_contrastive import (
-    SSLParams,
-    ssl_contrastive_loss,
-)
 from autovision.tasks.detection.rfdetr.config import (
     RFDETRObjectDetectionTrainArgs,
 )
 from autovision.tasks.detection.rfdetr.task_model import (
     RFDETRObjectDetection,
+)
+from autovision.tasks.detection.shared.ssl_contrastive import (
+    SSLParams,
+    ssl_contrastive_loss,
 )
 from autovision.tasks.shared.ema import ModelEMA
 from autovision.tasks.train_model import TaskStepResult, TrainModel
@@ -248,7 +248,7 @@ class RFDETRObjectDetectionTrain(TrainModel):
         s1_tap = out.get("ssl_s1")
         s2_tap = out.get("ssl_s2")
         if s1_tap is not None and s2_tap is not None:
-            from autovision.tasks.detection.components.ssl_contrastive import (
+            from autovision.tasks.detection.shared.ssl_contrastive import (
                 epps_pulley_sigreg,
             )
 

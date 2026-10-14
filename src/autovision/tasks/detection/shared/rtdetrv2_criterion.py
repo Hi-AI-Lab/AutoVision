@@ -20,14 +20,14 @@ import torch.nn.functional as F
 from torch import nn
 
 from autovision._distributed import reduce_dict
-from autovision.tasks.detection.components.box_ops import (
+from autovision.geometry.box_ops import (
     elementwise_siou,
     generalized_box_iou_loss,
 )
-from autovision.tasks.detection.components.denoising import (
+from autovision.tasks.detection.shared.denoising import (
     get_cdn_matched_indices,
 )
-from autovision.tasks.detection.components.matcher import (
+from autovision.tasks.detection.shared.matcher import (
     indices_to_device,
 )
 

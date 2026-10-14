@@ -117,8 +117,12 @@ docs/ 历史分册中的 LT-DETR 表述（历史名，新文档首行已注）�
 | `tasks.detection.rtdetr_oriented_object_detection` | `tasks.oriented_detection.rtdetr` |
 | `tasks.detection.{rtdetr,dfine,deimv2,rfdetr,picodet,fsdc}_object_detection` | `tasks.detection.<家族短名>` |
 | `tasks.detection.components.{ema,flat_cosine}` | `tasks.shared.{ema,flat_cosine}` |
+| `tasks.detection.components`（检测架构核） | `tasks.detection.shared` |
+| `tasks.detection.components.{box_ops,obb}`（纯数学） | `autovision.geometry.{box_ops,obb}`（新增顶层包；augment/metrics 的两条 ALLOWED_UPWARD 债务就此消除） |
+| `tasks.detection.components.{obb_decoder,obb_criterion}` | `tasks.oriented_detection.shared` |
+| `tasks.detection.components.{tiling_utils,sahi}` | `tasks.shared.{tiling_utils,sahi}` |
+| `tasks.detection.components.{sfs_ff,dbfsaf,wavelet_downsample}` | `tasks.detection.fsdc.<同名>` |
 | `autovision.tasks.depth_estimation` / `pose_estimation` | 新建脚手架（无家族，见包 docstring 模板） |
 
 不变：`tasks.detection.avdetr`、`tasks.eomt`（跨三任务架构核）、
-`tasks.detection.components`（阶段三继续拆分）、registry/CLI 键名与
-`LEGACY_CLASS_PATH_REMAP` 全部历史键。
+registry/CLI 键名与 `LEGACY_CLASS_PATH_REMAP` 全部历史键。

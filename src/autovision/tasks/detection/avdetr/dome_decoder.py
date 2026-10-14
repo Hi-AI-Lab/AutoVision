@@ -42,14 +42,14 @@ from __future__ import annotations
 
 import torch
 
-from autovision.tasks.detection.components.denoising import (
+from autovision.tasks.detection.shared.denoising import (
     box_cxcywh_to_xyxy,
     get_contrastive_denoising_training_group,
 )
-from autovision.tasks.detection.components.dfine_decoder import (
+from autovision.tasks.detection.shared.dfine_decoder import (
     DFINEv2Decoder,
 )
-from autovision.tasks.detection.components.dynamic_nms import (
+from autovision.tasks.detection.shared.dynamic_nms import (
     per_class_dynamic_nms,
 )
 

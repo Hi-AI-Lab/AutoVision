@@ -8,6 +8,7 @@ from typing import Any
 import torch
 
 from autovision.metrics.instance_segmentation import COCOMaskAPEvaluator
+from autovision.tasks.eomt.postprocess import instance_segmentation_decode
 from autovision.tasks.instance_segmentation.dinov2_eomt.config import (
     Dinov2EomtInstanceSegmentationTrainArgs,
 )
@@ -17,7 +18,6 @@ from autovision.tasks.instance_segmentation.dinov2_eomt.task_model import (
 from autovision.tasks.semantic_segmentation.dinov2_eomt.train_model import (
     Dinov2EomtSemanticSegmentationTrain,
 )
-from autovision.tasks.eomt.postprocess import instance_segmentation_decode
 from autovision.tasks.train_model import TaskStepResult, TrainModel
 
 __all__ = ["Dinov2EomtInstanceSegmentationTrain"]

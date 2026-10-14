@@ -31,7 +31,7 @@ from scipy.optimize import (  # type: ignore[import-untyped,unused-ignore]
 from torch import Tensor, nn
 from torchvision.ops import box_iou
 
-from autovision.tasks.detection.components.denoising import (
+from autovision.tasks.detection.shared.denoising import (
     box_cxcywh_to_xyxy,
 )
 

@@ -15,7 +15,7 @@ from collections import defaultdict
 
 import torch
 
-from autovision.tasks.detection.components.obb import (
+from autovision.geometry.obb import (
     rotated_iou_matrix,
     xyxyxyxy_to_xywhr,
 )

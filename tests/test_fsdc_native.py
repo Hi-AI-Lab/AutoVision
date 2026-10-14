@@ -15,17 +15,6 @@ import pytest
 import torch
 from torch import nn
 
-from autovision.tasks.detection.components.dbfsaf import DBFSAF, MKSRU
-from autovision.tasks.detection.components.fdconv import (
-    FDConv,
-    band_masks,
-)
-from autovision.tasks.detection.components.sfs_ff import SFSFF
-from autovision.tasks.detection.components.wavelet_downsample import (
-    FSDDown,
-    HaarDWT2d,
-    haar_idwt2,
-)
 from autovision.tasks.detection.deimv2.train_model import (
     _deimv2_param_buckets,
 )
@@ -36,6 +25,17 @@ from autovision.tasks.detection.fsdc import (
     FsdcObjectDetectionTrain,
     FsdcObjectDetectionTrainArgs,
     resolve_fsdc_variant,
+)
+from autovision.tasks.detection.fsdc.dbfsaf import DBFSAF, MKSRU
+from autovision.tasks.detection.fsdc.sfs_ff import SFSFF
+from autovision.tasks.detection.fsdc.wavelet_downsample import (
+    FSDDown,
+    HaarDWT2d,
+    haar_idwt2,
+)
+from autovision.tasks.detection.shared.fdconv import (
+    FDConv,
+    band_masks,
 )
 
 pytest.importorskip(

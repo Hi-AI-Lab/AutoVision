@@ -35,8 +35,8 @@ from torch import Tensor, nn
 from transformers import AutoBackbone
 from transformers.models.deimv2.modeling_deimv2 import Deimv2ConvNormLayer
 
-from autovision.tasks.detection.components.dbfsaf import DBFSAF
 from autovision.tasks.detection.fsdc.config import FsdcArgs
+from autovision.tasks.detection.fsdc.dbfsaf import DBFSAF
 
 __all__ = ["FsdcDinoDualBranchEncoder", "FsdcSpatialTuningAdapter"]
 

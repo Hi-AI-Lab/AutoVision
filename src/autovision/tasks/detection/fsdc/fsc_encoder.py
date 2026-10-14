@@ -29,8 +29,8 @@ from transformers.models.deimv2.modeling_deimv2 import (
     fuse_feature_maps,
 )
 
-from autovision.tasks.detection.components.sfs_ff import SFSFF
 from autovision.tasks.detection.fsdc.config import FsdcArgs
+from autovision.tasks.detection.fsdc.sfs_ff import SFSFF
 
 __all__ = ["FsdcHybridEncoder"]
 

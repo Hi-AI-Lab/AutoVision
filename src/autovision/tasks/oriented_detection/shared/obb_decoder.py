@@ -6,7 +6,7 @@ proposals, contrastive denoising, iterative box refinement) and adds one
 MLP angle head per decoder layer. Angles have no iterative refinement:
 every layer predicts its own angle from the current decoder state, bounded
 to ``[-π/4, π/4]`` via ``tanh`` (the long-edge canonical convention shared
-with :mod:`autovision.tasks.detection.components.obb`).
+with :mod:`autovision.geometry.obb`).
 Angle noise is NOT injected into the denoising group (box noise only) —
 the dn angle predictions are supervised against the clean GT angles
 through the same dn matching indices.
@@ -23,14 +23,14 @@ import torch.nn.functional as F
 import torch.nn.init as init
 from torch import Tensor
 
-from autovision.tasks.detection.components.denoising import (
-    get_contrastive_denoising_training_group,
-)
-from autovision.tasks.detection.components.obb import (
+from autovision.geometry.obb import (
     obb_nms,
     xywhr_to_xyxyxyxy,
 )
-from autovision.tasks.detection.components.rtdetrv2_decoder import (
+from autovision.tasks.detection.shared.denoising import (
+    get_contrastive_denoising_training_group,
+)
+from autovision.tasks.detection.shared.rtdetrv2_decoder import (
     MLP,
     RTDETRv2Decoder,
     TransformerDecoder,

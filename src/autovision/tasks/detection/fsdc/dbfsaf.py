@@ -27,8 +27,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from autovision.tasks.detection.components.fdconv import FDConv
-from autovision.tasks.detection.components.hybrid_encoder import (
+from autovision.tasks.detection.shared.fdconv import FDConv
+from autovision.tasks.detection.shared.hybrid_encoder import (
     ConvNormLayer,
 )
 

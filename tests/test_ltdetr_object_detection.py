@@ -371,7 +371,7 @@ class TestOptimizerGroups:
         )
         # DINOv2 ViT family resolves to the LINEAR recipe (warmup ->
         # constant); CNN families resolve to flat-cosine.
-        from autovision.tasks.detection.components.multistep_schedule import (
+        from autovision.tasks.detection.shared.multistep_schedule import (
             MultiStepWarmupScheduler,
         )
 
@@ -786,10 +786,10 @@ class TestCocoCheckpointLoaderEdgeCrafter:
     def test_training_step_matches_fork_contract(self):
         # The official decoder emits the fork's criterion contract and the
         # full D-FINE loss suite (VFL/bbox/giou/FGL/DDF + dn branches).
-        from autovision.tasks.detection.components.dfine_criterion import (
+        from autovision.tasks.detection.shared.dfine_criterion import (
             DFINECriterionV2,
         )
-        from autovision.tasks.detection.components.matcher import (
+        from autovision.tasks.detection.shared.matcher import (
             HungarianMatcher,
         )
 
@@ -964,7 +964,7 @@ class TestDecoders:
     def test_rtdetrv2_is_default(self):
         train_model = make_train_model()
         assert train_model.model.decoder_name == "rtdetrv2"
-        from autovision.tasks.detection.components.rtdetrv2_decoder import (
+        from autovision.tasks.detection.shared.rtdetrv2_decoder import (
             RTDETRv2Decoder,
         )
 
@@ -972,7 +972,7 @@ class TestDecoders:
         assert type(train_model.criterion).__name__ == "RTDETRCriterionV2"
 
     def test_dfine_decoder_swaps_criterion(self):
-        from autovision.tasks.detection.components.dfine_decoder import (
+        from autovision.tasks.detection.shared.dfine_decoder import (
             DFINEv2Decoder,
         )
 
@@ -994,10 +994,10 @@ class TestDecoders:
         result.loss.backward()
 
     def test_ecvit_auto_selects_official_dfine(self):
-        from autovision.tasks.detection.components.dfine_criterion import (
+        from autovision.tasks.detection.shared.dfine_criterion import (
             DFINECriterionV2,
         )
-        from autovision.tasks.detection.components.dfine_official_decoder import (
+        from autovision.tasks.detection.shared.dfine_official_decoder import (
             DFINEOfficialDecoder,
         )
 

@@ -41,19 +41,19 @@ from autovision.tasks.detection.avdetr.config import (
 from autovision.tasks.detection.avdetr.task_model import (
     AVDETRObjectDetection,
 )
-from autovision.tasks.detection.components.dfine_criterion import (
+from autovision.tasks.detection.shared.dfine_criterion import (
     DFINECriterionV2,
 )
-from autovision.tasks.detection.components.matcher import (
+from autovision.tasks.detection.shared.matcher import (
     HungarianMatcher,
 )
-from autovision.tasks.detection.components.multistep_schedule import (
+from autovision.tasks.detection.shared.multistep_schedule import (
     MultiStepWarmupScheduler,
 )
-from autovision.tasks.detection.components.open_vocab import (
+from autovision.tasks.detection.shared.open_vocab import (
     ContrastiveClassHead,
 )
-from autovision.tasks.detection.components.rtdetrv2_criterion import (
+from autovision.tasks.detection.shared.rtdetrv2_criterion import (
     RTDETRCriterionV2,
 )
 from autovision.tasks.shared.ema import ModelEMA

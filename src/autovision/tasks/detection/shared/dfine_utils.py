@@ -43,11 +43,11 @@ from torch import nn
 from torch.nn import functional as F
 from torch.nn import init
 
-from autovision.tasks.detection.components.box_ops import (
+from autovision.geometry.box_ops import (
     clip_normalize_boxes,
     elementwise_box_iou,
 )
-from autovision.tasks.detection.components.denoising import (
+from autovision.tasks.detection.shared.denoising import (
     box_cxcywh_to_xyxy,
     box_xyxy_to_cxcywh,
 )
@@ -341,7 +341,7 @@ class LQE(nn.Module):
         super().__init__()
         self.k = k
         self.reg_max = reg_max
-        from autovision.tasks.detection.components.rtdetrv2_decoder import (
+        from autovision.tasks.detection.shared.rtdetrv2_decoder import (
             MLP,
         )
 

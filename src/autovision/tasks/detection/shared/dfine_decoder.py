@@ -39,11 +39,11 @@ import torch
 import torch.nn.init as init
 from torch import nn
 
-from autovision.tasks.detection.components.denoising import (
+from autovision.tasks.detection.shared.denoising import (
     get_contrastive_denoising_training_group,
     inverse_sigmoid,
 )
-from autovision.tasks.detection.components.dfine_utils import (
+from autovision.tasks.detection.shared.dfine_utils import (
     DEFAULT_REG_SCALE,
     LQE,
     WEIGHTING_UP,
@@ -51,7 +51,7 @@ from autovision.tasks.detection.components.dfine_utils import (
     integrate_corners,
     weighting_function,
 )
-from autovision.tasks.detection.components.rtdetrv2_decoder import (
+from autovision.tasks.detection.shared.rtdetrv2_decoder import (
     MLP,
     RTDETRv2Decoder,
     _score_head_logits,

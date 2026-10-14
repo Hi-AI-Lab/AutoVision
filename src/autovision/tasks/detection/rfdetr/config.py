@@ -8,7 +8,7 @@ from typing import Any, ClassVar, Literal
 from pydantic import Field, model_validator
 
 from autovision.config.base import PydanticConfig
-from autovision.tasks.detection.components.ssl_contrastive import (
+from autovision.tasks.detection.shared.ssl_contrastive import (
     SSLParams,
 )
 from autovision.tasks.train_model import TrainModelArgs

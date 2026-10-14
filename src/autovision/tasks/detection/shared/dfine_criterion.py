@@ -38,15 +38,15 @@ import torch
 from torch import nn
 
 from autovision._distributed import reduce_dict
-from autovision.tasks.detection.components.defe import (
+from autovision.tasks.detection.shared.defe import (
     defe_count_loss,
     defe_density_loss,
 )
-from autovision.tasks.detection.components.denoising import (
+from autovision.tasks.detection.shared.denoising import (
     box_cxcywh_to_xyxy,
     get_cdn_matched_indices,
 )
-from autovision.tasks.detection.components.dfine_utils import (
+from autovision.tasks.detection.shared.dfine_utils import (
     DEFAULT_REG_SCALE,
     bbox2distance,
     ddf_loss,
@@ -56,18 +56,18 @@ from autovision.tasks.detection.components.dfine_utils import (
     matched_pair_iou,
     matched_pair_iou_flat,
 )
-from autovision.tasks.detection.components.distillation import (
+from autovision.tasks.detection.shared.distillation import (
     DistillParams,
     cross_model_distill_losses,
 )
-from autovision.tasks.detection.components.matcher import (
+from autovision.tasks.detection.shared.matcher import (
     indices_to_device,
 )
-from autovision.tasks.detection.components.rtdetrv2_criterion import (
+from autovision.tasks.detection.shared.rtdetrv2_criterion import (
     loss_boxes,
     loss_labels_vfl,
 )
-from autovision.tasks.detection.components.ssl_contrastive import (
+from autovision.tasks.detection.shared.ssl_contrastive import (
     SSLParams,
     epps_pulley_sigreg,
     ssl_contrastive_loss,

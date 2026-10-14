@@ -28,15 +28,6 @@ from pathlib import Path
 
 import torch
 
-from autovision.cli import common_helpers
-from autovision.data.coco_object_detection_dataset import (
-    COCOObjectDetectionDataArgs,
-)
-from autovision.data.object_detection_dataset import ObjectDetectionDataset
-from autovision.tasks.detection.avdetr import (
-    AVDETRObjectDetectionTrain,
-    AVDETRObjectDetectionTrainArgs,
-)
 from autovision.augment.detection import build_val_transform_args
 from autovision.augment.detection.args import (
     RTDETRDetectionTransformArgs,
@@ -46,6 +37,15 @@ from autovision.augment.detection.collate import (
 )
 from autovision.augment.detection.transform import (
     RTDETRDetectionTransform,
+)
+from autovision.cli import common_helpers
+from autovision.data.coco_object_detection_dataset import (
+    COCOObjectDetectionDataArgs,
+)
+from autovision.data.object_detection_dataset import ObjectDetectionDataset
+from autovision.tasks.detection.avdetr import (
+    AVDETRObjectDetectionTrain,
+    AVDETRObjectDetectionTrainArgs,
 )
 
 REPO = Path(__file__).resolve().parents[1]

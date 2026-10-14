@@ -960,7 +960,7 @@ class TestRFDETRSSLSigReg:
         """Two_crop pools beyond the 1024-row cap are randomly subsampled
         before the Epps–Pulley statistic (the ~4GB intermediate OOMed at
         micro 8, design doc 18 §2)."""
-        import autovision.tasks.detection.components.ssl_contrastive as ssl_mod
+        import autovision.tasks.detection.shared.ssl_contrastive as ssl_mod
 
         seen = {}
 

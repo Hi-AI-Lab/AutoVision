@@ -11,13 +11,18 @@ from tests.test_train_object_detection import (
 
 from autovision import load_task_model as load_model
 from autovision import train_object_detection
-from autovision.tasks.detection.components.dfine_criterion import (
+from autovision.tasks.detection.dfine import (
+    DFINEObjectDetection,
+    DFINEObjectDetectionTrain,
+    DFINEObjectDetectionTrainArgs,
+)
+from autovision.tasks.detection.shared.dfine_criterion import (
     DFINECriterionV2,
 )
-from autovision.tasks.detection.components.dfine_decoder import (
+from autovision.tasks.detection.shared.dfine_decoder import (
     DFINEv2Decoder,
 )
-from autovision.tasks.detection.components.dfine_utils import (
+from autovision.tasks.detection.shared.dfine_utils import (
     bbox2distance,
     ddf_loss,
     distance2bbox,
@@ -26,13 +31,8 @@ from autovision.tasks.detection.components.dfine_utils import (
     translate_gt,
     weighting_function,
 )
-from autovision.tasks.detection.components.matcher import (
+from autovision.tasks.detection.shared.matcher import (
     HungarianMatcher,
-)
-from autovision.tasks.detection.dfine import (
-    DFINEObjectDetection,
-    DFINEObjectDetectionTrain,
-    DFINEObjectDetectionTrainArgs,
 )
 
 REG_MAX = 8  # small bin layout keeps tests fast
@@ -762,7 +762,7 @@ class TestLQE:
     def test_zero_init_is_identity_on_scores(self):
         """At init the LQE's last layer is zeroed — the quality scalar is 0,
         so the module must return the scores unchanged (official no-op)."""
-        from autovision.tasks.detection.components.dfine_utils import LQE
+        from autovision.tasks.detection.shared.dfine_utils import LQE
 
         torch.manual_seed(0)
         lqe = LQE(k=4, hidden_dim=64, num_layers=2, reg_max=REG_MAX)
@@ -771,7 +771,7 @@ class TestLQE:
         torch.testing.assert_close(lqe(scores, corners), scores)
 
     def test_trained_offset_shifts_scores(self):
-        from autovision.tasks.detection.components.dfine_utils import LQE
+        from autovision.tasks.detection.shared.dfine_utils import LQE
 
         lqe = LQE(k=4, hidden_dim=64, num_layers=2, reg_max=REG_MAX)
         with torch.no_grad():

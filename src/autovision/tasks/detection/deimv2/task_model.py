@@ -34,11 +34,11 @@ from torch import nn
 from autovision.augment.transform_args import NormalizeArgs
 from autovision.encoders.weight_verification import load_pretrained_verified
 from autovision.export import ONNXExportMixin
-from autovision.tasks.detection.components.decode import (
-    decode_detection_outputs,
-)
 from autovision.tasks.detection.deimv2.config import (
     resolve_deimv2_variant,
+)
+from autovision.tasks.detection.shared.decode import (
+    decode_detection_outputs,
 )
 from autovision.tasks.task_model import TaskNetwork
 from autovision.tasks.task_model_io import BaseModelOutput

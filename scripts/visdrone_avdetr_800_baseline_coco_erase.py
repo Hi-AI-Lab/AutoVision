@@ -21,7 +21,6 @@ Launch:
         > runs/visdrone_ltdetr_convnextt_800_cocofull_erase_console.log 2>&1 &
 """
 
-import importlib.util
 import time
 from pathlib import Path
 

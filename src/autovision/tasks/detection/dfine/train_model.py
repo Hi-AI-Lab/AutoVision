@@ -3,12 +3,6 @@
 
 from __future__ import annotations
 
-from autovision.tasks.detection.components.dfine_criterion import (
-    DFINECriterionV2,
-)
-from autovision.tasks.detection.components.matcher import (
-    HungarianMatcher,
-)
 from autovision.tasks.detection.dfine.config import (
     DFINEObjectDetectionTrainArgs,
 )
@@ -18,6 +12,12 @@ from autovision.tasks.detection.dfine.task_model import (
 from autovision.tasks.detection.rtdetr.train_model import (
     RTDETRObjectDetectionTrain,
     load_pretrained_backbone,
+)
+from autovision.tasks.detection.shared.dfine_criterion import (
+    DFINECriterionV2,
+)
+from autovision.tasks.detection.shared.matcher import (
+    HungarianMatcher,
 )
 from autovision.tasks.train_model import TaskStepResult, TrainModel
 

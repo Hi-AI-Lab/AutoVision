@@ -17,11 +17,11 @@ from __future__ import annotations
 import torch
 from torch import Tensor, nn
 
-from autovision.tasks.detection.components.hybrid_encoder import (
-    ConvNormLayer,
-)
-from autovision.tasks.detection.components.wavelet_downsample import (
+from autovision.tasks.detection.fsdc.wavelet_downsample import (
     FSDDown,
+)
+from autovision.tasks.detection.shared.hybrid_encoder import (
+    ConvNormLayer,
 )
 
 __all__ = ["FrequencyGlobalBranch", "SFSFF", "SpatialRefineModule"]

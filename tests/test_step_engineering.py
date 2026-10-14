@@ -13,26 +13,26 @@ import pytest
 import torch
 from tests.test_ltdetr_ssl import VARIANT_ARGS
 
+from autovision.geometry.box_ops import (
+    elementwise_giou_loss,
+    generalized_box_iou_loss,
+)
 from autovision.optim import build_adamw
 from autovision.tasks.detection.avdetr import (
     AVDETRObjectDetectionTrain,
     AVDETRObjectDetectionTrainArgs,
 )
-from autovision.tasks.detection.components.box_ops import (
-    elementwise_giou_loss,
-    generalized_box_iou_loss,
-)
-from autovision.tasks.detection.components.dfine_criterion import (
+from autovision.tasks.detection.shared.dfine_criterion import (
     DFINECriterionV2,
 )
-from autovision.tasks.detection.components.dfine_utils import (
+from autovision.tasks.detection.shared.dfine_utils import (
     ddf_loss,
     fg_loss,
     flatten_match_indices,
     matched_pair_iou,
     matched_pair_iou_flat,
 )
-from autovision.tasks.detection.components.matcher import (
+from autovision.tasks.detection.shared.matcher import (
     HungarianMatcher,
 )
 
@@ -169,7 +169,7 @@ class TestElementwiseGiou:
         torch.manual_seed(1)
         pred = torch.rand(40, 4) * 0.6 + 0.2
         target = torch.rand(40, 4) * 0.6 + 0.2
-        from autovision.tasks.detection.components.denoising import (
+        from autovision.tasks.detection.shared.denoising import (
             box_cxcywh_to_xyxy,
         )
 

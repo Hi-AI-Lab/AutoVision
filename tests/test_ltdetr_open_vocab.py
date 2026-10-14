@@ -19,8 +19,8 @@ from autovision.tasks.detection.avdetr import (
     AVDETRObjectDetectionTrainArgs,
     AVDETROpenVocabArgs,
 )
-from autovision.tasks.detection.components import open_vocab as ov
-from autovision.tasks.detection.components.open_vocab import (
+from autovision.tasks.detection.shared import open_vocab as ov
+from autovision.tasks.detection.shared.open_vocab import (
     ContrastiveClassHead,
     TextCrossAttention,
     class_bias_init,
@@ -28,7 +28,7 @@ from autovision.tasks.detection.components.open_vocab import (
     resolve_text_embed_dim,
     text_cache_path,
 )
-from autovision.tasks.detection.components.rtdetrv2_decoder import (
+from autovision.tasks.detection.shared.rtdetrv2_decoder import (
     RTDETRv2Decoder,
     bias_init_with_prob,
 )
@@ -628,7 +628,7 @@ def test_official_wide_tail_heads_are_contrastive():
     must follow the per-layer widths (doc 27 §8.11 / risk R5). Built
     directly: layer_scale is an official-decoder ctor knob the task model
     keeps at its default."""
-    from autovision.tasks.detection.components.dfine_official_decoder import (
+    from autovision.tasks.detection.shared.dfine_official_decoder import (
         DFINEOfficialDecoder,
     )
 
@@ -656,7 +656,7 @@ def test_official_decoder_deploy_with_text_head():
     non-eval score heads are ``nn.Identity`` — the dispatch must call them
     feature-only (the unconditional layer-0 ``pre_scores`` call runs in
     eval too)."""
-    from autovision.tasks.detection.components.dfine_official_decoder import (
+    from autovision.tasks.detection.shared.dfine_official_decoder import (
         DFINEOfficialDecoder,
     )
 

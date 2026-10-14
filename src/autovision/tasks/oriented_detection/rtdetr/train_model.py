@@ -5,15 +5,11 @@ from __future__ import annotations
 
 import torch
 
-from autovision.metrics.oriented_detection import (
-    OrientedDetectionMetricCollector,
-)
-from autovision.tasks.detection.components.obb import (
+from autovision.geometry.obb import (
     xyxyxyxy_to_xywhr,
 )
-from autovision.tasks.detection.components.obb_criterion import (
-    OrientedHungarianMatcher,
-    OrientedRTDETRCriterion,
+from autovision.metrics.oriented_detection import (
+    OrientedDetectionMetricCollector,
 )
 from autovision.tasks.detection.rtdetr.train_model import (
     RTDETRObjectDetectionTrain,
@@ -24,6 +20,10 @@ from autovision.tasks.oriented_detection.rtdetr.config import (
 )
 from autovision.tasks.oriented_detection.rtdetr.task_model import (
     RTDETROrientedObjectDetection,
+)
+from autovision.tasks.oriented_detection.shared.obb_criterion import (
+    OrientedHungarianMatcher,
+    OrientedRTDETRCriterion,
 )
 from autovision.tasks.shared.ema import ModelEMA
 from autovision.tasks.train_model import TaskStepResult, TrainModel

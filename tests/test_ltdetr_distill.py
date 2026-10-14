@@ -21,15 +21,15 @@ from autovision.tasks.detection.avdetr.config import AVDETRDistillArgs
 from autovision.tasks.detection.avdetr.train_model import (
     _build_gt_to_teacher_query,
 )
-from autovision.tasks.detection.components.dfine_criterion import (
+from autovision.tasks.detection.shared.dfine_criterion import (
     DFINECriterionV2,
 )
-from autovision.tasks.detection.components.distillation import (
+from autovision.tasks.detection.shared.distillation import (
     DistillParams,
     cross_model_ddf_loss,
     cross_model_distill_losses,
 )
-from autovision.tasks.detection.components.matcher import (
+from autovision.tasks.detection.shared.matcher import (
     HungarianMatcher,
 )
 

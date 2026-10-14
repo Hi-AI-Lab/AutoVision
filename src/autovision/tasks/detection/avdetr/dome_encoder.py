@@ -31,14 +31,14 @@ import torch.nn.functional as F
 from autovision.tasks.detection.avdetr.config import (
     AVDETRDensityArgs,
 )
-from autovision.tasks.detection.components.defe import (
+from autovision.tasks.detection.shared.defe import (
     GaussHeatmapGenerator,
     LiteDeFE,
 )
-from autovision.tasks.detection.components.hybrid_encoder import (
+from autovision.tasks.detection.shared.hybrid_encoder import (
     HybridEncoder,
 )
-from autovision.tasks.detection.components.mwas import (
+from autovision.tasks.detection.shared.mwas import (
     WindowProcessor,
     adaptive_window_mask,
     window_grid_size,

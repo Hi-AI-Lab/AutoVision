@@ -28,7 +28,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from autovision.tasks.detection.components.open_vocab import (  # noqa: E402
+from autovision.tasks.detection.shared.open_vocab import (  # noqa: E402
     VISDRONE_CLASS_NAMES,
     encode_class_names,
     resolve_text_embed_dim,

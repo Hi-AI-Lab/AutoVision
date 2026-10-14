@@ -24,7 +24,7 @@ from autovision.data.yolo_oriented_object_detection_dataset import (
     OrientedObjectDetectionDataset,
     YOLOOrientedObjectDetectionDataArgs,
 )
-from autovision.tasks.detection.components.obb import (
+from autovision.geometry.obb import (
     obb_nms,
     rotated_iou_matrix,
     xywhr_to_xyxyxyxy,

@@ -26,16 +26,16 @@ from autovision.tasks.detection.avdetr.dome_decoder import (
 from autovision.tasks.detection.avdetr.dome_encoder import (
     DomeHybridEncoder,
 )
-from autovision.tasks.detection.components.defe import (
+from autovision.tasks.detection.shared.defe import (
     GaussHeatmapGenerator,
     LiteDeFE,
     defe_count_loss,
     defe_density_loss,
 )
-from autovision.tasks.detection.components.dynamic_nms import (
+from autovision.tasks.detection.shared.dynamic_nms import (
     per_class_dynamic_nms,
 )
-from autovision.tasks.detection.components.mwas import (
+from autovision.tasks.detection.shared.mwas import (
     WindowProcessor,
     adaptive_window_mask,
     window_grid_size,
@@ -324,7 +324,7 @@ class TestDenoisingDynamicMask:
         ]
 
     def _group(self, batch_queries_num=None, num_heads=None, num_queries=10):
-        from autovision.tasks.detection.components.denoising import (
+        from autovision.tasks.detection.shared.denoising import (
             get_contrastive_denoising_training_group,
         )
 
@@ -374,10 +374,10 @@ class TestDenoisingDynamicMask:
 class TestDomeTaskModel:
     def test_density_off_constructs_baseline_modules(self):
         train_model = make_baseline_train_model()
-        from autovision.tasks.detection.components.dfine_decoder import (
+        from autovision.tasks.detection.shared.dfine_decoder import (
             DFINEv2Decoder,
         )
-        from autovision.tasks.detection.components.hybrid_encoder import (
+        from autovision.tasks.detection.shared.hybrid_encoder import (
             HybridEncoder,
         )
 

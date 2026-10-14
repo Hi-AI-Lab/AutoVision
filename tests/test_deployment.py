@@ -10,7 +10,7 @@ from autovision.tasks import (
     RTDETRObjectDetectionTrain,
     RTDETRObjectDetectionTrainArgs,
 )
-from autovision.tasks.detection.components import (
+from autovision.tasks.shared.sahi import (
     combine_object_detection_tiles,
     tile_image,
 )
@@ -210,7 +210,7 @@ class TestPredictSahi:
 
     def test_default_tile_size_is_model_input_size(self, tiny_model, monkeypatch):
         seen = {}
-        from autovision.tasks.detection.components import tiling_utils
+        from autovision.tasks.shared import tiling_utils
 
         real_tile = tiling_utils.tile_image
 
@@ -240,7 +240,7 @@ class TestPredictSahi:
         assert stub_pad.seen_metadata[1] == {"orig_w": 64, "orig_h": 64}
 
     def test_tile_offset_and_global_passthrough(self, monkeypatch):
-        from autovision.tasks.detection.components import tiling_utils
+        from autovision.tasks.shared import tiling_utils
 
         seen = {}
         real_combine = tiling_utils.combine_object_detection_tiles

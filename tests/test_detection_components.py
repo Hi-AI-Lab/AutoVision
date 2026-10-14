@@ -5,22 +5,24 @@ import pytest
 import torch
 from torch import nn
 
-from autovision.tasks.detection.components import (
+from autovision.geometry import (
+    box_cxcywh_norm_to_xyxy,
+    box_xyxy_to_cxcywh_norm,
+)
+from autovision.geometry.box_ops import (
+    elementwise_box_iou,
+    elementwise_siou,
+)
+from autovision.tasks.detection.shared import (
     HungarianMatcher,
     HybridEncoder,
     RTDETRCriterionV2,
     RTDETRv2Decoder,
-    box_cxcywh_norm_to_xyxy,
-    box_xyxy_to_cxcywh_norm,
 )
-from autovision.tasks.detection.components.box_ops import (
-    elementwise_box_iou,
-    elementwise_siou,
-)
-from autovision.tasks.detection.components.dfine_criterion import (
+from autovision.tasks.detection.shared.dfine_criterion import (
     DFINECriterionV2,
 )
-from autovision.tasks.detection.components.multistep_schedule import (
+from autovision.tasks.detection.shared.multistep_schedule import (
     MultiStepWarmupScheduler,
 )
 from autovision.tasks.shared.ema import ModelEMA
@@ -51,9 +53,7 @@ class TestBoxOps:
         assert torch.allclose(back, boxes, atol=1e-6)
 
     def test_giou_self_zero(self):
-        from autovision.tasks.detection.components import (
-            generalized_box_iou_loss,
-        )
+        from autovision.geometry import generalized_box_iou_loss
 
         boxes = torch.tensor([[0.0, 0.0, 10.0, 10.0]])
         loss = generalized_box_iou_loss(boxes, boxes)
@@ -302,7 +302,7 @@ class TestDecoderAndCriterion:
         assert degenerate["loss_vfl"].item() > 0
 
     def test_matched_pair_iou_sanitizes_degenerate_boxes(self):
-        from autovision.tasks.detection.components.dfine_utils import (
+        from autovision.tasks.detection.shared.dfine_utils import (
             matched_pair_iou,
         )
 
@@ -611,7 +611,7 @@ class TestDFINESIoUCriterion:
         assert "loss_siou_aux_0" in losses
 
     def test_siou_value_matches_box_ops_on_matched_pairs(self):
-        from autovision.tasks.detection.components.rtdetrv2_criterion import (
+        from autovision.tasks.detection.shared.rtdetrv2_criterion import (
             _cxcywh_to_xyxy_unit,
         )
 

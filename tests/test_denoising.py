@@ -6,16 +6,16 @@ from __future__ import annotations
 import pytest
 import torch
 
-from autovision.tasks.detection.components.denoising import (
-    get_cdn_matched_indices,
-    get_contrastive_denoising_training_group,
-)
-from autovision.tasks.detection.components.rtdetrv2_decoder import (
-    RTDETRv2Decoder,
-)
 from autovision.tasks.detection.rtdetr import (
     RTDETRObjectDetectionTrain,
     RTDETRObjectDetectionTrainArgs,
+)
+from autovision.tasks.detection.shared.denoising import (
+    get_cdn_matched_indices,
+    get_contrastive_denoising_training_group,
+)
+from autovision.tasks.detection.shared.rtdetrv2_decoder import (
+    RTDETRv2Decoder,
 )
 
 pytestmark = pytest.mark.filterwarnings("ignore::UserWarning")
@@ -295,7 +295,7 @@ class TestReviewFixes:
             }
         ]
         embed = torch.nn.Embedding(11, 32)
-        from autovision.tasks.detection.components.denoising import (
+        from autovision.tasks.detection.shared.denoising import (
             box_cxcywh_to_xyxy,
         )
 

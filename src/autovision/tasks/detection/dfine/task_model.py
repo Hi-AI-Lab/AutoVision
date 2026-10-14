@@ -5,11 +5,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from autovision.tasks.detection.components.dfine_decoder import (
-    DFINEv2Decoder,
-)
 from autovision.tasks.detection.rtdetr.task_model import (
     RTDETRObjectDetection,
+)
+from autovision.tasks.detection.shared.dfine_decoder import (
+    DFINEv2Decoder,
 )
 
 __all__ = ["DFINEObjectDetection"]

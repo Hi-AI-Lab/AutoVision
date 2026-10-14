@@ -35,7 +35,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from autovision.tasks.detection.components.rtdetrv2_decoder import (
+from autovision.tasks.detection.shared.rtdetrv2_decoder import (
     get_activation,
 )
 

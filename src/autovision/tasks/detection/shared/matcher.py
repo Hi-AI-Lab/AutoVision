@@ -15,7 +15,7 @@ import torch
 from scipy.optimize import linear_sum_assignment
 from torch import nn
 
-from autovision.tasks.detection.components.box_ops import (
+from autovision.geometry.box_ops import (
     clip_normalize_boxes,
     generalized_box_iou_loss,
 )

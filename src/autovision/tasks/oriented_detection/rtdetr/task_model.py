@@ -7,12 +7,12 @@ from typing import Any
 
 import torch
 
-from autovision.tasks.detection.components.obb_decoder import (
-    OrientedRTDETRDecoder,
-    decode_oriented_detection_outputs,
-)
 from autovision.tasks.detection.rtdetr.task_model import (
     RTDETRObjectDetection,
+)
+from autovision.tasks.oriented_detection.shared.obb_decoder import (
+    OrientedRTDETRDecoder,
+    decode_oriented_detection_outputs,
 )
 from autovision.tasks.task_model_io import BaseModelOutput
 

@@ -128,7 +128,7 @@ class TaskNetwork(nn.Module):
         ``resize`` mode), so decoded boxes land back in the tile's original
         frame before the offset to the original image.
         """
-        from autovision.tasks.detection.components.tiling_utils import (
+        from autovision.tasks.shared.tiling_utils import (
             combine_object_detection_tiles,
             tile_image,
         )

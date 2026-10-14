@@ -42,10 +42,10 @@ import torch.nn.init as init
 from torch import Tensor
 
 from autovision._env import Env
-from autovision.tasks.detection.components.denoising import (
+from autovision.tasks.detection.shared.denoising import (
     get_contrastive_denoising_training_group,
 )
-from autovision.tasks.detection.components.open_vocab import (
+from autovision.tasks.detection.shared.open_vocab import (
     ContrastiveClassHead,
     TextCrossAttention,
 )
@@ -156,7 +156,7 @@ def deformable_attention_core_func_v2(
         # Fused MSDA op (opt-in via AUTOVISION_MSDA_CROSS_ATTN=1): same
         # bilinear math as the "default" grid_sample path in one kernel.
         # Our value layout (bs, Len, heads, C) is already the op's.
-        from autovision.tasks.detection.components.msda import (
+        from autovision.tasks.detection.shared.msda import (
             ms_deform_attn_cuda,
         )
 
