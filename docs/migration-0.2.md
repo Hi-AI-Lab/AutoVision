@@ -97,7 +97,7 @@ docs/ 历史分册中的 LT-DETR 表述（历史名，新文档首行已注）�
 | `EmbeddingModel`（`embedding_model.py`，模块名不变） | `FeatureExtractor` |
 | `teachers.get_teacher` | `teachers.build_teacher` |
 
-## 0.3 任务优先目录重组（design doc 29，2026-10-15）
+## 0.3 任务优先目录重组（design doc 30，2026-10-15）
 
 `tasks/` 一级改为按任务类型分组、二级按模型家族，公开 API 与全部类名
 不变；旧包路径的导出/checkpoint 由
