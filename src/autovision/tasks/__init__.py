@@ -4,7 +4,7 @@
 First level = task type (detection, oriented_detection, segmentation
 tasks, classification, depth/pose scaffolds); second level = model family.
 ``eomt/`` and ``shared/`` hold architecture cores / training infrastructure
-spanning multiple tasks (design doc 29).
+spanning multiple tasks (design doc 30).
 """
 
 from autovision.tasks.detection.rtdetr import (

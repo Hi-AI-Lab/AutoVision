@@ -28,7 +28,7 @@ _CLASS_PATH_MIGRATIONS: dict[str, str] = {}
 # Module-path prefix migrations: exports/checkpoints embed the class path
 # of the code that trained them; when a task package moves, old payloads
 # keep loading by rewriting the module prefix (class names unchanged).
-# Design doc 29 (task-first layout, 2026-10-15): flat packages regrouped
+# Design doc 30 (task-first layout, 2026-10-15): flat packages regrouped
 # under per-task directories; detection families drop the redundant
 # ``_object_detection`` suffix.
 _MODULE_PATH_MIGRATIONS: tuple[tuple[str, str], ...] = (

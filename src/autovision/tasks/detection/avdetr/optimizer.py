@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
 """AV-DETR optimizer construction: param groups + warmup scheduler.
 
-Extracted verbatim from ``TrainModel.get_optimizer`` (design doc 29
+Extracted verbatim from ``TrainModel.get_optimizer`` (design doc 30
 stage 4) so the grouping policy is testable without instantiating the
 train wrapper.
 """

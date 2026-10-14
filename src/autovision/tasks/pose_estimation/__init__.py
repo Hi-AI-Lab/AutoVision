@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
 """Pose estimation task (keypoint-based, e.g. 2D human/body-part pose).
 
-Planned family layout (design doc 29, task-first tree). One directory per
+Planned family layout (design doc 30, task-first tree). One directory per
 model family, each following the standard four-module template:
 
     <family>/

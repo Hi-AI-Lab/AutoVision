@@ -2,7 +2,7 @@
 """Pure geometry math shared across augment / metrics / tasks layers.
 
 No torch.nn modules and no framework imports beyond torch itself, so every
-layer may import downward from here (design doc 29: this retires the two
+layer may import downward from here (design doc 30: this retires the two
 ``ALLOWED_UPWARD`` debts for box math).
 """
 

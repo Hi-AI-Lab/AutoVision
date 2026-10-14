@@ -1,4 +1,7 @@
-# 29 · tasks 任务优先目录重组（task-first layout, as-built）
+# 30 · tasks 任务优先目录重组（task-first layout, as-built）
+
+> 编号说明：初稿误用 29，与并行分册《29 · AV-DETR productization roadmap》
+> 撞号，落地时改为 30。提交信息中的 "design doc 29" 均指本文。
 
 日期：2026-10-15。状态：**已落地**（四个阶段提交，验收见 §5）。
 取代设计文档 28 §4 中 `tasks/` 一节的目标树；28 的其余内容（溯源整改、
