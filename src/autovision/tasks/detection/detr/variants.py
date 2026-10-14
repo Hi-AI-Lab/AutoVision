@@ -8,7 +8,8 @@ DINOv2 sizes accept the package suffixes (``-noreg``, ``-notpretrained``).
 ``detr/dinov2-vittest-notpretrained`` is a tiny offline test variant
 (mirrors the baseline ``ViTTest``).
 
-Variants mirror the baseline registry (lightly-train 0.17.0):
+Variants mirror the published baseline registry (lineage:
+``docs/provenance/LEDGER.md``):
 
 - **DINOv2 ViT** (patch 14): NoSTA wrapper — no spatial-prior fusion, the
   semantic taps are projected straight to ``hidden_dim``.
@@ -81,7 +82,7 @@ class DETRVariantSpec:
     requires_dinov3: bool = False
     #: Default decoder; baseline "v2" (ECViT) variants ship the official
     #: D-FINE decoder ("dfine_official", weight-compatible with the
-    #: published lightly-train D-FINE checkpoints), the fork's Dome-line
+    #: published baseline D-FINE checkpoints), the fork's Dome-line
     #: variants "dfine" (RT-DETRv2-based port).
     decoder_default: Literal["rtdetrv2", "dfine", "dfine_official"] = "rtdetrv2"
     #: Per-variant default for ``backbone_lr_factor`` ("auto" resolution).

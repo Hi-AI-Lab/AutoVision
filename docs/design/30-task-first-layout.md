@@ -35,7 +35,7 @@ src/autovision/tasks/
 │   ├── shared/              # RT-DETR/DFINE 架构核（原 components 主体，
 │   │                        #   含 msda + _msda_src CUDA 源）
 │   ├── detr/                # 自研主家族（原 avdetr，2026-10-15 再更名）
-│   └── rtdetr/ dfine/ deimv2/ rfdetr/ picodet/         # 去后缀
+│   └── rtdetr/ dfine/ rfdetr/ picodet/                 # 去后缀
 ├── oriented_detection/      # OBB 提升为同级任务
 │   ├── shared/              #   obb_decoder obb_criterion
 │   └── rtdetr/              #   原 rtdetr_oriented_object_detection
@@ -123,3 +123,10 @@ env/logging/checkpoint/torch_compile，去前缀）。`types/errors/scaling/
 _version/_license/_compat` 保留顶层：公共基座、跨层共享与元信息各有
 明确身份。`_torch_compile→config` 分层债务条目随迁改为
 `runtime.torch_compile→config`。
+
+## 10. 附记：DEIMv2 家族删除（2026-10-15）
+
+方向调整。家族包/CLI 分派/pyproject extra/测试/脚本移除；DEIM 上游的
+收编组件（defe/mwas/flat_cosine）与版权归属声明按 Apache-2.0 §4a 保留；
+DEIMv2 公共权重 artifact 留在 encoders 侧供蒸馏教师链路。详见
+`docs/migration-0.2.md` 对应节。

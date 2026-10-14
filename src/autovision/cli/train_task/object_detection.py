@@ -115,8 +115,8 @@ def train_object_detection(
     # 2. model args (num_classes inferred from the data). The model string
     # dispatches the detection family: "rtdetr/*" (default), "detr/*"
     # (SSL-backbone DETR), "dfine/*" (distributional refinement),
-    # "rfdetr/*" (RF-DETR via HF transformers), "deimv2/*" (DEIMv2 via HF
-    # transformers) or "picodet/*" (dense anchor-point PicoDet).
+    # "rfdetr/*" (RF-DETR via HF transformers) or "picodet/*" (dense
+    # anchor-point PicoDet).
     # "ltdetr/*" is the deprecated pre-R16 family key, kept as an alias.
     is_detr = isinstance(model, str) and (
         model.startswith("detr/") or model.startswith("ltdetr/")
@@ -124,7 +124,6 @@ def train_object_detection(
     is_dfine = isinstance(model, str) and model.startswith("dfine/")
     is_picodet = isinstance(model, str) and model.startswith("picodet/")
     is_rfdetr = isinstance(model, str) and model.startswith("rfdetr/")
-    is_deimv2 = isinstance(model, str) and model.startswith("deimv2/")
     if is_detr:
         if isinstance(model, str) and (
             model.startswith("avdetr/") or model.startswith("ltdetr/")
@@ -175,17 +174,6 @@ def train_object_detection(
         family_model_args = {
             "model": model.split("/", 1)[1], **(model_args or {})
         }
-    elif is_deimv2:
-        from autovision.tasks.detection.deimv2 import (
-            Deimv2ObjectDetectionTrain,
-            Deimv2ObjectDetectionTrainArgs,
-        )
-
-        args_cls = Deimv2ObjectDetectionTrainArgs
-        train_cls = Deimv2ObjectDetectionTrain
-        family_model_args = {
-            "model": model.split("/", 1)[1], **(model_args or {})
-        }
     else:
         args_cls = RTDETRObjectDetectionTrainArgs
         train_cls = RTDETRObjectDetectionTrain
@@ -193,9 +181,9 @@ def train_object_detection(
     resolved_model_args = pydantic_model_validate(
         args_cls, {"num_classes": num_classes, **family_model_args}
     )
-    if is_detr or is_rfdetr or is_deimv2:
+    if is_detr or is_rfdetr:
         # Snap the image size to the backbone's patch grid (640 -> 644 for
-        # patch-14 backbones; "auto" -> variant-native for rfdetr/deimv2)
+        # patch-14 backbones; "auto" -> variant-native for rfdetr)
         # BEFORE the transform pipeline reads it.
         resolved_model_args.resolve_image_size()
     default_image_size = resolved_model_args.image_size

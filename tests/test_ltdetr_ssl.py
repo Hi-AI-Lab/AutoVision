@@ -306,7 +306,7 @@ def test_match_cross_view_optimal_under_permutation():
 
 def test_match_cross_view_drops_low_iou_and_label_mismatch():
     boxes1 = torch.tensor([[0.0, 0.0, 1.0, 1.0], [2.0, 2.0, 3.0, 3.0]])
-    # View 2: box 0 overlaps slightly (IoU < 0.55); box 1 overlaps fully but
+    # View 2: box 0 overlaps a little (IoU < 0.55); box 1 overlaps fully but
     # carries a different label.
     boxes2 = torch.tensor([[0.9, 0.9, 1.9, 1.9], [2.0, 2.0, 3.0, 3.0]])
     labels1 = torch.tensor([0, 1])

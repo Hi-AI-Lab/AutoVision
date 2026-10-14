@@ -11,7 +11,8 @@ DINOv2 sizes accept the package suffixes (``-noreg``, ``-notpretrained``).
 ``detr/dinov2-vittest-notpretrained`` is a tiny offline test variant
 (mirrors the baseline ``ViTTest``).
 
-Variants mirror the baseline registry (lightly-train 0.17.0):
+Variants mirror the published baseline registry (lineage:
+``docs/provenance/LEDGER.md``):
 
 - **DINOv2 ViT** (patch 14): NoSTA wrapper — no spatial-prior fusion, the
   semantic taps are projected straight to ``hidden_dim``.
@@ -553,8 +554,8 @@ class DETRObjectDetectionTrainArgs(TrainModelArgs, PydanticConfig):
     #: baseline checkpoints share the spec width, so ``None`` is correct
     #: there (vitt16 192 / vits16 224 / vitt16plus 256).
     decoder_hidden_dim: int | None = None
-    #: Optional path to a published baseline DETR detector checkpoint
-    #: (lightly-train "…-ltdetr-coco" .pt): warm-starts backbone + encoder
+    #: Optional path to a legacy baseline DETR detector checkpoint
+    #: (the published "…-ltdetr-coco" .pt files): warm-starts backbone + encoder
     #: + decoder for both families (ConvNeXt via the old-ConvNeXt remap,
     #: ViT via the Meta-ViT remap including the STA wrapper extras).
     #: Requires the baseline-faithful shapes (ConvNeXt: decoder_hidden_
@@ -567,7 +568,7 @@ class DETRObjectDetectionTrainArgs(TrainModelArgs, PydanticConfig):
     #: ("dfine_official" for the ECViT "v2" variants, else "rtdetrv2").
     #: "dfine" is the fork's RT-DETRv2-based D-FINE port (Dome line);
     #: "dfine_official" is the official gateway-based D-FINE decoder,
-    #: weight-compatible with the published lightly-train D-FINE
+    #: weight-compatible with the published baseline D-FINE
     #: checkpoints.
     decoder: Literal["rtdetrv2", "dfine", "dfine_official", "auto"] = "auto"
     #: D-FINE per-side bin resolution (``reg_max + 1`` bins).
@@ -623,8 +624,8 @@ class DETRObjectDetectionTrainArgs(TrainModelArgs, PydanticConfig):
     #: SIoU shape-cost exponent (paper experience value 4; no per-dataset search).
     siou_theta: float = Field(default=4.0, gt=0.0)
 
-    #: "auto" follows the backbone-family recipe (baseline lightly-train
-    #: 0.17.0): DINOv2 ViT 1e-4, CNN 5e-4.
+    #: "auto" follows the backbone-family baseline recipe:
+    #: DINOv2 ViT 1e-4, CNN 5e-4.
     lr: float | Literal["auto"] = "auto"
     #: "auto" resolves to the per-variant recipe default (baseline: 0.05
     #: for small/tiny models, 0.0025 for the larger ECViT models).

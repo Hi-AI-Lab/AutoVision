@@ -33,7 +33,7 @@ DATA_ARGS = {
             "images": str(VISDRONE / "VisDrone2019-DET-val/images")},
 }
 #: The SHA256-verified full published checkpoint (backbone + encoder +
-#: decoder). Same file as /tmp/lightly_ckpts/... copied into the weight dir.
+#: decoder). Copied from the local checkpoint cache into the weight dir.
 DETECTOR_CHECKPOINT = Path(
     "/home/hdjs/Research/Project/Dino-Dome-Research/weight/dinov3"
     "/dinov3_convnext_tiny_ltdetr_coco_full.pt"

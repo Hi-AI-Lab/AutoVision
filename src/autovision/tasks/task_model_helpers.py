@@ -60,8 +60,6 @@ _MODULE_PATH_MIGRATIONS: tuple[tuple[str, str], ...] = (
      "autovision.optim.optimizer_type."),
     ("autovision.tasks.detection.dfine_object_detection.",
      "autovision.tasks.detection.dfine."),
-    ("autovision.tasks.detection.deimv2_object_detection.",
-     "autovision.tasks.detection.deimv2."),
     ("autovision.tasks.detection.rfdetr_object_detection.",
      "autovision.tasks.detection.rfdetr."),
     ("autovision.tasks.detection.picodet_object_detection.",

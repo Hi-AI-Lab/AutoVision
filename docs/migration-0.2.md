@@ -58,13 +58,14 @@ _system / _torch_compile / types / errors / _version`。
   上行 import 需在 `ALLOWED_UPWARD` 带理由登记（当前 8 项共享工具类债务）。
 - `scripts/check_provenance.py`：§7.2 禁词 + 相似度双模式。
 
-## 仍待办（Phase 3 收尾，见台账）
+## 仍待办（Phase 4，见台账）
 
-- R16 检测器族更名（`ltdetr_object_detection` → 终名待定），含 registry
-  键 alias。
 - Phase 4 资产切换后，`DownloadableModel.license` 从可选转必填。
 
 ## 检测器族更名（R16，已落地）
+
+> 注：`AV-DETR` 为中间名，2026-10-15 已再次更名为 **DETR**（见下文
+> 「检测器族更名：AV-DETR → DETR」节）；本节保留 R16 当时的映射记录。
 
 检测器族 LT-DETR → **AV-DETR**（LT 即 Lightly Train 缩写，R16 去品牌化）：
 
@@ -154,3 +155,15 @@ detr_image_size_divisor`；19 个 `scripts/visdrone_avdetr_*` 更名
 `LEGACY_CLASS_PATH_REMAP` 三代历史键的**目标**更新为 detr 路径，
 键不变。基线资产文件名（`*_ltdetr_coco_*.pt`，Lightly S3 外部键）
 照旧不改。历史表述"LT-DETR / AV-DETR"在 docs/ 历史分册中保留。
+
+## DEIMv2 家族删除（2026-10-15，紧随 FSDC）
+
+`tasks/detection/deimv2/`、registry 键 `deimv2/*`、CLI 分派分支、
+pyproject `deimv2` extra、`tests/test_deimv2_object_detection.py` 与
+`scripts/visdrone_deimv2_800.py` 移除；`_MODULE_PATH_MIGRATIONS` 的
+deimv2 条目随目标失效而删除。**保留**：`detection/shared/{defe,mwas}.py`
+（DEIM 上游收编组件，detr 家族在用）、`shared/flat_cosine.py` 的 DEIM
+谱系声明与 `detr/backbone_wrappers.py` 的 DEIMv2 版权归属（Apache-2.0
+§4a 义务）；`encoders/weight_hashes.py` 的 DEIMv2 公共权重 artifact
+（蒸馏教师链路，encoders 侧，不依赖任务家族）。旧 DEIMv2 导出自此
+不可加载。

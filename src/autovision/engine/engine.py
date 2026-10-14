@@ -766,7 +766,7 @@ class TaskEngine(Engine):
             # mode (no denoising groups, truncated aux losses, frozen BN
             # stats, no dropout). Pure-nn.Module constructors are unaffected
             # (train is the nn.Module default), which is why this only
-            # surfaced on the HF-wrapped families (deimv2 / rfdetr).
+            # surfaced on the HF-wrapped families (rfdetr).
             train_model.train()
             for step in range(start_step, steps):
                 with otel_span("engine.step", {"step": step}):

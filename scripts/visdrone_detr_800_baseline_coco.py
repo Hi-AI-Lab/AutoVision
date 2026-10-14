@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
 """VisDrone LT-DETR at 800x800 — FULL COCO-detector warm start (baseline arch).
 
-Loads the published lightly-train LT-DETR COCO detector checkpoint
+Loads the published baseline LT-DETR COCO detector checkpoint
 (``dinov3_convnext_tiny_ltdetr_coco_251218_35bbc4fb.pt``, SHA256 verified)
 into backbone + encoder + decoder. The checkpoint's architecture dictates
 the model — the BASELINE shapes, not the Dome-S twin's:
@@ -39,7 +39,7 @@ DATA_ARGS = {
             "images": str(VISDRONE / "VisDrone2019-DET-val/images")},
 }
 #: The SHA256-verified full published checkpoint (backbone + encoder +
-#: decoder). Same file as /tmp/lightly_ckpts/... copied into the weight dir.
+#: decoder). Copied from the local checkpoint cache into the weight dir.
 DETECTOR_CHECKPOINT = Path(
     "/home/hdjs/Research/Project/Dino-Dome-Research/weight/dinov3"
     "/dinov3_convnext_tiny_ltdetr_coco_full.pt"

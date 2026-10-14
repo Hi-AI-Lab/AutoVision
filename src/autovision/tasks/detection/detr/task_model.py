@@ -462,7 +462,7 @@ class DETRObjectDetection(ONNXExportMixin, TaskNetwork):
             )
         if decoder == "dfine_official":
             # Official gateway-based D-FINE decoder: the architecture the
-            # published lightly-train D-FINE COCO checkpoints (ECViT
+            # published baseline D-FINE COCO checkpoints (ECViT
             # family) were trained with. Weight-compatible via
             # detector_checkpoint; density/SSL stay fork-"dfine"-only.
             self.decoder = DFINEOfficialDecoder(**decoder_kwargs, reg_max=reg_max, reg_scale=reg_scale)
