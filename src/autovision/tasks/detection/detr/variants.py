@@ -2,7 +2,7 @@
 """DETR variant registry: ``detr/<backbone>`` architecture specs.
 
 Model names follow ``detr/<backbone>`` where ``<backbone>`` resolves
-against the backbone packages (``dinov2``, ``dinov3``, ``edgecrafter``),
+against the backbone packages (``dinov2``, ``dinov3``),
 e.g. ``detr/dinov2-vits14`` or ``detr/dinov3-convnext-tiny``. All
 DINOv2 sizes accept the package suffixes (``-noreg``, ``-notpretrained``).
 ``detr/dinov2-vittest-notpretrained`` is a tiny offline test variant
@@ -16,9 +16,7 @@ Variants mirror the published baseline registry (lineage:
 - **DINOv3 ViT** (patch 16, incl. the tiny ``vitt16``/``vitt16plus``
   distillations): STA wrapper with ``conv_inplane = factor x patch_size``.
 - **DINOv3 ConvNeXt**: last-three-stage taps, whole backbone at backbone LR.
-- **EdgeCrafter ECViT** (patch 16): pass-through wrapper; these variants
-  default to the D-FINE decoder (baseline "v2" family). The published
-  ``-eupe`` names are aliases of the same architectures.
+  The published ``-eupe`` names are architecture aliases of these configs.
 
 Encoder/decoder recipes (hidden dims, FFN widths, expansion/depth
 multipliers, sampling points, layer counts) are carried per variant in
@@ -51,12 +49,11 @@ __all__ = [
 class DETRVariantSpec:
     """Static per-variant architecture recipe (baseline-faithful)."""
 
-    backbone_package: str  # "dinov2" | "dinov3" | "edgecrafter"
+    backbone_package: str  # "dinov2" | "dinov3"
     backbone_name: str  # name inside the backbone package (suffixes allowed)
-    family: Literal["vit", "convnext", "ecvit"]
+    family: Literal["vit", "convnext"]
     patch_size: int
-    #: 0-based ViT block taps; unused for convnext (stage taps). ECViT
-    #: averages two taps, so the tuple length is family-dependent.
+    #: 0-based ViT block taps; unused for convnext (stage taps).
     interaction_indexes: tuple[int, ...]
     #: CNN spatial-prior fusion (baseline: on for DINOv3 ViT, off for DINOv2).
     use_sta: bool
@@ -80,10 +77,9 @@ class DETRVariantSpec:
     project_features: bool = True
     #: convnext/vit dinov3 variants need transformers to ship DINOv3.
     requires_dinov3: bool = False
-    #: Default decoder; baseline "v2" (ECViT) variants ship the official
-    #: D-FINE decoder ("dfine_official", weight-compatible with the
-    #: published baseline D-FINE checkpoints), the fork's Dome-line
-    #: variants "dfine" (RT-DETRv2-based port).
+    #: Default decoder; "dfine_official" ships the official D-FINE decoder
+    #: (weight-compatible with the published baseline D-FINE checkpoints),
+    #: the fork's Dome-line variants "dfine" (RT-DETRv2-based port).
     decoder_default: Literal["rtdetrv2", "dfine", "dfine_official"] = "rtdetrv2"
     #: Per-variant default for ``backbone_lr_factor`` ("auto" resolution).
     backbone_lr_factor: float = 0.05
@@ -177,40 +173,6 @@ _CONVNEXT_SIZES: dict[str, dict[str, Any]] = {
     "convnext-large": dict(hidden_dim=384, dec_layers=6),
 }
 
-_ECVIT_SIZES: dict[str, dict[str, Any]] = {
-    "ecvitt": dict(
-        hidden_dim=192,
-        enc_dim_feedforward=512,
-        enc_expansion=0.34,
-        enc_depth_mult=0.67,
-        dec_dim_feedforward=512,
-        backbone_lr_factor=0.05,
-    ),
-    "ecvittplus": dict(
-        hidden_dim=256,
-        enc_dim_feedforward=512,
-        enc_expansion=0.67,
-        enc_depth_mult=1.0,
-        dec_dim_feedforward=512,
-        backbone_lr_factor=0.0025,
-    ),
-    "ecvits": dict(
-        hidden_dim=256,
-        enc_dim_feedforward=512,
-        enc_expansion=0.67,
-        enc_depth_mult=1.0,
-        dec_dim_feedforward=512,
-        backbone_lr_factor=0.0025,
-    ),
-    "ecvitsplus": dict(
-        hidden_dim=256,
-        enc_dim_feedforward=512,
-        enc_expansion=0.67,
-        enc_depth_mult=1.0,
-        dec_dim_feedforward=512,
-        backbone_lr_factor=0.0025,
-    ),
-}
 
 
 def _build_registry() -> dict[str, DETRVariantSpec]:
@@ -288,29 +250,6 @@ def _build_registry() -> dict[str, DETRVariantSpec]:
             dec_num_points=(4, 4, 4),
             requires_dinov3=True,
         )
-    # EdgeCrafter ECViT variants (baseline "v2"): pass-through backbone,
-    # D-FINE decoder by default.
-    for size, info in _ECVIT_SIZES.items():
-        registry[f"edgecrafter-{size}"] = DETRVariantSpec(
-            backbone_package="edgecrafter",
-            backbone_name=size,
-            family="ecvit",
-            patch_size=16,
-            interaction_indexes=(10, 11),  # averaged by the wrapper itself
-            use_sta=False,
-            conv_inplane=0,
-            hidden_dim=info["hidden_dim"],
-            enc_dim_feedforward=info["enc_dim_feedforward"],
-            enc_expansion=info["enc_expansion"],
-            enc_depth_mult=info["enc_depth_mult"],
-            dec_dim_feedforward=info["dec_dim_feedforward"],
-            # Baseline "v2" parity: the official gateway D-FINE decoder —
-            # the architecture the published EdgeCrafter "-ltdetr-coco"
-            # checkpoints were trained with (weight-compatible warm start).
-            decoder_default="dfine_official",
-            backbone_lr_factor=info["backbone_lr_factor"],
-        )
-
     # Published "-eupe" names are architecture aliases (baseline registers
     # them against the same configs).
     aliases = {

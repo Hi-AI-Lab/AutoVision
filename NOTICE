@@ -65,9 +65,14 @@ framework never downloads those weights by default and does not
 redistribute them: loading a pretrained DINOv3 checkpoint requires the
 environment flag AUTOVISION_DINOV3_WEIGHTS=1, which asserts that the USER
 has accepted Meta's DINOv3 License terms on their own account. Any model
-trained from DINOv3-initial weights inherits those license obligations;
-prefer the Apache-2.0 lines (DINOv2, EdgeCrafter/ECViT) when the DINOv3
-distillation gains are not required.
+trained from DINOv3-initial weights inherits those license obligations
+(commercial use is permitted with redistribution notice: attach the
+license and mark "Built with DINOv3"). Prefer the DINOv2 line when the
+DINOv3 distillation gains are not required — but note DINOv2's HF
+pretrained WEIGHTS are CC-BY-NC 4.0 (non-commercial; only its code is
+Apache-2.0). The fully clean path for unrestricted use is DINOv2
+``-notpretrained`` plus this framework's own self-supervised pretraining
+on your data.
 
 Runtime dependencies (not vendored) carry their own licenses; see
 pyproject.toml. Optional integrations with AGPL-licensed or custom-licensed

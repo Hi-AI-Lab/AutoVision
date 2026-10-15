@@ -13,7 +13,7 @@
 | 变换 | `augment/`(ViewTransform 管线、MethodTransform 多视图协议、参数模型 + auto 解析) | §9.5 |
 | 方法层 | `pretext/`(**DistillationV3** 全规格、**SimCLR**(自研 NT-Xent)、**DINO**(EMA 教师 + 中心化损失 + 多裁剪 + 动量/温度/权重衰减三调度 + 末层冻结)、**kNN 探针**(`method_args.knn_eval`)) | §7 |
 | 运行时 | `engine/`(step 循环、预训练与**任务训练双 DDP**、混合精度、原子 checkpoint、resume、`on_before_optimizer_step` 钩子)、`_checkpoint.py`(自描述格式) | §10 |
-| 任务层 | 检测(RT-DETRv2 + **AV-DETR SSL 骨干微调**:`avdetr/dinov2-vits14` 等 37 变体(原 LT-DETR,R16 更名),ViT 中间层 tap + STA 空间先验 + 骨干/detector 分组 LR,打通自家预训练骨干 → 检测微调闭环;D-FINE 解码器与 ECViT 骨干在路线图)、**分类(ImageFolder + top-k 指标)**、**分割(线性头 + mIoU/混淆矩阵)**;任务指标支持跨 rank 状态汇聚(DDP 验证) | §8 |
+| 任务层 | 检测(RT-DETRv2 + **AV-DETR SSL 骨干微调**:`avdetr/dinov2-vits14` 等 37 变体(原 LT-DETR,R16 更名),ViT 中间层 tap + STA 空间先验 + 骨干/detector 分组 LR,打通自家预训练骨干 → 检测微调闭环;D-FINE 解码器可用)、**分类(ImageFolder + top-k 指标)**、**分割(线性头 + mIoU/混淆矩阵)**;任务指标支持跨 rank 状态汇聚(DDP 验证) | §8 |
 | 部署 | ONNX(FP16 黑名单 + 数值对拍门禁)、**TensorRT 导出**(batch-only profile、attention FP32 强制)、**benchmark**(torch/ONNX/TensorRT backend + 可选 parity 门禁) | §12 |
 | 命令/API | `pretrain`/`train_object_detection`/`train_image_classification`/`train_semantic_segmentation`/`embed`/`benchmark`/`list_models`/`list_methods`/`load_*` | §4 |
 

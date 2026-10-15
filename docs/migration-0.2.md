@@ -167,3 +167,17 @@ deimv2 条目随目标失效而删除。**保留**：`detection/shared/{defe,mwa
 §4a 义务）；`encoders/weight_hashes.py` 的 DEIMv2 公共权重 artifact
 （蒸馏教师链路，encoders 侧，不依赖任务家族）。旧 DEIMv2 导出自此
 不可加载。
+
+## EdgeCrafter/ECViT 骨干线删除（2026-10-15）
+
+`encoders/ecvit/`、encoders 包注册、registry 的 `edgecrafter/{ecvits,
+ecvitt}` Apache 资产、detr 家族全部 edgecrafter 变体与 `ECViTDetectionBackbone`/
+`ECViTModelWrapper` 包装链、`dfine_official_warm_start.py`（ECViT 专用
+装配器）及其测试、`visdrone_detr_800_edgecrafter_coco.py` 移除。
+**连带**：`detr/coco_checkpoint.py` 的 Lightly S3 基线注册表（三条
+`edgecrafter-*_ltdetr-coco` pin 与 `_PUBLISHED_CKPT_BASE_URL`）整体删除
+——商用风险清单中的"Lightly 无许可 S3 权重"代码引用至此归零，allowlist
+对应条目注销；`detector_checkpoint` 仍接受本地文件与 D-FINE COCO 注册
+资产。NOTICE 的骨干线推荐语更新（EdgeCrafter 移除；补记 DINOv2 HF
+权重 CC-BY-NC 的事实）。剩余骨干线：DINOv2、DINOv3（各自许可见 NOTICE）、
+timm/torchvision。

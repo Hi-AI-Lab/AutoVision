@@ -1,9 +1,8 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
-"""Loader for lightly-train published LT-DETR COCO detector checkpoints.
+"""Loader for baseline DETR COCO detector checkpoints.
 
-The published files (e.g. ``dinov3_convnext_tiny_ltdetr_coco_251218_35bbc4fb.pt``,
-SHA256-verified against the lightly-train registry) store the EMA weights of
-the baseline task model::
+A baseline ``.pt`` (a user-held file or a registered D-FINE COCO asset)
+stores the EMA weights of the baseline task model::
 
     {"train_model": {"ema_model.model.<key>": tensor},
      "model_init_args": ..., "model_class_path": ...}
@@ -41,21 +40,11 @@ Wrapper extras (``backbone.sta/convs/norms.*``, ViT checkpoints only)
     are loaded too, strictly, into the target's identically-named
     ``ViTDetectionBackbone`` submodules.
 
-ECViT / EdgeCrafter (``backbone._model_wrapper.*``)
-    The baseline wraps its ECViT model (CNN patch-embed ViT + a single
-    1x1 projector on the last pyramid level) in an identically-structured
-    wrapper, so the relative keys — including the persistent
-    ``rope_embed.periods`` buffer — map 1:1 onto the target's
-    ``ECViTDetectionBackbone``. The ``decoder_name`` of these checkpoints
-    is the OFFICIAL D-FINE decoder (gateway) — build the target with
-    ``decoder="dfine_official"``.
-
 Width contract: the baseline couples a per-variant ENCODER width
 (ConvNeXt: 384; ViT: 224/192/256 — shared with the decoder) with a FIXED
 256 decoder width for ConvNeXt. Load targets must be built with
-``decoder_hidden_dim=256`` for ConvNeXt checkpoints; ViT and ECViT
-checkpoints share the spec width, so ``decoder_hidden_dim=None`` is
-correct there.
+``decoder_hidden_dim=256`` for ConvNeXt checkpoints; ViT checkpoints
+share the spec width, so ``decoder_hidden_dim=None`` is correct there.
 
 Class-count-dependent tensors (``dec_score_head`` / ``enc_score_head`` /
 ``denoising_class_embed``) are skipped when the target model's class count
@@ -75,7 +64,6 @@ import torch
 from autovision.registry.downloadable import (
     ASSET_MANIFEST,
     DownloadableModelError,
-    register_downloadable,
     resolve_downloadable,
 )
 
@@ -85,11 +73,6 @@ __all__ = [
 ]
 
 logger = logging.getLogger("autovision")
-
-#: Host of the published baseline checkpoints (bare filenames below).
-_PUBLISHED_CKPT_BASE_URL = (
-    "https://lightly-train-checkpoints.s3.us-east-1.amazonaws.com"
-)
 
 #: Legacy payload ``model_class_path`` prefixes → current module paths
 #: (design doc 28, section 4.3). Legacy warm-start checkpoints embed the
@@ -122,32 +105,6 @@ def remap_legacy_class_path(class_path: str) -> str:
             return remapped
     return class_path
 
-#: Published ECViT/EdgeCrafter COCO detector checkpoints — the registry's
-#: only D-FINE-decoder family (``decoder="dfine_official"`` targets, with
-#: the decoder width bound to the variant spec, i.e.
-#: ``decoder_hidden_dim=None``). Filenames are bare S3 keys; the sha256
-#: pins mirror the upstream lightly-train registry
-#: (``ltdetr_object_detection/config.py`` ``_ECVIT*_COCO_*``).
-_ECVIT_COCO_CHECKPOINTS: dict[str, tuple[str, str]] = {
-    "edgecrafter-ecvitt-ltdetr-coco": (
-        "edgecrafter_ecvitt_ltdetr_coco_260624_f8aefe49.pt",
-        "f8aefe499be1579c55bfcb288f623399ea5f4efef0c5a5f00960663efeda4f49",
-    ),
-    "edgecrafter-ecvittplus-ltdetr-coco": (
-        "edgecrafter_ecvittplus_ltdetr_coco_260720_723357e9.pt",
-        "723357e921c77f8041f44875f5edce8645412ccc5d13fb7dca93271d525c1641",
-    ),
-    "edgecrafter-ecvits-ltdetr-coco": (
-        "edgecrafter_ecvits_ltdetr_coco_260720_62ff87cd.pt",
-        "62ff87cd792c87e00f53da0c62ae91a63927e0ce2088c5cf018edffa513ccb6c",
-    ),
-}
-
-for _name, (_filename, _sha256) in _ECVIT_COCO_CHECKPOINTS.items():
-    register_downloadable(
-        _name, f"{_PUBLISHED_CKPT_BASE_URL}/{_filename}", _sha256
-    )
-del _name, _filename, _sha256
 
 #: Old ConvNeXt block name -> current HF DINOv3ConvNextModel name.
 _CONVNEXT_RENAME = {
@@ -163,7 +120,6 @@ _CLS_DEPENDENT = ("dec_score_head", "enc_score_head", "denoising_class_embed")
 #: Raw-backbone key prefixes per checkpoint family.
 _CONVNEXT_RAW_PREFIX = "backbone.backbone."
 _VIT_RAW_PREFIX = "backbone.dinov3."
-_ECVIT_RAW_PREFIX = "backbone._model_wrapper."
 
 _BLOCK_RE = re.compile(r"blocks\.(\d+)\.(.+)")
 
@@ -289,27 +245,23 @@ def _partition_baseline_state(
     family).
 
     The raw-backbone prefix selects the family (``backbone.backbone`` =
-    ConvNeXt, ``backbone.dinov3`` = ViT, ``backbone._model_wrapper`` =
-    ECViT — the latter lands whole in "backbone" and loads into the
-    target's detection backbone wrapper by relative name); every other
+    ConvNeXt, ``backbone.dinov3`` = ViT); every other
     ``backbone.*`` key is a wrapper extra (sta/convs/norms) loaded by name
     into the target's detection backbone wrapper.
     """
     has_convnext = any(k.startswith(_CONVNEXT_RAW_PREFIX) for k in state)
     has_vit = any(k.startswith(_VIT_RAW_PREFIX) for k in state)
-    has_ecvit = any(k.startswith(_ECVIT_RAW_PREFIX) for k in state)
-    if sum((has_convnext, has_vit, has_ecvit)) > 1:
+    if has_convnext and has_vit:
         raise ValueError(
             "baseline checkpoint mixes backbone-family keys "
-            f"(convnext={has_convnext}, vit={has_vit}, ecvit={has_ecvit})."
+            f"(convnext={has_convnext}, vit={has_vit})."
         )
-    if not has_convnext and not has_vit and not has_ecvit:
+    if not has_convnext and not has_vit:
         raise ValueError(
             "baseline checkpoint has no recognizable raw-backbone keys "
-            f"(expected '{_CONVNEXT_RAW_PREFIX}*', '{_VIT_RAW_PREFIX}*' or "
-            f"'{_ECVIT_RAW_PREFIX}*')."
+            f"(expected '{_CONVNEXT_RAW_PREFIX}*' or '{_VIT_RAW_PREFIX}*')."
         )
-    family = "convnext" if has_convnext else ("vit" if has_vit else "ecvit")
+    family = "convnext" if has_convnext else "vit"
 
     backbone: dict[str, torch.Tensor] = {}
     extras: dict[str, torch.Tensor] = {}
@@ -325,10 +277,6 @@ def _partition_baseline_state(
             # Collected first: the qkv split needs each block's weight,
             # bias, and bias_mask together.
             vit_raw[key[len(_VIT_RAW_PREFIX):]] = value
-        elif key.startswith(_ECVIT_RAW_PREFIX):
-            # Relative keys match the fork's ECViT wrapper 1:1 (including
-            # the persistent rope periods buffer).
-            backbone[key[len("backbone."):]] = value
         elif key.startswith("backbone."):
             extras[key[len("backbone."):]] = value
         elif key.startswith("encoder."):
@@ -403,50 +351,28 @@ def load_baseline_coco_checkpoint(
 
     summary: dict[str, int] = {}
 
-    if family == "ecvit":
-        # The ECViT relative keys already match the target's
-        # ECViTBackboneWrapper 1:1 (fork-vendored module, no transformers
-        # layout drift); load the whole wrapper state strictly-in-effect.
+    # 1) backbone — strict: the remapped set IS the HF model's key set.
+    hf_model = task_model.backbone_wrapper._model
+    summary["backbone"] = _load_into_hf_model(hf_model, backbone_sd, family)
+
+    # 2) wrapper extras (ViT STA prior / projections / norms) — every
+    #    key must exist in the wrapper by name (they were trained
+    #    during the COCO run); the rest of the wrapper (the raw HF
+    #    model) was loaded in step 1.
+    if extras_sd:
         wrapper = task_model.backbone
         wrapper_keys = set(wrapper.state_dict().keys())
-        unknown = sorted(set(backbone_sd) - wrapper_keys)
+        unknown = sorted(set(extras_sd) - wrapper_keys)
         if unknown:
             raise ValueError(
-                f"baseline ECViT backbone keys not found in the target "
-                f"({type(wrapper).__name__}): {unknown[:5]}"
+                f"baseline checkpoint carries wrapper extras that the "
+                f"target backbone ({type(wrapper).__name__}) does not "
+                f"define (first keys: {unknown[:5]}) — build the model "
+                "with the checkpoint's wrapper recipe (STA fusion on, "
+                "matching conv_inplane/hidden_dim)."
             )
-        missing = sorted(wrapper_keys - set(backbone_sd))
-        if missing:
-            raise ValueError(
-                f"baseline ECViT checkpoint is missing target keys (would "
-                f"stay randomly initialized): {missing[:5]}"
-            )
-        wrapper.load_state_dict(backbone_sd, strict=True)
-        summary["backbone"] = len(backbone_sd)
-        summary["backbone_extras"] = 0
-    else:
-        # 1) backbone — strict: the remapped set IS the HF model's key set.
-        hf_model = task_model.backbone_wrapper._model
-        summary["backbone"] = _load_into_hf_model(hf_model, backbone_sd, family)
-
-        # 2) wrapper extras (ViT STA prior / projections / norms) — every
-        #    key must exist in the wrapper by name (they were trained
-        #    during the COCO run); the rest of the wrapper (the raw HF
-        #    model) was loaded in step 1.
-        if extras_sd:
-            wrapper = task_model.backbone
-            wrapper_keys = set(wrapper.state_dict().keys())
-            unknown = sorted(set(extras_sd) - wrapper_keys)
-            if unknown:
-                raise ValueError(
-                    f"baseline checkpoint carries wrapper extras that the "
-                    f"target backbone ({type(wrapper).__name__}) does not "
-                    f"define (first keys: {unknown[:5]}) — build the model "
-                    "with the checkpoint's wrapper recipe (STA fusion on, "
-                    "matching conv_inplane/hidden_dim)."
-                )
-            wrapper.load_state_dict(extras_sd, strict=False)
-            summary["backbone_extras"] = len(extras_sd)
+        wrapper.load_state_dict(extras_sd, strict=False)
+        summary["backbone_extras"] = len(extras_sd)
     summary["backbone_extras"] = summary.get("backbone_extras", 0)
 
     # 3) encoder — strict: the baseline encoder is operator-identical and
@@ -533,8 +459,8 @@ def resolve_detector_checkpoint(source: str | Path) -> Path:
     """Resolve a ``detector_checkpoint`` argument to a verified local file.
 
     An existing file passes through untouched; otherwise the value is
-    looked up in the downloadable registry (published names like
-    ``edgecrafter-ecvitt-ltdetr-coco`` download + sha256-verify into
+    looked up in the downloadable registry (registered asset names like
+    ``d-fine/dfine_s_coco`` download + sha256-verify into
     ``AUTOVISION_CACHE_DIR``). Anything else is an error naming both
     interpretations.
     """

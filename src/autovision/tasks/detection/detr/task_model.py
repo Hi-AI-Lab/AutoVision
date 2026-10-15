@@ -11,7 +11,7 @@ family. Per-variant encoder/decoder recipes come from the registry spec.
 from __future__ import annotations
 
 import pathlib
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
 import torch
 import torch.nn.functional as F
@@ -49,12 +49,8 @@ from autovision.tasks.detection.shared.ssl_contrastive import (
 )
 from autovision.tasks.task_model import TaskNetwork
 
-if TYPE_CHECKING:
-    from autovision.encoders.ecvit.ecvit import ECViTModelWrapper
-
 from .backbone_wrappers import (
     ConvNeXtDetectionBackbone,
-    ECViTDetectionBackbone,
     ViTDetectionBackbone,
 )
 from .config import (
@@ -85,14 +81,6 @@ def _build_vit_test_backbone() -> TransformersDinov2Wrapper:
         num_register_tokens=0,
     )
     return TransformersDinov2Wrapper(transformers.Dinov2Model(config))
-
-
-def _build_ecvit_backbone(
-    spec: DETRVariantSpec, backbone_weights: str | None
-) -> "ECViTModelWrapper":
-    from autovision.encoders.ecvit.ecvit import ECViTModelWrapper
-
-    return ECViTModelWrapper(spec.backbone_name, weights_path=backbone_weights)
 
 
 def _relabel_prefix_drift(state: dict, target: torch.nn.Module) -> dict:
@@ -317,10 +305,6 @@ class DETRObjectDetection(ONNXExportMixin, TaskNetwork):
 
         if spec.backbone_name.startswith("vittest"):
             backbone_wrapper: Any = _build_vit_test_backbone()
-        elif spec.family == "ecvit":
-            backbone_wrapper = _build_ecvit_backbone(
-                spec, backbone_weights=backbone_weights
-            )
         else:
             full_name = f"{spec.backbone_package}/{spec.backbone_name}"
             backbone_wrapper = get_wrapped_model(
@@ -359,8 +343,6 @@ class DETRObjectDetection(ONNXExportMixin, TaskNetwork):
                 project_features=spec.project_features,
                 resize_features=True,
             )
-        elif spec.family == "ecvit":
-            self.backbone = ECViTDetectionBackbone(backbone_wrapper)
         else:
             self.backbone = ConvNeXtDetectionBackbone(
                 backbone_wrapper,
@@ -370,8 +352,7 @@ class DETRObjectDetection(ONNXExportMixin, TaskNetwork):
             )
         in_channels = self.backbone.in_channels
 
-        if backbone_weights is not None and spec.family != "ecvit":
-            # ECViT loads its backbone weights inside the wrapper.
+        if backbone_weights is not None:
             self._load_backbone_weights(backbone_weights)
 
         # Encoder width knobs: "auto" follows the variant spec (the
@@ -462,9 +443,9 @@ class DETRObjectDetection(ONNXExportMixin, TaskNetwork):
             )
         if decoder == "dfine_official":
             # Official gateway-based D-FINE decoder: the architecture the
-            # published baseline D-FINE COCO checkpoints (ECViT
-            # family) were trained with. Weight-compatible via
-            # detector_checkpoint; density/SSL stay fork-"dfine"-only.
+            # published baseline D-FINE COCO checkpoints were trained
+            # with. Weight-compatible via detector_checkpoint;
+            # density/SSL stay fork-"dfine"-only.
             self.decoder = DFINEOfficialDecoder(**decoder_kwargs, reg_max=reg_max, reg_scale=reg_scale)
         elif decoder == "dfine":
             if self._density_enabled:

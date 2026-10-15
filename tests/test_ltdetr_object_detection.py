@@ -75,7 +75,6 @@ class TestRegistry:
         # Baseline-faithful expansions.
         assert "detr/dinov3-vitt16-notpretrained" in names
         assert "detr/dinov3-vits16" in names
-        assert "detr/edgecrafter-ecvitt" in names
 
     def test_resolve_variant(self):
         key, spec = resolve_detr_variant("detr/dinov2-vits14")
@@ -121,15 +120,6 @@ class TestRegistry:
         base = resolve_detr_variant("detr/dinov3-vits16")[1]
         alias = resolve_detr_variant("detr/dinov3-vits16-eupe")[1]
         assert alias is base
-
-    def test_ecvit_variants_default_to_official_dfine(self):
-        _, spec = resolve_detr_variant("detr/edgecrafter-ecvitt")
-        assert spec.family == "ecvit"
-        assert spec.decoder_default == "dfine_official"
-        assert spec.hidden_dim == 192
-        _, plus = resolve_detr_variant("detr/edgecrafter-ecvittplus")
-        assert plus.backbone_lr_factor == 0.0025
-        assert plus.decoder_default == "dfine_official"
 
     def test_convnext_recipes(self):
         _, large = resolve_detr_variant("detr/dinov3-convnext-large")
@@ -683,155 +673,6 @@ class TestCocoCheckpointLoaderViT:
             load_baseline_coco_checkpoint(target, path)
 
 
-class TestCocoCheckpointLoaderEdgeCrafter:
-    """EdgeCrafter (ECViT) baseline COCO detector warm-start.
-
-    The baseline layout equals the fork's ECViT state dict key-for-key
-    (single last-level projector + persistent rope periods), and the
-    decoder is the OFFICIAL gateway D-FINE — so the fake checkpoint is a
-    straight re-prefix of the fork's own state.
-    """
-
-    @staticmethod
-    def _model(num_classes: int, variant: str = "ecvitt", **kwargs):
-        from autovision.tasks.detection.detr.task_model import (
-            DETRObjectDetection,
-        )
-
-        return DETRObjectDetection(
-            num_classes=num_classes,
-            model_name=f"detr/edgecrafter-{variant}",
-            image_size=(128, 128),
-            num_queries=20,
-            load_weights=False,
-            **kwargs,
-        )
-
-    @staticmethod
-    def _fake_checkpoint(model) -> dict:
-        sd = model.state_dict()
-        out: dict[str, torch.Tensor] = {}
-        for key, value in sd.items():
-            if key.startswith("backbone_wrapper."):
-                continue  # duplicate registration of the ECViT wrapper
-            if key.startswith(("backbone.", "encoder.", "decoder.")):
-                out[key] = value
-        return {"train_model": {f"ema_model.model.{k}": v for k, v in out.items()}}
-
-    def test_single_projector_baseline_parity(self):
-        # proj_dim=None resolves to ONE projector (applied to the last
-        # level) — the published-checkpoint layout, not per-level.
-        model = self._model(num_classes=80)
-        wrapper = model.backbone._model_wrapper
-        assert wrapper.proj_dim == [192]
-        assert len(wrapper.projector) == 1
-        assert model.backbone.in_channels == [192, 192, 192]
-        # RoPE periods are persistent (checkpoint round-trip required —
-        # the published values drift ~1e-4 from the formula).
-        sd = wrapper.state_dict()
-        assert "backbone.rope_embed.periods" in sd
-        p3, p4, p5 = wrapper(torch.randn(1, 3, 128, 128))
-        assert p3.shape[-3:] == (192, 16, 16)
-        assert p5.shape[-3:] == (192, 4, 4)
-
-    def test_round_trip_80_classes(self, tmp_path):
-        from autovision.tasks.detection.detr.coco_checkpoint import (
-            load_baseline_coco_checkpoint,
-        )
-
-        source = self._model(num_classes=80)
-        path = tmp_path / "fake_ecvit_baseline.pt"
-        torch.save(self._fake_checkpoint(source), path)
-
-        target = self._model(num_classes=80)
-        summary = load_baseline_coco_checkpoint(target, path)
-        # ecvitt @ 224px spec: backbone 172 (incl. rope periods),
-        # encoder 222, official dfine decoder 159, no cls skips.
-        assert summary == {"backbone": 172, "backbone_extras": 0,
-                           "encoder": 222, "decoder": 159,
-                           "decoder_skipped_cls": 0}
-        src_sd = source.state_dict()
-        tgt_sd = target.state_dict()
-        for key in (
-            "backbone._model_wrapper.backbone.blocks.5.attn.qkv.weight",
-            "backbone._model_wrapper.backbone.rope_embed.periods",
-            "backbone._model_wrapper.projector.0.conv.weight",
-            "encoder.fpn_blocks.0.conv1.conv.weight",
-            "decoder.decoder.layers.0.gateway.gate.weight",
-            "decoder.dec_bbox_head.0.layers.2.weight",
-        ):
-            assert torch.equal(tgt_sd[key], src_sd[key]), key
-
-    def test_skips_class_count_heads(self, tmp_path):
-        from autovision.tasks.detection.detr.coco_checkpoint import (
-            load_baseline_coco_checkpoint,
-        )
-
-        source = self._model(num_classes=80)
-        path = tmp_path / "fake_ecvit_baseline.pt"
-        torch.save(self._fake_checkpoint(source), path)
-
-        target = self._model(num_classes=10)
-        summary = load_baseline_coco_checkpoint(target, path)
-        assert summary["decoder_skipped_cls"] == 11
-        assert not torch.equal(
-            target.state_dict()["decoder.dec_score_head.0.weight"],
-            source.state_dict()["decoder.dec_score_head.0.weight"],
-        )
-        assert torch.equal(
-            target.state_dict()["decoder.decoder.layers.0.self_attn.in_proj_weight"],
-            source.state_dict()["decoder.decoder.layers.0.self_attn.in_proj_weight"],
-        )
-
-    def test_training_step_matches_fork_contract(self):
-        # The official decoder emits the fork's criterion contract and the
-        # full D-FINE loss suite (VFL/bbox/giou/FGL/DDF + dn branches).
-        from autovision.tasks.detection.shared.dfine_criterion import (
-            DFINECriterionV2,
-        )
-        from autovision.tasks.detection.shared.matcher import (
-            HungarianMatcher,
-        )
-
-        model = self._model(num_classes=80)
-        model.train()
-        criterion = DFINECriterionV2(HungarianMatcher(), reg_max=32, reg_scale=4.0)
-        targets = [
-            {"boxes": torch.tensor([[0.5, 0.5, 0.2, 0.3]]),
-             "labels": torch.tensor([3])},
-            {"boxes": torch.tensor([[0.4, 0.4, 0.3, 0.3]]),
-             "labels": torch.tensor([1])},
-        ]
-        out = model._forward_train(torch.randn(2, 3, 128, 128), targets=targets)
-        outputs_list = list(out["aux_outputs"]) + [
-            {"pred_logits": out["pred_logits"], "pred_boxes": out["pred_boxes"]}
-        ]
-        loss_dict = criterion(
-            outputs_list,
-            targets,
-            world_size=1,
-            dn_outputs=out.get("dn_aux_outputs", []),
-            dn_meta=out.get("dn_meta"),
-            corners_list=out.get("pred_corners_list"),
-            ref_boxes_list=out.get("ref_boxes_list"),
-            dn_corners_list=out.get("dn_pred_corners_list"),
-            dn_ref_boxes_list=out.get("dn_ref_boxes_list"),
-            pre_outputs=out.get("pre_outputs"),
-            enc_aux_outputs=out.get("enc_aux_outputs"),
-            enc_meta=out.get("enc_meta"),
-        )
-        assert any("loss_vfl" in k for k in loss_dict)
-        assert any("loss_fgl" in k for k in loss_dict)
-        assert any("loss_ddf" in k for k in loss_dict)
-        sum(loss_dict.values()).backward()
-
-    def test_density_and_ssl_rejected(self):
-        with pytest.raises(ValueError, match="D-FINE"):
-            self._model(num_classes=2, density={"max_num_select": 500})
-        with pytest.raises(ValueError, match="D-FINE"):
-            self._model(num_classes=2, ssl={"mode": "off"})
-
-
 class TestGradientClipping:
     def _train_model_with_ones_grads(self):
         train_model = make_train_model()
@@ -935,7 +776,6 @@ class TestVariantRecipes:
         assert detr_default_batch_size("dinov2-vittest-notpretrained") == 16
         assert detr_default_batch_size("dinov3-convnext-tiny") == 32
         assert detr_default_batch_size("dinov3-vits16-notpretrained") == 32
-        assert detr_default_batch_size("edgecrafter-ecvitt") == 32
 
 
 class TestConvNextOptimizerScaling:
@@ -993,44 +833,6 @@ class TestDecoders:
         assert any("loss_fgl" in key for key in result.log_dict)
         result.loss.backward()
 
-    def test_ecvit_auto_selects_official_dfine(self):
-        from autovision.tasks.detection.shared.dfine_criterion import (
-            DFINECriterionV2,
-        )
-        from autovision.tasks.detection.shared.dfine_official_decoder import (
-            DFINEOfficialDecoder,
-        )
-
-        args = DETRObjectDetectionTrainArgs(
-            num_classes=2,
-            backbone="edgecrafter-ecvitt",
-            image_size=(224, 224),
-            num_queries=20,
-            num_top_queries=20,
-        )
-        train_model = DETRObjectDetectionTrain(args)
-        assert train_model.model.decoder_name == "dfine_official"
-        assert type(train_model.model.decoder) is DFINEOfficialDecoder
-        assert isinstance(train_model.criterion, DFINECriterionV2)
-        # Larger ECViT variants drop the backbone LR factor (baseline).
-        optimizer, _ = train_model.get_optimizer(
-            total_steps=100, global_batch_size=16
-        )
-        groups = {g["name"]: g for g in optimizer.param_groups}
-        # Baseline denominator 32 for the ECViT variant (was fork-16).
-        assert groups["backbone"]["lr"] == pytest.approx(
-            5e-4 * (16 / 32) ** 0.5 * 0.05
-        )
-        # The projector is connector: it must sit in the detector group.
-        projector_ids = {
-            id(p) for p in train_model.model.backbone._model_wrapper.projector.parameters()
-        }
-        detector_ids = {
-            id(p) for g in groups.values() for p in g["params"]
-        }
-        assert projector_ids <= detector_ids
-
-
 class TestImageSize:
     def test_default_snaps_to_patch_grid(self):
         args = DETRObjectDetectionTrainArgs(num_classes=2)
@@ -1041,7 +843,7 @@ class TestImageSize:
 
     def test_patch16_default_unchanged(self):
         args = DETRObjectDetectionTrainArgs(
-            num_classes=2, backbone="edgecrafter-ecvitt"
+            num_classes=2, backbone="dinov3-vits16"
         )
         args.resolve_image_size()
         assert args.image_size == (640, 640)
@@ -1053,7 +855,7 @@ class TestImageSize:
 
     def test_indivisible_explicit_size_raises(self):
         args = DETRObjectDetectionTrainArgs(num_classes=2, image_size=(640, 640))
-        args.backbone = "edgecrafter-ecvitt"  # divisor 32 -> 640 still fine
+        args.backbone = "dinov3-vits16"  # divisor 32 -> 640 still fine
         args.resolve_image_size()
         args.image_size = (500, 500)
         with pytest.raises(ValueError, match="divisible by 32"):
@@ -1071,55 +873,6 @@ class TestImageSize:
                 image_size=(64, 64),
                 num_queries=10,
             )
-
-
-class TestECViT:
-    def test_package_lists_models(self):
-        from autovision.encoders.package_helpers import list_model_names
-
-        names = list_model_names()
-        for size in ("ecvitt", "ecvittplus", "ecvits", "ecvitsplus"):
-            assert f"edgecrafter/{size}" in names
-
-    def test_wrapper_emits_pyramid(self):
-        from autovision.encoders.ecvit.ecvit import ECViTModelWrapper
-
-        wrapper = ECViTModelWrapper("ecvitt")
-        p3, p4, p5 = wrapper(torch.randn(2, 3, 224, 224))
-        assert p3.shape == (2, 192, 28, 28)
-        assert p4.shape == (2, 192, 14, 14)
-        assert p5.shape == (2, 192, 7, 7)
-
-    def test_weights_path_strict_load(self, tmp_path):
-        from autovision.encoders.ecvit.ecvit import ECViTModelWrapper
-
-        wrapper = ECViTModelWrapper("ecvitt")
-        path = tmp_path / "ecvit.pt"
-        torch.save(wrapper.backbone.state_dict(), path)
-        reloaded = ECViTModelWrapper("ecvitt", weights_path=str(path))
-        for key, value in wrapper.backbone.state_dict().items():
-            assert torch.allclose(reloaded.backbone.state_dict()[key], value)
-
-    def test_ecvit_train_step(self):
-        args = DETRObjectDetectionTrainArgs(
-            num_classes=2,
-            backbone="edgecrafter-ecvitt",
-            image_size=(224, 224),
-            num_queries=20,
-            num_top_queries=20,
-        )
-        train_model = DETRObjectDetectionTrain(args)
-        batch = make_batch()
-        result = train_model.training_step(
-            {
-                "image": batch["image"],
-                "bboxes": batch["bboxes"],
-                "classes": batch["classes"],
-            },
-            0,
-        )
-        assert torch.isfinite(result.loss)
-        result.loss.backward()
 
 
 class TestDETRTransforms:
@@ -1146,11 +899,6 @@ class TestDETRTransforms:
         assert args.mosaic_prob == 0.5
         assert args.image_size == (644, 644)
         assert all(s % 28 == 0 for s in args.scale_jitter.sizes)
-        # EdgeCrafter "v2" recipe raises mosaic prob (baseline).
-        args_v2 = build_detr_train_transform_args((640, 640), "edgecrafter-ecvitt")
-        assert args_v2.mosaic_prob == 0.75
-        # ... AND the mixup prob (baseline DETRv2 args: 0.75; v1 keeps 0.5).
-        assert args_v2.mixup_prob == 0.75
         assert args.mixup_prob == 0.5
         # User overrides win.
         args_off = build_detr_train_transform_args(

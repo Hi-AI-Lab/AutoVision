@@ -5,7 +5,7 @@ The ``detr/<backbone>`` variant registry lives in :mod:`.variants` and is
 re-exported here so ``config`` stays the single import surface.
 
 Model names follow ``detr/<backbone>`` where ``<backbone>`` resolves
-against the backbone packages (``dinov2``, ``dinov3``, ``edgecrafter``),
+against the backbone packages (``dinov2``, ``dinov3``),
 e.g. ``detr/dinov2-vits14`` or ``detr/dinov3-convnext-tiny``. All
 DINOv2 sizes accept the package suffixes (``-noreg``, ``-notpretrained``).
 ``detr/dinov2-vittest-notpretrained`` is a tiny offline test variant
@@ -19,9 +19,6 @@ Variants mirror the published baseline registry (lineage:
 - **DINOv3 ViT** (patch 16, incl. the tiny ``vitt16``/``vitt16plus``
   distillations): STA wrapper with ``conv_inplane = factor × patch_size``.
 - **DINOv3 ConvNeXt**: last-three-stage taps, whole backbone at backbone LR.
-- **EdgeCrafter ECViT** (patch 16): pass-through wrapper; these variants
-  default to the D-FINE decoder (baseline "v2" family). The published
-  ``-eupe`` names are aliases of the same architectures.
 
 Encoder/decoder recipes (hidden dims, FFN widths, expansion/depth
 multipliers, sampling points, layer counts) are carried per variant in
@@ -565,7 +562,7 @@ class DETRObjectDetectionTrainArgs(TrainModelArgs, PydanticConfig):
     detector_checkpoint: Path | None = None
 
     #: Detection head family. "auto" picks the per-variant default
-    #: ("dfine_official" for the ECViT "v2" variants, else "rtdetrv2").
+    #: ("dfine_official" only when explicitly selected, else "rtdetrv2").
     #: "dfine" is the fork's RT-DETRv2-based D-FINE port (Dome line);
     #: "dfine_official" is the official gateway-based D-FINE decoder,
     #: weight-compatible with the published baseline D-FINE
@@ -627,8 +624,7 @@ class DETRObjectDetectionTrainArgs(TrainModelArgs, PydanticConfig):
     #: "auto" follows the backbone-family baseline recipe:
     #: DINOv2 ViT 1e-4, CNN 5e-4.
     lr: float | Literal["auto"] = "auto"
-    #: "auto" resolves to the per-variant recipe default (baseline: 0.05
-    #: for small/tiny models, 0.0025 for the larger ECViT models).
+    #: "auto" resolves to the per-variant recipe default (baseline 0.05).
     backbone_lr_factor: float | Literal["auto"] = "auto"
     weight_decay: float = 1e-4
     gradient_clip_val: float = 0.1
@@ -670,8 +666,8 @@ class DETRObjectDetectionTrainArgs(TrainModelArgs, PydanticConfig):
     #: Detection pyramid depth: 3 (strides 8/16/32, historical default) or
     #: 4 (strides 4/8/16/32 — the Dome-faithful tiny-object pyramid,
     #: design doc 13 §5/D1). 4 requires a ConvNeXt-family backbone (the
-    #: only wrapper exposing a stride-4 stage); ViT/ECViT are fixed
-    #: 3-level and reject the value.
+    #: only wrapper exposing a stride-4 stage); ViT is fixed 3-level and
+    #: rejects the value.
     pyramid_levels: int = 3
 
     #: Density-guided dynamic queries / DeFE / MWAS branch (Dome-DETR).
@@ -722,8 +718,7 @@ class DETRObjectDetectionTrainArgs(TrainModelArgs, PydanticConfig):
         # family: only `dinov2/*` walks the "V2 args" (lr 1e-4, backbone
         # factor 1e-2, linear schedule, warmup 2000, reference batch 16).
         # dinov3 ViT and ConvNeXt variants share the DETR recipe (5e-4 /
-        # 0.05 spec default / flat-cosine / schedule warmup / batch 32);
-        # the large ECViT variants carry 0.0025 in the spec table.
+        # 0.05 spec default / flat-cosine / schedule warmup / batch 32).
         package_is_dinov2 = spec.backbone_package == "dinov2"
         if self.hidden_dim == "auto":
             self.hidden_dim = spec.hidden_dim

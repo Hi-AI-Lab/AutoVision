@@ -8,8 +8,6 @@ metrics) with baseline DETR LR grouping:
   STA prior and the 1x1 projection layers are randomly initialized and
   merged into the detector group.
 - ConvNeXt variants: the whole backbone trains at the backbone LR.
-- ECViT variants: the pretrained VisionTransformer trains at the backbone
-  LR; its randomly initialized 1x1 projector joins the detector group.
 """
 
 from __future__ import annotations

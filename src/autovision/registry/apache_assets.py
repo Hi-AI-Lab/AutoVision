@@ -22,10 +22,6 @@ _DFINE_LICENSE = LicenseRef(
     id="Apache-2.0",
     origin="https://huggingface.co/Peterande/D-FINE (Peterande/D-FINE @ 956d170)",
 )
-_EDGECRAFTER_LICENSE = LicenseRef(
-    id="Apache-2.0",
-    origin="https://github.com/capsule2077/edgecrafter (release edgecrafterv1)",
-)
 
 _HF = "https://huggingface.co/Peterande/D-FINE/resolve/main"
 _HF_MIRROR = "https://hf-mirror.com/Peterande/D-FINE/resolve/main"
@@ -54,24 +50,6 @@ def register_apache_assets() -> None:
         sha256="f1d76b20c06610e03fa833ac9524337635e5e74204f22f4f8721174f19303d78",
         license=_DFINE_LICENSE,
         mirrors=(f"{_HF_MIRROR}/dfine_l_coco.pth", f"{_GH_STORAGE}/dfine_l_coco.pth"),
-    )
-    register_downloadable(
-        "edgecrafter/ecvits",
-        url=(
-            "https://github.com/capsule2077/edgecrafter/releases/download/"
-            "edgecrafterv1/ecvits.pth"
-        ),
-        sha256="c7e31349336539cca3c5f7f67ad397bd297621d6e6fabc3da49c3c6f21a5057b",
-        license=_EDGECRAFTER_LICENSE,
-    )
-    register_downloadable(
-        "edgecrafter/ecvitt",
-        url=(
-            "https://github.com/capsule2077/edgecrafter/releases/download/"
-            "edgecrafterv1/ecvitt.pth"
-        ),
-        sha256="7ea56362bead48d08b308103bdc5a687a88d075df211d35ca3d8d1e9f158c8ac",
-        license=_EDGECRAFTER_LICENSE,
     )
 
 

@@ -130,3 +130,10 @@ _version/_license/_compat` 保留顶层：公共基座、跨层共享与元信�
 收编组件（defe/mwas/flat_cosine）与版权归属声明按 Apache-2.0 §4a 保留；
 DEIMv2 公共权重 artifact 留在 encoders 侧供蒸馏教师链路。详见
 `docs/migration-0.2.md` 对应节。
+
+## 11. 附记：EdgeCrafter/ECViT 骨干线删除（2026-10-15）
+
+编码器包、detr 家族 edgecrafter 变体与包装器、ECViT 专用 D-FINE 装配
+器、registry ecvitt 资产及全部测试移除；coco_checkpoint 的 Lightly S3
+基线注册表随之清零（商用风险项②的代码面闭合）。剩余骨干：DINOv2 /
+DINOv3 / timm / torchvision。

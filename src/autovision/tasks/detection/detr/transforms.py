@@ -8,8 +8,8 @@ Two things set the DETR family apart from the generic RT-DETR recipe
   patch_size`` (the model args snap the default 640 -> 644 for patch-14
   backbones), and batch scale-jitter sizes stay on the same grid so the
   ViT patch count stays integral at every training resolution.
-- **Mosaic** is part of the baseline recipe (prob 0.5; 0.75 for the
-  EdgeCrafter "v2" variants) alongside the shared photometric /
+- **Mosaic** is part of the baseline recipe (prob 0.5) alongside the
+  shared photometric /
   zoom-out / IoU-crop / flip / mixup set. Copy-paste blending
   (``copyblend``) exists upstream but is not ported yet — tracked as
   roadmap.
@@ -61,14 +61,11 @@ def build_detr_train_transform_args(
 ) -> RTDETRDetectionTransformArgs:
     """DETR train transform args: patch-aligned jitter + mosaic on."""
     _, spec = resolve_detr_variant(f"detr/{backbone}")
-    mosaic_prob = 0.75 if spec.family == "ecvit" else 0.5
+    mosaic_prob = 0.5
     payload: dict[str, Any] = {
         "image_size": tuple(image_size),
         "mosaic_prob": mosaic_prob,
-        # Baseline DETRv2ObjectDetectionTrainTransformArgs: the ECViT
-        # "v2" family lifts BOTH mixup and mosaic to 0.75 (the v1 family
-        # keeps the 0.5 default).
-        "mixup_prob": 0.75 if spec.family == "ecvit" else 0.5,
+        "mixup_prob": 0.5,
         "scale_jitter": {
             "sizes": detr_scale_jitter_sizes(tuple(image_size), 2 * spec.patch_size),
             "step_stop": "auto",

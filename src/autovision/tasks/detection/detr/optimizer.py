@@ -15,7 +15,6 @@ import torch
 
 from autovision.optim import build_adamw, get_weight_decay_parameters
 from autovision.tasks.detection.detr.backbone_wrappers import (
-    ECViTDetectionBackbone,
     ViTDetectionBackbone,
 )
 from autovision.tasks.detection.shared.multistep_schedule import (
@@ -74,12 +73,11 @@ def build_detr_optimizer(
     params_no_wd = {id(p) for p in params_no_wd_list}
 
     backbone = model.backbone
-    if isinstance(backbone, (ViTDetectionBackbone, ECViTDetectionBackbone)):
+    if isinstance(backbone, ViTDetectionBackbone):
         backbone_params = list(backbone.backbone_model.parameters())
         backbone_param_ids = {id(p) for p in backbone_params}
         # Randomly initialized connector modules (STA prior +
-        # projection convs/norms, or the ECViT projector) train at
-        # detector LR.
+        # projection convs/norms) train at detector LR.
         connector_params = [
             p for p in backbone.parameters() if id(p) not in backbone_param_ids
         ]

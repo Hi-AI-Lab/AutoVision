@@ -11,10 +11,6 @@ Ports the baseline ``ltdetr_object_detection`` backbone adapters:
   projection layers are randomly initialized and train at detector LR.
 - :class:`ConvNeXtDetectionBackbone`: taps the last three ConvNeXt
   stages (strides 8/16/32); the whole backbone counts as "backbone".
-- :class:`ECViTDetectionBackbone` (baseline ``ECViTBackboneWrapper``):
-  pass-through around the ECViT wrapper, which already emits the
-  stride-8/16/32 pyramid; the pretrained VisionTransformer counts as
-  "backbone", its randomly initialized projector as connector.
 """
 
 from __future__ import annotations
@@ -38,7 +34,6 @@ from autovision.encoders.dinov3.dinov3_wrapper import TransformersDinov3ConvNext
 __all__ = [
     "CONVNEXT_DETECTION_PATCH_SIZE",
     "ConvNeXtDetectionBackbone",
-    "ECViTDetectionBackbone",
     "SpatialPriorModule",
     "ViTDetectionBackbone",
 ]
@@ -312,37 +307,3 @@ class ConvNeXtDetectionBackbone(Module):
                 f"Expected {self.num_stages} ConvNeXt stage features, got {len(feats)}."
             )
         return feats
-
-
-class ECViTDetectionBackbone(Module):
-    """ECViT -> stride-8/16/32 detection features (pass-through).
-
-    The ECViT wrapper already returns ``(P3, P4, P5)`` at the shared
-    ``hidden_dim`` (its per-level projector), so this adapter only exposes
-    the LR-grouping surface: ``backbone_model`` is the pretrained
-    VisionTransformer, everything else (the 1x1 projector) is connector.
-    """
-
-    def __init__(self, model_wrapper: Module) -> None:
-        super().__init__()
-        self._model_wrapper = model_wrapper
-        self.patch_size = 16
-
-    @property
-    def backbone_model(self) -> Module:
-        return self._model_wrapper.backbone
-
-    @property
-    def in_channels(self) -> list[int]:
-        # Baseline semantics (upstream ECViTModelWrapper): proj_dim=None
-        # resolves to a SINGLE projector applied to the last level, so the
-        # encoder still consumes one channel count per level (P3/P4 carry
-        # the raw embed width, P5 the projected width).
-        proj_dim = list(self._model_wrapper.proj_dim)
-        if len(proj_dim) == 1:
-            return [proj_dim[0]] * 3
-        return proj_dim
-
-    def forward(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        p3, p4, p5 = self._model_wrapper(x)
-        return p3, p4, p5

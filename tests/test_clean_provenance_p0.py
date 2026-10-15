@@ -9,14 +9,8 @@ implementation. Specs: docs/provenance/specs/S{1,2,3,4}-*.md.
 import math
 import random
 
-import pytest
 import torch
 
-from autovision.encoders.ecvit.ecvit import (
-    RopePositionEmbedding,
-    VisionTransformer,
-    rotate_half,
-)
 from autovision.pretext.dinov3 import DINOv3
 from autovision.pretext.dinov3.constrained_crop import sample_high_overlap_box
 from autovision.pretext.dinov3.dinov3 import _restore_orientation
@@ -219,99 +213,3 @@ class TestAlignCrossViewPair:
         assert s.grad is not None
         assert float(s.grad.abs().sum()) > 0.0
         assert not t.requires_grad
-
-
-# ── S-4: ECViT axial RoPE ───────────────────────────────────────────────
-
-
-class TestEcvitRoPE:
-    def test_periods_buffer_persistent_and_matches_formula(self):
-        rope = RopePositionEmbedding(embed_dim=192, num_heads=3)
-        assert "periods" in rope.state_dict()  # persistent → rides checkpoints
-        expected = 100.0 ** (2 * torch.arange(16, dtype=torch.float32) / 32)
-        assert torch.allclose(rope.periods, expected)
-
-    def test_periods_roundtrip_not_recomputed(self):
-        rope = RopePositionEmbedding(embed_dim=64, num_heads=2)
-        with torch.no_grad():
-            rope.periods.add_(1e-4)  # simulate a checkpoint's drifted value
-        clone = RopePositionEmbedding(embed_dim=64, num_heads=2)
-        clone.load_state_dict(rope.state_dict())
-        assert torch.equal(clone.periods, rope.periods)
-
-    def test_tables_match_independent_closed_form(self):
-        rope = RopePositionEmbedding(embed_dim=64, num_heads=2)
-        height, width = 5, 7
-        sin, cos = rope(H=height, W=width)
-        rows = (torch.arange(height, dtype=torch.float64) + 0.5) / height
-        cols = (torch.arange(width, dtype=torch.float64) + 0.5) / width
-        grid_rows, grid_cols = torch.meshgrid(rows, cols, indexing="ij")
-        coords = (
-            torch.stack([grid_rows.reshape(-1), grid_cols.reshape(-1)], dim=-1) * 2 - 1
-        )
-        angles = 2 * math.pi * coords[:, :, None] / rope.periods.double()[None, None, :]
-        expected = torch.cat([angles.flatten(1, 2)] * 2, dim=-1)
-        assert sin.shape == (height * width, 32)  # head_dim tables
-        assert torch.allclose(sin.double(), expected.sin(), atol=1e-6)
-        assert torch.allclose(cos.double(), expected.cos(), atol=1e-6)
-
-    def test_unknown_normalize_mode_raises(self):
-        rope = RopePositionEmbedding(embed_dim=64, num_heads=2)
-        rope.normalize_coords = "diagonal"
-        with pytest.raises(ValueError, match="normalize_coords"):
-            rope(H=4, W=4)
-
-    def test_rotate_half(self):
-        x = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
-        assert torch.equal(rotate_half(x), torch.tensor([[-3.0, -4.0, 1.0, 2.0]]))
-
-    def test_tiny_vit_forward(self):
-        vit = VisionTransformer(embed_dim=64, num_heads=2, depth=4, return_layers=[1, 3])
-        outputs, (grid_h, grid_w) = vit.forward_with_grid(torch.randn(2, 3, 64, 64))
-        assert (grid_h, grid_w) == (4, 4)
-        assert len(outputs) == 2
-        assert all(out.shape == (2, 16, 64) for out in outputs)
-
-
-class TestLegacyWeightsWithoutPeriods:
-    """Pre-persistent-buffer self-trained weights lack rope_embed.periods;
-    the loader must tolerate exactly that key and reject genuine holes."""
-
-    @staticmethod
-    def save_backbone_weights(path, drop_periods: bool) -> None:
-        vit = VisionTransformer(embed_dim=64, num_heads=2, depth=4)
-        state = {key: value.clone() for key, value in vit.state_dict().items()}
-        if drop_periods:
-            state.pop("rope_embed.periods")
-        torch.save(state, path)
-
-    def test_legacy_weights_load_with_fresh_periods(self, tmp_path):
-        from autovision.encoders.ecvit.ecvit import ECViTModelWrapper
-
-        weights = tmp_path / "legacy.pt"
-        self.save_backbone_weights(weights, drop_periods=True)
-        wrapper = ECViTModelWrapper(
-            name="ecvitt", embed_dim=64, num_heads=2, depth=4,
-            weights_path=str(weights),
-        )
-        expected = 100.0 ** (2 * torch.arange(8, dtype=torch.float32) / 16)
-        assert torch.allclose(wrapper.backbone.rope_embed.periods, expected)
-
-    def test_genuinely_incomplete_weights_still_rejected(self, tmp_path):
-        from autovision.encoders.ecvit.ecvit import ECViTModelWrapper
-        from autovision.errors import CheckpointError
-
-        vit = VisionTransformer(embed_dim=64, num_heads=2, depth=4)
-        state = {
-            key: value.clone()
-            for key, value in vit.state_dict().items()
-            if not key.startswith("blocks.3.")
-        }
-        state.pop("rope_embed.periods")
-        weights = tmp_path / "hole.pt"
-        torch.save(state, weights)
-        with pytest.raises(CheckpointError, match="blocks.3"):
-            ECViTModelWrapper(
-                name="ecvitt", embed_dim=64, num_heads=2, depth=4,
-                weights_path=str(weights),
-            )

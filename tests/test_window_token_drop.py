@@ -431,14 +431,6 @@ class TestConfigContract:
                 token_drop={"window_size": 32},
             )
 
-    def test_ecvit_family_rejected(self):
-        with pytest.raises(ValueError, match="ViT-family"):
-            DETRObjectDetection(
-                num_classes=2,
-                model_name="edgecrafter-ecvitt",
-                token_drop={"window_size": 32},
-            )
-
     @pytest.mark.skipif(
         not _dinov3_supported(), reason="transformers lacks DINOv3"
     )

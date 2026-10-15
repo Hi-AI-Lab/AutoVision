@@ -6,8 +6,8 @@ Task of DETRs as Fine-grained Distribution Refinement, Apache-2.0,
 ``Peterande/D-FINE`` @ ``956d170``, ``src/zoo/dfine/dfine_decoder.py``),
 modified by Autovision per Apache-2.0 section 4b; ledger:
 ``docs/provenance/LEDGER.md`` (P1-2). This is the decoder architecture the
-published baseline ``*-ltdetr-coco`` D-FINE checkpoints (e.g. the EdgeCrafter
-ECViT family) were trained with — its decoder layer fuses self-attention
+published baseline D-FINE COCO checkpoints were trained with — its
+decoder layer fuses self-attention
 and cross-attention outputs through a learned :class:`Gate` instead of the
 RT-DETRv2 residual+norm, and it has NO per-layer ``value_proj`` /
 ``output_proj`` (the encoder memory feeds deformable attention directly).
@@ -545,7 +545,7 @@ class _OfficialFDRDecoder(nn.Module):
 
 class DFINEOfficialDecoder(nn.Module):
     """Official D-FINE decoder, weight-compatible with the published
-    baseline ``*-ltdetr-coco`` D-FINE checkpoints (EdgeCrafter ECViT
+    published baseline D-FINE COCO checkpoints (the
     family). Emits the fork's training contract (see module docstring)."""
 
     def __init__(

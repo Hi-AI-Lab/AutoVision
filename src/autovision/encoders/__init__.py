@@ -4,7 +4,6 @@
 from autovision.encoders import (
     dinov2,  # noqa: F401  (registers the package)
     dinov3,  # noqa: F401  (registers the package)
-    ecvit,  # noqa: F401  (registers the package)
     rfdetr,  # noqa: F401  (registers the package)
     super_gradients,  # noqa: F401  (registers the package)
     timm,  # noqa: F401  (registers the package)
