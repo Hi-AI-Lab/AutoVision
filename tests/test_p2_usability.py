@@ -113,6 +113,44 @@ class TestModelHandleE2E:
             detection("rtdetr/resnet18").predict("whatever.png")
 
 
+class TestPredictInferenceContract:
+    """Regression (2026-10-16 GTR val): predict/predict_batch must run
+    under ``torch.no_grad`` (retained autograd graphs OOM'd a 24 GiB GPU
+    during 5000-image COCO eval) and must move path-loaded inputs onto the
+    network's device (``.to("cuda")`` previously crashed on CPU inputs)."""
+
+    def test_predict_does_not_build_graphs(self, trained, coco8):
+        import torch
+
+        network = trained._require_network()
+        seen: dict[str, object] = {}
+        original = network.forward_backend
+
+        def probe(x):
+            seen["grad_enabled"] = torch.is_grad_enabled()
+            seen["device"] = x.device
+            return original(x)
+
+        network.forward_backend = probe
+        image = str(Path(coco8["train"]["images"]) / "img_000.png")
+        network.predict(image, threshold=0.0)
+        network.predict_batch([image], threshold=0.0)
+        assert seen["grad_enabled"] is False
+        assert seen["device"] == network._module_device()
+
+    @pytest.mark.skipif(
+        not __import__("torch").cuda.is_available(), reason="CUDA required"
+    )
+    def test_predict_serves_path_inputs_on_cuda(self, trained, coco8):
+        network = trained._require_network().to("cuda")
+        try:
+            image = str(Path(coco8["train"]["images"]) / "img_000.png")
+            prediction = network.predict(image, threshold=0.0)
+            assert prediction["bboxes"].device.type == "cuda"
+        finally:
+            network.to("cpu")
+
+
 class TestCoco8Token:
     def test_train_data_loader_resolves_token(self, tmp_path, monkeypatch):
         monkeypatch.setenv("AUTOVISION_CACHE_DIR", str(tmp_path / "cache"))

@@ -223,3 +223,53 @@ class TestEvalMaxDets:
         train_model.merge_metric_state("val", probe.export_state())
         assert captured["max_dets"] == 500
         assert train_model._evaluators["val"].max_dets == 500
+
+
+class TestCrowdGroundTruth:
+    """COCO crowd boxes are ignore regions under the official protocol.
+
+    Regression (2026-10-16 GTR val): the evaluator wrote ``iscrowd: 0``
+    for every GT, so the 446 large val2017 crowd boxes were scored as
+    regular targets (missing one counted as a false negative)."""
+
+    @staticmethod
+    def _evaluate(targets):
+        import torch
+
+        from autovision.metrics.map_evaluator import COCOMAPEvaluator
+
+        evaluator = COCOMAPEvaluator(categories={0: "cat"})
+        # One perfect prediction on the real object; the crowd box is
+        # deliberately not detected.
+        evaluator.update(
+            [
+                {
+                    "bboxes": torch.tensor([[10.0, 10.0, 60.0, 60.0]]),
+                    "scores": torch.tensor([0.9]),
+                    "labels": torch.tensor([0], dtype=torch.long),
+                }
+            ]
+        )
+        evaluator.update_targets(targets, [(100, 100)])
+        return evaluator.compute()
+
+    def test_crowd_miss_is_not_a_false_negative(self):
+        import torch
+
+        real = {
+            "boxes": torch.tensor([[0.35, 0.35, 0.5, 0.5]]),  # cxcywh -> 10..60
+            "labels": torch.tensor([0], dtype=torch.long),
+        }
+        with_crowd = {
+            **real,
+            "boxes": torch.tensor([[0.35, 0.35, 0.5, 0.5], [0.5, 0.5, 0.8, 0.8]]),
+            "labels": torch.tensor([0, 0], dtype=torch.long),
+            "iscrowds": torch.tensor([0, 1], dtype=torch.long),
+        }
+        metrics = self._evaluate([with_crowd])
+        assert metrics["map_50"] == pytest.approx(1.0)  # crowd miss costs nothing
+
+        no_flag = self._evaluate(
+            [{k: v for k, v in with_crowd.items() if k != "iscrowds"}]
+        )
+        assert no_flag["map_50"] < 1.0  # the same box scored as regular GT

@@ -97,7 +97,9 @@ class COCOMAPEvaluator:
 
         Target boxes arrive as normalized cxcywh (invariant under the val
         resize); ``original_sizes`` (w, h) per item maps them to absolute
-        xyxy on the original frame (matching predictions).
+        xyxy on the original frame (matching predictions). Optional
+        ``"iscrowds"`` per target carries the COCO crowd flag (1 = ignore
+        region under the official protocol; missing = all zeros).
         """
         for index, target in enumerate(targets):
             boxes = (
@@ -108,6 +110,14 @@ class COCOMAPEvaluator:
                 target["labels"].detach().cpu()
                 if torch.is_tensor(target["labels"]) else torch.as_tensor(target["labels"])
             )
+            crowds = target.get("iscrowds")
+            if crowds is None:
+                crowds = torch.zeros(labels.shape[0], dtype=torch.long)
+            else:
+                crowds = (
+                    crowds.detach().cpu()
+                    if torch.is_tensor(crowds) else torch.as_tensor(crowds)
+                )
             orig_w, orig_h = original_sizes[index]
             if boxes.numel():
                 cx, cy, w, h = boxes.unbind(-1)
@@ -116,7 +126,12 @@ class COCOMAPEvaluator:
                      (cx + w / 2) * orig_w, (cy + h / 2) * orig_h], dim=-1,
                 )
             self._ground_truth.append(
-                {"boxes": boxes, "labels": labels, "size": (int(orig_w), int(orig_h))}
+                {
+                    "boxes": boxes,
+                    "labels": labels,
+                    "iscrowds": crowds,
+                    "size": (int(orig_w), int(orig_h)),
+                }
             )
 
     def reset(self) -> None:
@@ -177,7 +192,10 @@ class COCOMAPEvaluator:
             index: class_id for index, class_id in enumerate(sorted(self.categories))
         }
         for index, target in enumerate(self._ground_truth):
-            for box, label in zip(target["boxes"], target["labels"]):
+            crowds = target.get("iscrowds")
+            for position, (box, label) in enumerate(
+                zip(target["boxes"], target["labels"])
+            ):
                 x1, y1, x2, y2 = [float(v) for v in box]
                 gt_annotations.append(
                     {
@@ -186,7 +204,12 @@ class COCOMAPEvaluator:
                         "category_id": internal_to_user[int(label)],
                         "bbox": [x1, y1, x2 - x1, y2 - y1],
                         "area": max((x2 - x1) * (y2 - y1), 1.0),
-                        "iscrowd": 0,
+                        # Crowd regions are ignore regions in the official
+                        # COCO protocol (no recall requirement, overlapping
+                        # detections not penalized); earlier revisions wrote
+                        # 0 unconditionally, which counted the 446 val2017
+                        # crowd boxes as regular GT.
+                        "iscrowd": int(crowds[position]) if crowds is not None else 0,
                     }
                 )
                 annotation_id += 1

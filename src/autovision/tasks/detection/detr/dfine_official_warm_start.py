@@ -47,14 +47,36 @@ _KEY_NORMALIZATIONS: tuple[tuple[str, str], ...] = (
     ("cv2", "conv2"),
 )
 
+#: GTR-lineage checkpoints name a decoder layer's second norm ``norm2``
+#: (GTR's GTRTransformer) where the D-FINE-official layout our decoder
+#: ports from calls it ``norm3`` — pure renaming with identical roles and
+#: sizes (2026-10-16 gold-check); remapped only for ``source_format="gtr"``.
+_GTR_KEY_NORMALIZATIONS: tuple[tuple[str, str], ...] = (
+    (".norm2.", ".norm3."),
+)
+
 
 class WarmStartAssemblyError(RuntimeError):
     pass
 
 
-def _normalize_key(key: str) -> str:
-    for source, target in _KEY_NORMALIZATIONS:
-        key = key.replace(source, target)
+def _normalize_key(key: str, source_format: str = "dfine") -> str:
+    """Per-format key normalization (both directions are load-correctness
+    contracts, not cosmetics — see the table comments above):
+
+    - ``dfine``: the legacy ECViT-era ``cv1/cv2 -> conv1/conv2`` renaming
+      (D-FINE official CSP blocks use the fork ``convN`` spelling our
+      HybridEncoder ports).
+    - ``gtr``: only the decoder second-norm rename (``norm2 -> norm3``);
+      GTR's native ``cv1/cv2`` encoder spelling is preserved by our
+      verbatim GTREncoder re-port, so the dfine renaming must NOT apply.
+    """
+    if source_format == "dfine":
+        for source, target in _KEY_NORMALIZATIONS:
+            key = key.replace(source, target)
+    else:
+        for source, target in _GTR_KEY_NORMALIZATIONS:
+            key = key.replace(source, target)
     return key
 
 
@@ -110,7 +132,9 @@ def build_dfine_official_warm_start(
     )
     target = network.state_dict()
 
-    normalized_source = {_normalize_key(k): v for k, v in source.items()}
+    normalized_source = {
+        _normalize_key(k, source_format): v for k, v in source.items()
+    }
     transferred: dict[str, torch.Tensor] = {}
     skipped_shape: list[str] = []
     matched_by: dict[str, str] = {}
@@ -164,6 +188,14 @@ def build_dfine_official_warm_start(
         "decoder_coverage": report["decoder_coverage"],
         "assembly": "dfine_official_warm_start v2 (shape-driven)",
         "source_checkpoint": checkpoint.name,
+        # Sampling-point split + lineage of the assembled decoder. The
+        # flattened deformable-attention offsets make sum(num_points) the
+        # only shape-visible quantity, so a (4,4,4) payload would load
+        # silently into a (3,6,3) network and mis-split every level
+        # (2026-10-16 gold-check): record the split so consumers can
+        # refuse the mismatch.
+        "dec_num_points": list(network.variant_spec.dec_num_points),
+        "dec_lineage": network.variant_spec.dec_lineage,
         **(extra_spec or {}),
     }
     save_warm_start(

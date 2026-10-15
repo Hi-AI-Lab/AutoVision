@@ -63,12 +63,27 @@ class TaskNetwork(nn.Module):
     def postprocess(self, raw_outputs: Any, metadata: list[dict[str, Any]], **kwargs) -> list[Any]:
         raise NotImplementedError
 
+    def _module_device(self) -> torch.device:
+        """Device the network's parameters (or buffers) live on."""
+        parameter = next(self.parameters(), None)
+        if parameter is not None:
+            return parameter.device
+        buffer = next(self.buffers(), None)
+        return buffer.device if buffer is not None else torch.device("cpu")
+
+    @torch.no_grad()
     def predict(self, image: Any, **kwargs) -> Any:
-        """Single-image convenience: preprocess -> forward -> postprocess."""
+        """Single-image convenience: preprocess -> forward -> postprocess.
+
+        Loading/normalization stays on CPU; the tensor is moved onto the
+        network's device before the forward, so a network moved with
+        ``.to("cuda")`` serves path/PIL inputs directly.
+        """
         was_training = self.training
         self.eval()
         tensor, meta = self.preprocess_image(image)
-        raw = self.forward_backend(self.preprocess_batch(tensor.unsqueeze(0)))
+        batch = self.preprocess_batch(tensor.unsqueeze(0))
+        raw = self.forward_backend(batch.to(self._module_device()))
         results = self.postprocess(raw, [meta], **kwargs)
         if was_training:
             self.train()
@@ -166,7 +181,9 @@ class TaskNetwork(nn.Module):
                 tile_tensors.append(tile_tensor)
             batch = torch.stack([global_tensor, *tile_tensors])
             results = self.postprocess(
-                self.forward_backend(self.preprocess_batch(batch)),
+                self.forward_backend(
+                    self.preprocess_batch(batch).to(self._module_device())
+                ),
                 [global_meta, *tile_metas],
                 threshold=threshold,
             )
@@ -191,6 +208,7 @@ class TaskNetwork(nn.Module):
             if was_training:
                 self.train()
 
+    @torch.no_grad()
     def predict_batch(self, images: list[Any], **kwargs) -> list[Any]:
         self.eval()
         tensors, metadata = [], []
@@ -199,7 +217,9 @@ class TaskNetwork(nn.Module):
             tensors.append(tensor)
             metadata.append(meta)
         batch = self.preprocess_batch(torch.stack(tensors))
-        return self.postprocess(self.forward_backend(batch), metadata, **kwargs)
+        return self.postprocess(
+            self.forward_backend(batch.to(self._module_device())), metadata, **kwargs
+        )
 
     # ── checkpoint loading ──────────────────────────────────────────────
     def load_train_state_dict(self, state_dict: dict[str, Any]) -> None:

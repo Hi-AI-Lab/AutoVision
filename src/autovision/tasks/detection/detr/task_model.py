@@ -485,8 +485,17 @@ class DETRObjectDetection(ONNXExportMixin, TaskNetwork):
             # Official gateway-based D-FINE decoder: the architecture the
             # published baseline D-FINE COCO checkpoints were trained
             # with. Weight-compatible via detector_checkpoint;
-            # density/SSL stay fork-"dfine"-only.
-            self.decoder = DFINEOfficialDecoder(**decoder_kwargs, reg_max=reg_max, reg_scale=reg_scale)
+            # density/SSL stay fork-"dfine"-only. The GTR lineage
+            # (spec.dec_lineage="gtr", the gtr_s/m/l/x official assets)
+            # switches the selection stage + activations to GTR's
+            # GTRTransformer layout (see DFINEOfficialDecoder.gtr_compat).
+            self.decoder = DFINEOfficialDecoder(
+                **decoder_kwargs,
+                reg_max=reg_max,
+                reg_scale=reg_scale,
+                activation="silu" if spec.dec_lineage == "gtr" else "relu",
+                gtr_compat=(spec.dec_lineage == "gtr"),
+            )
         elif decoder == "dfine":
             if self._density_enabled:
                 self.decoder: nn.Module = DomeDFINEv2Decoder(
@@ -829,6 +838,32 @@ def load_warm_start_into_network(
         raise ValueError(
             f"AVWarmStart asset '{warm_start}' carries no license — refusing "
             "to consume it (registry R7)."
+        )
+
+    # Sampling-point split guard: the deformable-attention offsets are a
+    # single flattened tensor whose shape only exposes sum(num_points) —
+    # a payload assembled with a different split ((4,4,4) vs (3,6,3))
+    # would transfer silently and mis-place every level's offsets.
+    recorded_points = payload.spec.get("dec_num_points")
+    if recorded_points is not None:
+        expected_points = list(network.variant_spec.dec_num_points)
+        if list(recorded_points) != expected_points:
+            raise ValueError(
+                f"AVWarmStart '{warm_start}' was assembled with "
+                f"num_points={list(recorded_points)} but the network's "
+                f"variant expects {expected_points} — refusing a "
+                "semantic-mismatch transfer (the sum-only shape identity "
+                "makes this undetectable downstream)."
+            )
+    recorded_lineage = payload.spec.get("dec_lineage")
+    if (
+        recorded_lineage is not None
+        and recorded_lineage != network.variant_spec.dec_lineage
+    ):
+        raise ValueError(
+            f"AVWarmStart '{warm_start}' dec_lineage '{recorded_lineage}' "
+            f"does not match '{network.variant_spec.dec_lineage}' — the two "
+            "lineages decode with different selection-stage semantics."
         )
 
     target = network.state_dict()

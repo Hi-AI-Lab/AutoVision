@@ -104,19 +104,21 @@ def evaluate_object_detection(
         open_image(image_path)  # fail fast on unreadable inputs
         prediction = network.predict(image_path, threshold=threshold)
         evaluator.update([prediction])
-        evaluator.update_targets(
-            [
-                {
-                    "boxes": torch.tensor(
-                        json.loads(item["bboxes"]), dtype=torch.float32
-                    ),
-                    "labels": torch.tensor(
-                        json.loads(item["class_labels"]), dtype=torch.long
-                    ),
-                }
-            ],
-            [(width, height)],
-        )
+        target = {
+            "boxes": torch.tensor(
+                json.loads(item["bboxes"]), dtype=torch.float32
+            ),
+            "labels": torch.tensor(
+                json.loads(item["class_labels"]), dtype=torch.long
+            ),
+        }
+        # COCO crowd flags (ignore regions under the official protocol);
+        # YOLO-format rows carry none and evaluate as all-regular GT.
+        if "iscrowds" in item:
+            target["iscrowds"] = torch.tensor(
+                json.loads(item["iscrowds"]), dtype=torch.long
+            )
+        evaluator.update_targets([target], [(width, height)])
     return evaluator.compute()
 
 
@@ -188,9 +190,8 @@ class DetectionModel:
     def to(self, device: str) -> "DetectionModel":
         """Move the underlying network to ``device`` (returns ``self``).
 
-        After moving, :meth:`predict` requires tensor inputs already on
-        that device; path/PIL inputs preprocess on CPU and only match a
-        CPU network.
+        ``predict`` moves its preprocessed inputs onto the network's device,
+        so path/PIL/tensor inputs work on any device after the move.
         """
         self._require_network().to(device=device)
         return self

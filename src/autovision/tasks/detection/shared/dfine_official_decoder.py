@@ -340,11 +340,13 @@ class _Integral(nn.Module):
 class _LQE(nn.Module):
     """Location Quality Estimator: additive logit calibration from corners."""
 
-    def __init__(self, k: int, hidden_dim: int, num_layers: int, reg_max: int) -> None:
+    def __init__(
+        self, k: int, hidden_dim: int, num_layers: int, reg_max: int, act: str = "relu"
+    ) -> None:
         super().__init__()
         self.k = k
         self.reg_max = reg_max
-        self.reg_conf = MLP(4 * (k + 1), hidden_dim, 1, num_layers)
+        self.reg_conf = MLP(4 * (k + 1), hidden_dim, 1, num_layers, act=act)
         init.constant_(self.reg_conf.layers[-1].bias, 0)
         init.constant_(self.reg_conf.layers[-1].weight, 0)
 
@@ -372,12 +374,15 @@ class _OfficialFDRDecoder(nn.Module):
         up: nn.Parameter,
         eval_idx: int = -1,
         layer_scale: float = 2,
+        activation: str = "relu",
+        frozen_query_pos: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         self.layer_scale = layer_scale
         self.num_head = num_head
+        self.frozen_query_pos = frozen_query_pos
         self.eval_idx = eval_idx if eval_idx >= 0 else num_layers + eval_idx
         # References to the owner's parameters: registered under BOTH
         # ``decoder.up`` and ``decoder.decoder.up`` (published-checkpoint
@@ -391,7 +396,7 @@ class _OfficialFDRDecoder(nn.Module):
             ]
         )
         self.lqe_layers = nn.ModuleList(
-            [copy.deepcopy(_LQE(4, 64, 2, reg_max)) for _ in range(num_layers)]
+            [copy.deepcopy(_LQE(4, 64, 2, reg_max, act=activation)) for _ in range(num_layers)]
         )
 
     def value_op(
@@ -457,9 +462,22 @@ class _OfficialFDRDecoder(nn.Module):
 
         ref_points_detach = F.sigmoid(ref_points_unact)
 
+        if self.frozen_query_pos:
+            # GTR lineage: the query positional embedding is computed ONCE
+            # from the initial references and reused for every layer
+            # (GTR-main engine/gtr/det/decoder.py:543-544). Their deploy-time
+            # ``pos_qk`` fusion depends on this being constant across layers.
+            # D-FINE instead recomputes it per layer (upstream
+            # zoo/dfine/dfine_decoder.py:406) — lineage-gated, not a
+            # stylistic choice: GTR-S checkpoints were trained with the
+            # frozen embedding (measured: recomputing per layer costs ~8.5
+            # AP on COCO val).
+            query_pos_embed = query_pos_head(ref_points_detach).clamp(min=-10, max=10)
+
         for i, layer in enumerate(self.layers):
             ref_points_input = ref_points_detach.unsqueeze(2)
-            query_pos_embed = query_pos_head(ref_points_detach).clamp(min=-10, max=10)
+            if not self.frozen_query_pos:
+                query_pos_embed = query_pos_head(ref_points_detach).clamp(min=-10, max=10)
 
             if i >= self.eval_idx + 1 and self.layer_scale > 1:
                 query_pos_embed = F.interpolate(
@@ -562,6 +580,8 @@ class DFINEOfficialDecoder(nn.Module):
         dim_feedforward: int = 1024,
         dropout: float = 0.0,
         activation: str = "relu",
+        gtr_compat: bool = False,
+        num_groups: int = 3,
         num_denoising: int = 100,
         label_noise_ratio: float = 0.5,
         box_noise_scale: float = 1.0,
@@ -609,6 +629,35 @@ class DFINEOfficialDecoder(nn.Module):
         self.cross_attn_method = cross_attn_method
         self.query_select_method = query_select_method
 
+        # GTR-lineage compatibility mode (gtr_s/m/l/x official checkpoints,
+        # 2026-10-16 gold-check): GTR's GTRTransformer is a modified D-FINE
+        # decoder whose selection stage differs on four axes that are
+        # invisible to shape-based loading — see the construction sites
+        # below for each:
+        #   1. query_pos_head is a 3-layer hidden-width MLP with the decoder
+        #      activation (D-FINE: MLP(4, 2H, H, 2), no act);
+        #   2. selection heads are per-group copies and EVAL uses group 0 —
+        #      under group_detr>1 training the shared heads never receive
+        #      gradients (their own code comment), so loading/using the
+        #      shared pair silently selects queries with template weights;
+        #   3. memory feeds the selection heads directly — D-FINE's
+        #      ``enc_output`` (proj + norm) does not exist in GTR;
+        #   4. the decoder MLPs (selection/box heads, LQE) run with the
+        #      decoder activation (silu for GTR; relu is the D-FINE default).
+        # The second per-layer norm is also named ``norm2`` in GTR vs
+        # ``norm3`` here — pure renaming, handled by the GTR assembly
+        # loader's key remap.
+        self.gtr_compat = bool(gtr_compat)
+        self.num_groups = int(num_groups)
+        if self.gtr_compat and (
+            text_embed_dim is not None
+            or language_guided_selection
+            or decoder_text_attention
+        ):
+            raise ValueError(
+                "gtr_compat=True is the closed-set GTR lineage decoder; "
+                "the open-vocabulary branch requires the D-FINE layout."
+            )
         # Open-vocabulary branch (design doc 27) — same contract as the
         # fork decoders (rtdetrv2_decoder.py): contrastive score heads over
         # the persistent ``ov_text_embeds`` buffer, reduced (B, Q, C) view.
@@ -676,6 +725,8 @@ class DFINEOfficialDecoder(nn.Module):
             self.up,
             eval_idx,
             layer_scale,
+            activation,
+            frozen_query_pos=gtr_compat,
         )
 
         self.num_denoising = num_denoising
@@ -691,16 +742,19 @@ class DFINEOfficialDecoder(nn.Module):
         self.learn_query_content = learn_query_content
         if learn_query_content:
             self.tgt_embed = nn.Embedding(num_queries, hidden_dim)
-        self.query_pos_head = MLP(4, 2 * hidden_dim, hidden_dim, 2)
-
-        self.enc_output = nn.Sequential(
-            OrderedDict(
-                [
-                    ("proj", nn.Linear(hidden_dim, hidden_dim)),
-                    ("norm", nn.LayerNorm(hidden_dim)),
-                ]
+        if self.gtr_compat:
+            # GTR: 3-layer hidden-width MLP with the decoder activation.
+            self.query_pos_head = MLP(4, hidden_dim, hidden_dim, 3, act=activation)
+        else:
+            self.query_pos_head = MLP(4, 2 * hidden_dim, hidden_dim, 2)
+            self.enc_output = nn.Sequential(
+                OrderedDict(
+                    [
+                        ("proj", nn.Linear(hidden_dim, hidden_dim)),
+                        ("norm", nn.LayerNorm(hidden_dim)),
+                    ]
+                )
             )
-        )
 
         if query_select_method == "agnostic":
             self.enc_score_head = nn.Linear(hidden_dim, 1)
@@ -711,7 +765,16 @@ class DFINEOfficialDecoder(nn.Module):
         else:
             self.enc_score_head = nn.Linear(hidden_dim, num_classes)
 
-        self.enc_bbox_head = MLP(hidden_dim, hidden_dim, 4, 3)
+        self.enc_bbox_head = MLP(hidden_dim, hidden_dim, 4, 3, act=activation)
+        if self.gtr_compat:
+            # Per-group selection heads; eval consumes group 0 (the GTR
+            # training layout — shared heads stay as inert templates).
+            self.enc_score_head_group = nn.ModuleList(
+                [copy.deepcopy(self.enc_score_head) for _ in range(self.num_groups)]
+            )
+            self.enc_bbox_head_group = nn.ModuleList(
+                [copy.deepcopy(self.enc_bbox_head) for _ in range(self.num_groups)]
+            )
 
         resolved_eval_idx = eval_idx if eval_idx >= 0 else num_layers + eval_idx
         self.eval_idx = resolved_eval_idx
@@ -725,14 +788,16 @@ class DFINEOfficialDecoder(nn.Module):
                 for i in range(num_layers)
             ]
         )
-        self.pre_bbox_head = MLP(hidden_dim, hidden_dim, 4, 3)
+        self.pre_bbox_head = MLP(hidden_dim, hidden_dim, 4, 3, act=activation)
         self.dec_bbox_head = nn.ModuleList(
             [
-                MLP(hidden_dim, hidden_dim, 4 * (self.reg_max + 1), 3)
+                MLP(
+                    hidden_dim, hidden_dim, 4 * (self.reg_max + 1), 3, act=activation
+                )
                 for _ in range(resolved_eval_idx + 1)
             ]
             + [
-                MLP(scaled_dim, scaled_dim, 4 * (self.reg_max + 1), 3)
+                MLP(scaled_dim, scaled_dim, 4 * (self.reg_max + 1), 3, act=activation)
                 for _ in range(num_layers - resolved_eval_idx - 1)
             ]
         )
@@ -783,11 +848,18 @@ class DFINEOfficialDecoder(nn.Module):
         self.ov_text_embeds.copy_(F.normalize(embeds.float(), dim=-1))
         self._ov_embeds_loaded = True
 
-    def _enc_class_logits(self, output_memory: torch.Tensor) -> torch.Tensor:
-        """Encoder-head logits for query selection (doc 27 §3.5)."""
+    def _enc_class_logits(
+        self, output_memory: torch.Tensor, head: nn.Module | None = None
+    ) -> torch.Tensor:
+        """Encoder-head logits for query selection (doc 27 §3.5).
+
+        ``head`` overrides the shared score head (the GTR lineage selects
+        with ``enc_score_head_group[0]``; the open-vocab path always uses
+        the shared head).
+        """
         if self._ov_lgs:
             return self.enc_score_head(output_memory, self.ov_text_embeds)
-        return self.enc_score_head(output_memory)
+        return (head or self.enc_score_head)(output_memory)
 
     def _ov_forward_text_embeds(self) -> torch.Tensor | None:
         if self._ov_text_embed_dim is None:
@@ -839,11 +911,13 @@ class DFINEOfficialDecoder(nn.Module):
                 init.constant_(reg_.layers[-1].weight, 0)
                 init.constant_(reg_.layers[-1].bias, 0)
 
-        init.xavier_uniform_(self.enc_output[0].weight)
+        if not self.gtr_compat:
+            init.xavier_uniform_(self.enc_output[0].weight)
         if self.learn_query_content:
             init.xavier_uniform_(self.tgt_embed.weight)
-        init.xavier_uniform_(self.query_pos_head.layers[0].weight)
-        init.xavier_uniform_(self.query_pos_head.layers[1].weight)
+        for layer in self.query_pos_head.layers[:-1]:
+            init.xavier_uniform_(layer.weight)
+        init.xavier_uniform_(self.query_pos_head.layers[-1].weight)
         for m, in_channels in zip(self.input_proj, feat_channels):
             if in_channels != self.hidden_dim:
                 init.xavier_uniform_(m[0].weight)
@@ -970,8 +1044,17 @@ class DFINEOfficialDecoder(nn.Module):
 
         memory = valid_mask.to(memory.dtype) * memory
 
-        output_memory = self.enc_output(memory)
-        enc_outputs_logits = self._enc_class_logits(output_memory)
+        if self.gtr_compat:
+            # GTR selection: memory feeds the heads directly (no enc_output
+            # projection) and eval uses the group-0 heads.
+            output_memory = memory
+            score_head = self.enc_score_head_group[0]
+            bbox_head = self.enc_bbox_head_group[0]
+        else:
+            output_memory = self.enc_output(memory)
+            score_head = self.enc_score_head
+            bbox_head = self.enc_bbox_head
+        enc_outputs_logits = self._enc_class_logits(output_memory, head=score_head)
 
         enc_topk_bboxes_list: list[torch.Tensor] = []
         enc_topk_logits_list: list[torch.Tensor] = []
@@ -979,7 +1062,7 @@ class DFINEOfficialDecoder(nn.Module):
             output_memory, enc_outputs_logits, anchors, self.num_queries
         )
 
-        enc_topk_bbox_unact = self.enc_bbox_head(enc_topk_memory) + enc_topk_anchors
+        enc_topk_bbox_unact = bbox_head(enc_topk_memory) + enc_topk_anchors
 
         if self.training:
             enc_topk_bboxes = F.sigmoid(enc_topk_bbox_unact)

@@ -85,6 +85,13 @@ class DETRVariantSpec:
     #: (weight-compatible with the published baseline D-FINE checkpoints),
     #: the fork's Dome-line variants "dfine" (RT-DETRv2-based port).
     decoder_default: Literal["rtdetrv2", "dfine", "dfine_official"] = "rtdetrv2"
+    #: Which lineage's selection stage the ``dfine_official`` decoder
+    #: must reproduce: "dfine" (published D-FINE checkpoints) or "gtr"
+    #: (GTR's modified GTRTransformer — 3-layer query_pos_head, per-group
+    #: selection heads with group-0 at eval, no enc_output projection,
+    #: silu activations; 2026-10-16 gold-check). Load-correctness
+    #: contract, not cosmetic: the axes are shape-invisible.
+    dec_lineage: Literal["dfine", "gtr"] = "dfine"
     #: Per-variant default for ``backbone_lr_factor`` ("auto" resolution).
     backbone_lr_factor: float = 0.05
 
@@ -180,11 +187,19 @@ _CONVNEXT_SIZES: dict[str, dict[str, Any]] = {
 # Spectrum width recipes for the timm CNN line (HGNetV2), P1-frozen per
 # roadmap design doc 29 §3.1 (D1/D1b) — the widths are NOT guesses: they
 # were read off the cached official D-FINE-S COCO checkpoint
-# (hidden 256, encoder FFN 1024, decoder 3 layers, sampling points
-# (4, 4, 4), 8 heads), so the ``dfine_official`` decoder assembles
-# weight-compatible with the Apache-2.0 official assets. backbone_lr_factor
-# 0.1 = pretrained-CNN fine-tune convention (RT-DETR trains HGNetV2 from
-# scratch at 1.0; our spectrum starts from timm ImageNet weights).
+# (hidden 256, encoder FFN 1024, decoder 3 layers, 8 heads), so the
+# ``dfine_official`` decoder assembles weight-compatible with the
+# Apache-2.0 official assets. Sampling points: **[3, 6, 3]** — the value
+# both official lineages ship (D-FINE ``configs/dfine/include/
+# dfine_hgnetv2.yml``:62 and GTR ``configs/det/gtr_base.yml``:52). NOTE:
+# the flattened offsets make ``sum(num_points)`` (== 12 for both
+# [3,6,3] and [4,4,4]) the only shape-visible quantity — a (4,4,4)
+# spec silently mis-splits the checkpoint's per-level offsets and
+# mis-scales the sampling grid, so the split, not the sum, is the
+# load-correctness contract (2026-10-16 gold-check vs the official GTR
+# code). backbone_lr_factor 0.1 = pretrained-CNN fine-tune convention
+# (RT-DETR trains HGNetV2 from scratch at 1.0; our spectrum starts from
+# timm ImageNet weights).
 _HGNETV2_SIZES: dict[str, dict[str, Any]] = {
     "hgnetv2-b0": dict(backbone_name="hgnetv2_b0", dec_layers=3),
     "hgnetv2-b1": dict(backbone_name="hgnetv2_b1", dec_layers=3),
@@ -194,7 +209,7 @@ _HGNETV2_RECIPE: dict[str, Any] = dict(
     enc_dim_feedforward=1024,
     dec_layers=3,
     dec_dim_feedforward=1024,
-    dec_num_points=(4, 4, 4),
+    dec_num_points=(3, 6, 3),
     backbone_lr_factor=0.1,
 )
 
@@ -298,11 +313,14 @@ def _build_registry() -> dict[str, DETRVariantSpec]:
         )
     # GTR assembly-compatible recipe (roadmap design doc 31, G1): widths
     # read off the gtr_s_coco EMA checkpoint (hidden 192, decoder FFN 512,
-    # 4 layers, points (4,4,4) — 104 direct key matches, 12 residual
-    # mismatches ALL FFN width, resolved by this spec). Decoder assembles
-    # from the MIT GTR asset via dfine_official_warm_start(
-    # source_format="gtr"); the backbone stays on our timm HGNetV2 line
-    # (GTR's own backbone is a different GLA family — doc 31 G2).
+    # 4 layers — 104 direct key matches, 12 residual mismatches ALL FFN
+    # width, resolved by this spec). Sampling points (3, 6, 3) per the
+    # official GTR config (gtr_base.yml:52) — the sum-only shape identity
+    # with (4,4,4) is exactly the trap this value must not fall into.
+    # Decoder assembles from the MIT GTR asset via
+    # dfine_official_warm_start(source_format="gtr"); the backbone stays
+    # on our timm HGNetV2 line (GTR's own backbone is a different GLA
+    # family — doc 31 G2).
     registry["gtr-s"] = DETRVariantSpec(
         backbone_package="timm",
         backbone_name="hgnetv2_b1",
@@ -315,8 +333,9 @@ def _build_registry() -> dict[str, DETRVariantSpec]:
         enc_dim_feedforward=1024,
         dec_layers=4,
         dec_dim_feedforward=512,
-        dec_num_points=(4, 4, 4),
+        dec_num_points=(3, 6, 3),
         decoder_default="dfine_official",
+        dec_lineage="gtr",
         backbone_lr_factor=0.1,
     )
     # GTR GLA-backbone line (roadmap design doc 31 G2, MIT re-port under
@@ -340,8 +359,9 @@ def _build_registry() -> dict[str, DETRVariantSpec]:
         enc_dim_feedforward=1024,  # unused: GTREncoder has no AIFI FFN
         dec_layers=4,
         dec_dim_feedforward=512,
-        dec_num_points=(4, 4, 4),
+        dec_num_points=(3, 6, 3),
         decoder_default="dfine_official",
+        dec_lineage="gtr",
         backbone_lr_factor=0.1,
     )
     # Published "-eupe" names are architecture aliases (baseline registers

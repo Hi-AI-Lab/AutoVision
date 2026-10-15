@@ -133,7 +133,7 @@ class TestGtrSVariant:
         assert spec.hidden_dim == 192
         assert spec.dec_dim_feedforward == 512
         assert spec.dec_layers == 4
-        assert spec.dec_num_points == (4, 4, 4)
+        assert spec.dec_num_points == (3, 6, 3)
         assert spec.decoder_default == "dfine_official"
 
     def test_spectrum_tier_is_planned_with_component(self):
@@ -166,6 +166,29 @@ class TestGtrAssembly:
         assert payload.license.id == "MIT"
         assert payload.spec["decoder_coverage"] >= 0.9
 
+    def test_assembly_is_now_complete(self, gtr_s_checkpoint, tmp_path):
+        """2026-10-16 gold-check fix: with the GTR lineage decoder
+        (dec_lineage="gtr" — 3-layer query_pos_head, group selection heads,
+        no enc_output, silu) + the norm2→norm3 key remap, the official
+        GTR-S decoder transfers COMPLETELY: 181 tensors, zero shape skips,
+        decoder coverage 1.0 (was 144 / 3 skips / 0.9613)."""
+        from autovision.tasks.detection.detr.dfine_official_warm_start import (
+            build_dfine_official_warm_start,
+        )
+
+        report = build_dfine_official_warm_start(
+            "gtr-s",
+            out=tmp_path / "full.pt",
+            checkpoint=gtr_s_checkpoint,
+            backbone_pretrained=False,
+            license_id="MIT",
+            origin="https://huggingface.co/Phoenix8125/GTR",
+            source_format="gtr",
+        )
+        assert report["skipped_shape"] == 0
+        assert report["decoder_coverage"] == 1.0
+        assert report["transferred"] >= 181
+
     def test_coverage_gate_refuses_partial(self, gtr_s_checkpoint, tmp_path):
         from autovision.tasks.detection.detr.dfine_official_warm_start import (
             WarmStartAssemblyError,
@@ -179,8 +202,148 @@ class TestGtrAssembly:
                 checkpoint=gtr_s_checkpoint,
                 backbone_pretrained=False,
                 source_format="gtr",
-                min_decoder_coverage=0.99,  # 0.9613 measured < 0.99 → refuse
+                min_decoder_coverage=1.0001,  # unreachable → the gate must refuse
             )
+
+    def test_payload_records_num_points_and_lineage(self, gtr_s_checkpoint, tmp_path):
+        from autovision.registry.warm_start import load_warm_start
+        from autovision.tasks.detection.detr.dfine_official_warm_start import (
+            build_dfine_official_warm_start,
+        )
+
+        out = tmp_path / "detr_gtr_s_ws.pt"
+        build_dfine_official_warm_start(
+            "gtr-s",
+            out=out,
+            checkpoint=gtr_s_checkpoint,
+            backbone_pretrained=False,
+            license_id="MIT",
+            origin="https://huggingface.co/Phoenix8125/GTR",
+            source_format="gtr",
+        )
+        spec = load_warm_start(out).spec
+        assert spec["dec_num_points"] == [3, 6, 3]
+        assert spec["dec_lineage"] == "gtr"
+
+    def test_load_refuses_num_points_mismatch(self, gtr_s_checkpoint, tmp_path):
+        """A payload whose (shape-identical) sampling split disagrees with
+        the target variant must be refused: sum(num_points) is the only
+        shape-visible quantity, so the transfer would silently mis-place
+        every level's deformable offsets (2026-10-16 gold-check)."""
+        from autovision.registry.warm_start import load_warm_start, save_warm_start
+        from autovision.tasks.detection.detr.dfine_official_warm_start import (
+            build_dfine_official_warm_start,
+        )
+        from autovision.tasks.detection.detr.task_model import (
+            DETRObjectDetection,
+            load_warm_start_into_network,
+        )
+
+        out = tmp_path / "detr_gtr_s_ws.pt"
+        build_dfine_official_warm_start(
+            "gtr-s",
+            out=out,
+            checkpoint=gtr_s_checkpoint,
+            backbone_pretrained=False,
+            license_id="MIT",
+            origin="https://huggingface.co/Phoenix8125/GTR",
+            source_format="gtr",
+        )
+        payload = load_warm_start(out)
+        tampered = tmp_path / "tampered.pt"
+        save_warm_start(
+            tampered,
+            model=payload.model,
+            spec={**payload.spec, "dec_num_points": [4, 4, 4]},
+            license=payload.license,
+        )
+        network = DETRObjectDetection(
+            num_classes=80,
+            model_name="gtr-s",
+            image_size=(640, 640),
+            decoder="dfine_official",
+            load_weights=False,
+            backbone_pretrained=False,
+        )
+        with pytest.raises(ValueError, match="num_points"):
+            load_warm_start_into_network(network, tampered)
+
+
+class TestGtrDecoderLineage:
+    """Gold-check (2026-10-16): GTR freezes the query positional embedding
+    across decoder layers (GTR-main ``decoder.py``:543-544: computed once
+    from the initial references; their deploy ``pos_qk`` fusion relies on
+    it being constant). D-FINE recomputes it per layer (upstream
+    ``zoo/dfine/dfine_decoder.py``:406). Evaluating a GTR checkpoint under
+    the per-layer variant cost ~8.5 COCO AP (45.07 vs 53.60)."""
+
+    @staticmethod
+    def _decoders(gtr_compat: bool):
+        from autovision.tasks.detection.shared.dfine_official_decoder import (
+            DFINEOfficialDecoder,
+        )
+
+        decoder = DFINEOfficialDecoder(
+            num_classes=2,
+            hidden_dim=32,
+            num_queries=10,
+            feat_channels=[32, 32, 32],
+            nhead=4,
+            num_layers=2,
+            dim_feedforward=64,
+            num_points=[3, 6, 3],
+            activation="silu" if gtr_compat else "relu",
+            gtr_compat=gtr_compat,
+            num_groups=3,
+            eval_spatial_size=(64, 64),
+            reg_max=8,
+        )
+        return decoder, decoder.decoder
+
+    @staticmethod
+    def _query_pos_per_layer(decoder, inner):
+        seen: list[object] = []
+        handles = [
+            layer.register_forward_pre_hook(lambda module, args: seen.append(args[5]))
+            for layer in inner.layers
+        ]
+        try:
+            shapes = torch.tensor([[8, 8], [4, 4], [2, 2]])
+            memory = torch.randn(1, 8 * 8 + 4 * 4 + 2 * 2, inner.hidden_dim)
+            with torch.no_grad():
+                inner(
+                    torch.randn(1, 10, inner.hidden_dim),
+                    torch.randn(1, 10, 4),
+                    memory,
+                    shapes,
+                    decoder.dec_bbox_head,
+                    decoder.dec_score_head,
+                    decoder.query_pos_head,
+                    decoder.pre_bbox_head,
+                    decoder.integral,
+                    decoder.up,
+                    decoder.reg_scale,
+                )
+        finally:
+            for handle in handles:
+                handle.remove()
+        return seen
+
+    def test_gtr_lineage_freezes_query_pos(self):
+        decoder, inner = self._decoders(gtr_compat=True)
+        assert inner.frozen_query_pos is True
+        seen = self._query_pos_per_layer(decoder, inner)
+        assert len(seen) == len(inner.layers)
+        # One shared embedding object across every layer.
+        assert len({id(query_pos) for query_pos in seen}) == 1
+
+    def test_dfine_lineage_recomputes_query_pos(self):
+        decoder, inner = self._decoders(gtr_compat=False)
+        assert inner.frozen_query_pos is False
+        seen = self._query_pos_per_layer(decoder, inner)
+        assert len(seen) == len(inner.layers)
+        # Distinct per-layer embeddings (references update between layers).
+        assert len({id(query_pos) for query_pos in seen}) > 1
 
 
 class TestGtrSTrainClosure:

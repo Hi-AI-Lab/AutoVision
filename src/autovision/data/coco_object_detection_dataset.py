@@ -109,6 +109,7 @@ class COCOObjectDetectionDataArgs(BaseModel):
             image_annotations = annotations_by_image.get(image_id, [])
             boxes: list[list[float]] = []
             labels: list[int] = []
+            iscrowds: list[int] = []
             for annotation in image_annotations:
                 class_id = int(annotation["category_id"])
                 if class_id not in internal:
@@ -123,12 +124,16 @@ class COCOObjectDetectionDataArgs(BaseModel):
                     ]
                 )
                 labels.append(internal[class_id])
+                iscrowds.append(int(annotation.get("iscrowd", 0)))
             if not boxes and self.skip_if_annotations_missing and split == "train":
                 continue
             yield {
                 "image_path": image_path,
                 "bboxes": json.dumps(boxes),
                 "class_labels": json.dumps(labels),
+                # Official-protocol ignore regions (consumed by the mAP
+                # evaluator; training treats every box as a regular target).
+                "iscrowds": json.dumps(iscrowds),
             }
 
 
