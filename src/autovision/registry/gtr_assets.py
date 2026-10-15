@@ -54,13 +54,19 @@ class GTRAsset:
     coco_ap: float | None = None
 
 
-#: Semantic-segmentation backbone widths (configs/semseg/cityscapes_finetune):
-#: variant -> (embed_dim, num_heads, ffn_ratio).
-GTR_SEMSEG_VARIANTS: dict[str, tuple[int, int, float]] = {
-    "s": (192, 3, 4.0),
-    "m": (256, 4, 4.0),
-    "l": (384, 6, 4.0),
-    "x": (384, 6, 6.0),
+#: Semantic-segmentation widths (configs/semseg/cityscapes_finetune +
+#: checkpoint shapes, 2026-10-16): variant -> (embed_dim, num_heads,
+#: ffn_ratio, hidden) where ``hidden`` is the stride-8 encoder output AND
+#: the head width. NOTE: L/X keep a 256-wide encoder/head while their ViT
+#: is 384 — the encoder down-projects (the official configs set
+#: ``GTREncoder.hidden_dim: 256`` for both), so ``hidden != embed_dim``
+#: there. Getting this wrong is shape-VISIBLE (the coverage gate refuses),
+#: but only per-variant: S/M coincide with ``embed_dim``.
+GTR_SEMSEG_VARIANTS: dict[str, tuple[int, int, float, int]] = {
+    "s": (192, 3, 4.0, 192),
+    "m": (256, 4, 4.0, 256),
+    "l": (384, 6, 4.0, 256),
+    "x": (384, 6, 6.0, 256),
 }
 
 

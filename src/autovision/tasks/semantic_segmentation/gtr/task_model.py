@@ -55,7 +55,7 @@ class GTRSemanticSegmentation(ONNXExportMixin, TaskNetwork):
                 f"Unknown GTR semseg variant '{variant}'; expected one of "
                 f"{sorted(GTR_SEMSEG_VARIANTS)}."
             )
-        embed_dim, num_heads, ffn_ratio = GTR_SEMSEG_VARIANTS[variant]
+        embed_dim, num_heads, ffn_ratio, hidden = GTR_SEMSEG_VARIANTS[variant]
         self.num_classes = num_classes
         self.variant = variant
         self.image_size = tuple(image_size)
@@ -67,11 +67,12 @@ class GTRSemanticSegmentation(ONNXExportMixin, TaskNetwork):
             interaction_indexes=_INTERACTION_INDEXES,
         )
         # Official semseg encoder: ONE stride-8 level (base config
-        # ``scale_factors: [2.0], feat_strides: [8]``), hidden width equal
-        # to the ViT width.
+        # ``scale_factors: [2.0], feat_strides: [8]``). Its output width
+        # is ``hidden`` — equal to the ViT width for S/M, a 256-wide
+        # projection for L/X (official configs: ``hidden_dim: 256``).
         self.encoder = GTREncoder(
             in_channels=[embed_dim] * 3,
-            hidden_dim=embed_dim,
+            hidden_dim=hidden,
             scale_factors=[2.0],
             feat_strides=[8],
             num_blocks=3,
@@ -79,8 +80,8 @@ class GTRSemanticSegmentation(ONNXExportMixin, TaskNetwork):
             act="silu",
         )
         self.head = SemSegHead(
-            in_channels=embed_dim,
-            hidden_dim=embed_dim,
+            in_channels=hidden,
+            hidden_dim=hidden,
             num_classes=num_classes,
             dropout=dropout,
         )
@@ -109,9 +110,32 @@ class GTRSemanticSegmentation(ONNXExportMixin, TaskNetwork):
         else:
             path = pathlib.Path(text)
         bundle = load_gtr_teacher(path, asset=asset)
-        self.backbone.backbone_model.load_state_dict(
-            extract_gtr_backbone(bundle), strict=True
-        )
+        backbone_state = extract_gtr_backbone(bundle)
+        target_backbone = self.backbone.backbone_model.state_dict()
+        backbone_mismatch = [
+            key
+            for key, tensor in backbone_state.items()
+            if key in target_backbone and target_backbone[key].shape != tensor.shape
+        ]
+        if backbone_mismatch:
+            # Wrong-variant checkpoints (e.g. an S checkpoint into an
+            # L-width net) mismatch on the very first block; surface a
+            # curated error instead of torch's raw per-tensor spew.
+            raise ValueError(
+                f"GTR semseg checkpoint '{path}' does not match variant "
+                f"'{self.variant}': {len(backbone_mismatch)} backbone tensors "
+                f"differ in shape (first: {backbone_mismatch[0]} "
+                f"{tuple(target_backbone[backbone_mismatch[0]].shape)} vs "
+                f"{tuple(backbone_state[backbone_mismatch[0]].shape)}). "
+                "Use the checkpoint's own variant."
+            )
+        try:
+            self.backbone.backbone_model.load_state_dict(backbone_state, strict=True)
+        except RuntimeError as error:
+            raise ValueError(
+                f"GTR semseg checkpoint '{path}' backbone does not load into "
+                f"variant '{self.variant}' strictly: {str(error)[:400]}"
+            ) from error
         target = self.state_dict()
         transferred: dict[str, torch.Tensor] = {}
         skipped_shape: list[str] = []
