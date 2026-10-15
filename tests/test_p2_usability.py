@@ -150,6 +150,24 @@ class TestPredictInferenceContract:
         finally:
             network.to("cpu")
 
+    def test_unknown_trainer_args_raise(self, coco8, tmp_path):
+        """trainer_args is an allowlist: unknown keys used to be dropped
+        silently (ema_warmup_steps belongs in model_args) — now loud."""
+        from autovision import train_object_detection
+
+        with pytest.raises(ValueError, match="Unknown trainer_args"):
+            train_object_detection(
+                out=tmp_path / "run",
+                data=coco8,
+                model="rtdetr/resnet18",
+                steps=1,
+                batch_size=2,
+                num_workers=0,
+                model_args=TINY_MODEL_ARGS,
+                transform_args=TINY_TRANSFORM_ARGS,
+                trainer_args={"ema_warmup_steps": 10},
+            )
+
 
 class TestCoco8Token:
     def test_train_data_loader_resolves_token(self, tmp_path, monkeypatch):

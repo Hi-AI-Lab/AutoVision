@@ -97,6 +97,10 @@ def train_object_detection(
     See the design doc (§8) for the contract; returns a
     :class:`TaskTrainResult` with checkpoint/export paths and best metrics.
     """
+    common_helpers.validate_trainer_args(
+        trainer_args, allowed={"val_every_num_steps", "log_every_n_steps"}
+    )
+    trainer_args_resolved = dict(trainer_args or {})
     out_dir = common_helpers.get_out_dir(out, resume_interrupted, overwrite)
     set_up_file_logging(out_dir / "train.log")
     # Mirror the progress lines (step summary, validation tables, best-
@@ -369,7 +373,7 @@ def train_object_detection(
             steps=steps_resolved,
             gradient_accumulation_steps=grad_accum_resolved,
             step_hooks=[train_transform, train_collate],
-            val_every_num_steps=(trainer_args or {}).get("val_every_num_steps"),
+            val_every_num_steps=trainer_args_resolved.get("val_every_num_steps"),
             save_every_num_steps=save_args.save_every_num_steps,
             save_last=save_args.save_last,
             save_best=save_args.save_best,
@@ -381,7 +385,7 @@ def train_object_detection(
             logger_fn=lambda metrics, step: [
                 lg.log_metrics(metrics, step) for lg in logger_instances
             ] if _is_rank_zero() else None,
-            log_every_n_steps=(trainer_args or {}).get(
+            log_every_n_steps=trainer_args_resolved.get(
                 "log_every_n_steps", min(50, max(1, len(train_loader)))
             ),
             normalize_args=train_transform_args.normalize.to_dict(),

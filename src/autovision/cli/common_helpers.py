@@ -19,9 +19,29 @@ __all__ = [
     "get_global_batch_size",
     "get_num_workers",
     "get_out_dir",
+    "validate_trainer_args",
 ]
 
 logger = logging.getLogger("autovision")
+
+
+def validate_trainer_args(trainer_args: dict | None, *, allowed: set[str]) -> None:
+    """Reject unknown ``trainer_args`` keys instead of silently ignoring them.
+
+    The trainer entries read a small allowlist of keys; anything else was
+    previously dropped without a word (e.g. ``ema_warmup_steps`` is a
+    ``model_args`` field — passing it as a trainer arg silently left the
+    2000-step default in place).
+    """
+    if not trainer_args:
+        return
+    unknown = sorted(set(trainer_args) - allowed)
+    if unknown:
+        raise ValueError(
+            f"Unknown trainer_args key(s) {unknown} — accepted: {sorted(allowed)}. "
+            "Model-side settings (lr, ema_warmup_steps, criterion flags, ...) "
+            "belong in model_args."
+        )
 
 
 def get_out_dir(
