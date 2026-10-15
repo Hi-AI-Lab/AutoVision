@@ -52,12 +52,47 @@ def coco8(tmp_path_factory):
 
 class TestGtrAssets:
     def test_registry_shape(self):
-        assert set(GTR_ASSETS) == {"gtr_s_coco", "gtr_m_coco", "gtr_l_coco", "gtr_x_coco"}
+        """All GTR task groups are registered (doc 31 §11): det + obj365
+        pretrain + seg/pose/depth/obb/semseg, one MIT sha256-pinned entry
+        per published checkpoint."""
+        from autovision.registry.gtr_assets import gtr_assets_for_task
+
+        assert set(gtr_assets_for_task("det")) == {
+            "gtr_s_coco", "gtr_m_coco", "gtr_l_coco", "gtr_x_coco",
+        }
+        assert set(gtr_assets_for_task("det-obj365")) == {
+            "gtr_s_obj365", "gtr_m_obj365", "gtr_l_obj365", "gtr_x_obj365",
+        }
+        assert set(gtr_assets_for_task("seg")) == {
+            "gtrseg_s_coco", "gtrseg_m_coco", "gtrseg_l_coco", "gtrseg_x_coco",
+        }
+        assert set(gtr_assets_for_task("pose")) == {
+            "gtrpose_s_coco", "gtrpose_m_coco", "gtrpose_l_coco", "gtrpose_x_coco",
+        }
+        assert set(gtr_assets_for_task("depth")) == {
+            "gtrdepth_s", "gtrdepth_m", "gtrdepth_l", "gtrdepth_x",
+        }
+        assert set(gtr_assets_for_task("obb")) == {"gtrobb_s_dota", "gtrobb_x_dota"}
+        assert set(gtr_assets_for_task("semseg")) == {
+            "gtrsemseg_s_cityscapes", "gtrsemseg_m_cityscapes",
+            "gtrsemseg_l_cityscapes", "gtrsemseg_x_cityscapes",
+        }
+        assert len(GTR_ASSETS) == 26
         for asset in GTR_ASSETS.values():
             assert asset.license == "MIT"
             assert asset.format == "gtr_ckpt_v1"
             assert len(asset.sha256) == 64
+            assert asset.path.exists(), asset.name
+        for asset in gtr_assets_for_task("det").values():
             assert asset.coco_ap is not None and asset.coco_ap > 50
+        # Per-task benchmark口径 comes from the README tables.
+        assert gtr_assets_for_task("semseg")["gtrsemseg_s_cityscapes"].metric_value == 81.5
+        assert gtr_assets_for_task("seg")["gtrseg_s_coco"].metric_name == "coco_mask_ap"
+        assert gtr_assets_for_task("pose")["gtrpose_s_coco"].num_keypoints == 17
+        assert gtr_assets_for_task("obb")["gtrobb_s_dota"].metric_name == "dota_ap50"
+        assert gtr_assets_for_task("depth")["gtrdepth_s"].metric_name == "nyu_absrel"
+        # The obj365 pretrain stage publishes no benchmark row.
+        assert gtr_assets_for_task("det-obj365")["gtr_s_obj365"].metric_value is None
 
     def test_unknown_asset_raises(self):
         with pytest.raises(AutoVisionError, match="Unknown GTR asset"):

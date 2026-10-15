@@ -97,3 +97,9 @@
   剩余 188 个 ≥15% 文件为同性质身份层长尾,登记为 P2b-2 待办（allowlist 携复审日期,禁词扫描仍全量覆盖）。
   `--fail-over 0.15` 门禁在 allowlist 全覆盖下通过。背景率对照实验:任意无关 900–1700-token 模块对本参照树
   的 dir-best 相似度为 16–21%（度量下限证据,见台账 2026-10-15 批注）。
+
+- 2026-10-16（**GTR 多任务集成 S1 登记，roadmap 分册 31 §11**）：① 资产面——`registry/gtr_assets.py` 扩至全任务组（26 权重：det 4 + obj365 4 + seg 4 + pose 4 + depth 4 + obb 2 + semseg 4；sha256 实测钉住 + MIT + README 度量元数据，obj365 无发布口径行如实留空）。② **S1 语义分割 re-port**（来源 `Intellindust-AI-Lab/GTR` `engine/gtr/semseg/gtrsemseg.py::SemSegHead`，MIT；其内部为 mmseg FCNHead 常规结构，GTR 基座配置 SyncBN 化）：
+  | 本文件 | GTR 源 | 处置 |
+  |---|---|---|
+  | `tasks/semantic_segmentation/gtr/segmentation_head.py` | `engine/gtr/semseg/gtrsemseg.py::SemSegHead` | re-port（去 core 注册器/设备逻辑），模块名逐字保留（conv/bn/act/dropout/classifier）保证 `head.*` 权重键直面装载 |
+  ③ 家族四模块（config/task_model/train_model/__init__）+ CLI dispatch（`gtr/<s|m|l|x>`）+ 官方权重装载器（EMA-first、`encoder.*`/`head.*` 覆盖率门禁 1.0、backbone 经 `extract_gtr_backbone` strict 直载）。**金标准对拍（RTX 4090D）**：官方 `GTRSemSeg`（其引擎/其 semseg-S 配置/官方 EMA 权重）与家族网络同输入 logits **逐比特一致（maxdiff 0.0；随机 512 / 真实图 512 / 真实图 1024 三组）**，argmax 一致率 1.0；尾部测试含 CPU 键形状核对 + CUDA 门控训练闭环（`gtr/s` dispatch，4 步，导出成功）。`tests/test_gtr_semseg.py` ×5。

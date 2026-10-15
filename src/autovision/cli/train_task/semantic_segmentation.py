@@ -100,7 +100,27 @@ def train_semantic_segmentation(
     is_eomt = isinstance(model, str) and model.startswith(
         ("dinov2/eomt", "dinov3/eomt")
     )
-    if is_eomt:
+    is_gtr = isinstance(model, str) and model.startswith("gtr/")
+    if is_gtr:
+        from autovision.tasks.semantic_segmentation.gtr import (
+            GTRSemSegTrain as train_cls,
+        )
+        from autovision.tasks.semantic_segmentation.gtr import (
+            GTRSemSegTrainArgs as args_cls,
+        )
+
+        # ``gtr/<s|m|l|x>`` selects the official GTR semseg width;
+        # ``model_args.checkpoint`` loads the official MIT weights
+        # (registered asset name or path).
+        resolved_model_args = pydantic_model_validate(
+            args_cls,
+            {
+                "num_classes": num_classes,
+                "variant": model.split("/", 1)[1],
+                **(model_args or {}),
+            },
+        )
+    elif is_eomt:
         if model.startswith("dinov3/eomt"):
             from autovision.tasks.semantic_segmentation.dinov3_eomt import (
                 Dinov3EomtSemanticSegmentationTrain as train_cls,

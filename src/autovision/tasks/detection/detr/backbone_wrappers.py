@@ -386,6 +386,7 @@ class GTRViTBackbone(Module):
         interaction_indexes: tuple[int, ...] = (3, 7, 11),
         patch_size: int = 16,
         finetune: bool = True,
+        ffn_ratio: float = 4.0,
     ) -> None:
         super().__init__()
         from autovision.errors import AutoVisionError
@@ -408,6 +409,7 @@ class GTRViTBackbone(Module):
             multi_layer_same_res=True,
             skip_weights_warning=True,
             patch_size=patch_size,
+            ffn_ratio=ffn_ratio,
         )
         if not finetune:
             self._adapter.eval()

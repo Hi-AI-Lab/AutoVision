@@ -168,6 +168,8 @@ RF-DETR / LW-DETR 风格的 MultiScaleProjector：对每个目标尺度独立做
 - **防再犯**：AVWarmStart payload 记录 `dec_num_points`/`dec_lineage`，`load_warm_start_into_network` 拒绝形状恒等的语义不匹配（sum-only 陷阱在装载层不可探测）；`tests/test_gtr_integration.py` 增谱系冻结断言（gtr→同一 qpe 对象跨层 / dfine→逐层新对象）+ payload 记录/拒载测试。
 - **注**：我方预处理（tensor bilinear antialias）与官方（PIL bilinear）val500 单点差 0.10 AP、全量口径 0.03（官方 net × 官方 transform 全量 53.64 vs 我方全链 53.61，≤噪声）——预处理为全家族共享语义，不为单模型改；修复前训练的 `gtrvit-s` 冒烟权重语义为逐层 qpe，重训即对齐（非发布物）。
 
+- **S1 实施记录（2026-10-16，GTR 多任务线首切片，详见 §11）**：① 资产面扩至全任务组——`registry/gtr_assets.py` 26 份权重（det 4 + obj365 4 + seg 4 + pose 4 + depth 4 + obb 2 + semseg 4）sha256 实测钉住 + MIT + README 度量元数据（obj365 无发布口径数字如实留空）。② **semseg 家族落地**：`tasks/semantic_segmentation/gtr/`（head re-port + config/task_model/train_model，`variant s/m/l/x` 宽度表与官方配置一致；官方装载器 EMA-first、`encoder.*`/`head.*` 覆盖率门禁 1.0、backbone 经 `extract_gtr_backbone` strict 直载）；CLI dispatch `gtr/<variant>`。③ **金标准对拍（RTX 4090D）**：官方 `GTRSemSeg`（其引擎 + 官方 EMA 权重）与本家族同输入 logits **逐比特一致（maxdiff 0.0；随机 512 / 真实图 512 / 真实图 1024）**，argmax 一致率 1.0；训练闭环（`gtr/s`，合成对，4 步 + 导出）CUDA 实测通过。④ `tests/test_gtr_semseg.py` ×5；LEDGER/NOTICE 增补该 re-port。**S1 剩余**：Cityscapes 滑窗评估（1024/768）与官方 81.5 mIoU 的本地复现（数据到位后）。
+
 ## 8. 验收 gate
 
 | # | 判据 | 证据物 |
@@ -195,3 +197,57 @@ RF-DETR / LW-DETR 风格的 MultiScaleProjector：对每个目标尺度独立做
 - 本册为 GTR 集成的单一定义源；G0/G1/G2 实施记录追加至 §7 表后（附日期），重大偏差按 ADR 落档。
 - 谱系相关变更（`gtr-s` 冻结、`detr/gtr-s` 键）同步分册 29 §3/§12 与 `variants.py` 注释。
 - 上游（GTR-main）版本钉住记录进 LEDGER；re-port 文件头保留 MIT 归属。
+
+---
+
+## 11. GTR 多任务面分析与集成计划（2026-10-16）
+
+GTR 不止检测：`engine/gtr/` 下另有 seg（实例分割）/pose/depth/obb/semseg 五条任务线，本地权重目录（`weight/gtr`）六任务组 26 份全部齐备（含 obj365 预训练阶段）。本节为分析 + 分级计划；实施记录追加至 §7。
+
+### 11.1 家族结构与共享面（实测）
+
+全任务共享同一 backbone（`ViTAdapterSpatialSwiGLU`）与 `GTREncoder`；差量集中在 head/decoder。与 `gtr_s_coco` 的**键集关系**（2026-10-16 实测）：
+
+| 任务 | 键数 | 与 det 共享 | 新增/差异 | 架构差量 |
+|---|---|---|---|---|
+| det | 502 | — | — | —（已集成，见 §7） |
+| **obb** | 502 | **502（完全相同）** | — | 键集与 det 全同：复用同一 `GTRTransformer`，差量全在**旋转框数学**（`rbox_ops` 243 行 / decoder 旋转分支 / criterion 468 行 / matcher / postproc） |
+| **obj365** | 502 | 502 | — | det 架构的**预训练阶段**（365 类；head 形状随类数变）；loaders/评测无需新代码，作任意任务的微调初值（README 表无发布口径数字，注册表如实留空） |
+| **seg** | 537 | 502 | **+35：`decoder.decoder.*` mask 头** | det 全栈 + `mask_downsample_ratio` 版 `SegmentationHead`（DepthwiseConvBlock×层 + query einsum）+ mask CE/Dice 损失与 matcher mask 代价（point-rend 点采样） |
+| **pose** | 467 | 365 | 独立 decoder（`enc_pose_embed`/`enc_out_class_embed`…） | 专属 decoder（833 行）+ keypoint 损失/matcher/dn/ms_deform_attn/postproc |
+| **depth** | 358 | 319 | DPT head（`layer_rn/refinenet{1,2,3}/output_conv*`，39 键） | **无 decoder**：encoder 金字塔 → Depth-Anything-V2 式 DPT 头 + SiLog 损失 |
+| **semseg** | 266 | 258 | FCN head（8 键：`head.{conv,bn,classifier}`） | **单层 stride-8 encoder**（`scale_factors:[2.0]`）+ mmseg FCNHead 式头 + CE（ignore 255） |
+
+README 口径（S 档）：det 53.6 AP → seg 45.0 mask AP → pose 70.1 kp AP → depth NYU δ1 0.946/AbsRel 0.074 → obb DOTA-v1.0 test 80.0 AP50 → semseg Cityscapes 81.5 mIoU（1024 滑窗 / stride 768）。semseg/seg 全程 `use_amp: False`（与 det 相同）；depth 权重训练时 `GTREncoder` **无 contiguity 拷贝**（其源码注释明示：depth 发布权重训练时无此拷贝，对拍必须 `force_contiguous=False`——形状不可见的数值差异陷阱）。
+
+### 11.2 我方任务面对照
+
+| 任务 | 我方任务面 | 本地数据 | 度量 | 集成差量 |
+|---|---|---|---|---|
+| semseg | `semantic_segmentation`（linear + eomt 家族） | 无 Cityscapes（成对 images/masks 格式可承接转换） | `SegmentationMetricCollector`（mIoU）✓ | head 8 键；滑窗评估待补（S1 记录单窗口径） |
+| seg | `instance_segmentation`（eomt 家族） | **COCO ✓**（instances 含多边形） | `COCOMaskAPEvaluator`（pycocotools segm）✓ | mask 头 + mask 损失/matcher/后处理；decoder 复用（已 gold-check） |
+| obb | `oriented_detection/rtdetr` | 无 DOTA（VisDrone 为水平框） | `metrics/oriented_detection.py` ✓ | 旋转框数学全链移植；权重键集≡det，warm-start 直通 |
+| depth | `depth_estimation`（**空家族**） | 无 NYU | **缺** AbsRel/RMSE/δ | DPT 头 + SiLog + 新家族/数据/度量/CLI（README 为六视图 + log-affine fit 自研协议） |
+| pose | `pose_estimation`（**空家族**） | COCO keypoints ✓ | **缺** OKS/AP | 独立 decoder 全量移植 + kp 数据/度量/CLI（最大切片） |
+
+### 11.3 分级实施计划（S1–S5）
+
+| 切片 | 内容 | 退出门禁 | 状态 |
+|---|---|---|---|
+| **S1 semseg** | head re-port（8 键）+ 家族四模块（`gtr/s\|m\|l\|x`）+ 官方装载器（覆盖率 1.0 门禁）+ CLI dispatch | 键形状核对 + **金标准对拍逐比特（maxdiff 0.0）**+ CUDA 训练闭环 | **已交付（2026-10-16）**，见 §7 记录 |
+| **S2 seg** | `SegmentationHead`（35 键）+ decoder mask 路径（`_OfficialFDRDecoder` 可选 mask 输出，det 行为不变）+ mask CE/Dice + matcher mask 代价 + mask 后处理 | COCO mask AP 对齐官方 45.0（±0.5，可端到端实测）；det 回归门禁不破 | 计划（推荐下一个） |
+| **S3 obb** | `rbox_ops` + 旋转 decoder/criterion/matcher/postproc 移植；权重复用 warm-start（键集≡det 即通） | 旋转框自检（角度周期/边界）+ 无标签对拍（同输入 vs 官方 net）；若获 DOTA 则 AP50 对齐 80.0 | 计划 |
+| **S4 depth** | DPT 头 + SiLog + 新家族；**`force_contiguous=False`** | NYU 六视图 + log-affine 复现 δ1 0.946（±0.005）；对拍在此配置下进行 | 计划 |
+| **S5 pose** | 独立 decoder（833 行）+ kp 损失/matcher/dn/postproc + COCO kp 数据面 + OKS 度量 + CLI | kp AP 对齐 70.1（±0.5） | 计划（最大切片，最后做） |
+
+依赖：S2/S3 均可独立先行（S2 有本地数据 vs S3 键集直通）；S4/S5 需先补度量/数据模块。obj365 四档任何时候可作为 backbone-init 资产（`resolve_gtr_asset("gtr_s_obj365")`）。
+
+### 11.4 补遗风险登记（承接 §9）
+
+| # | 风险 | 概率/影响 | 缓解 | 兜底 |
+|---|---|---|---|---|
+| R7 | depth `force_contiguous` 形状不可见差 | 高/中 | S4 对拍强制 False + 代码注释 | 双配置对拍记录 |
+| R8 | pose/S2 移植面的 train-eval 不一致（如 stage 语义） | 中/高 | 对拍脚本沿用 det 方法论（层/阶段级 + 全链） | 逐阶段 bisect（§7 工具链可复用） |
+| R9 | 数据集缺口（Cityscapes/NYU/DOTA） | 确定/中 | 加载正确性用**无标签对拍**（input→output 比对）；度量对齐留待数据到位 | 冒烟用合成数据 + 真实图无标签 |
+| R10 | semseg 滑窗评估缺位（1024/768 协议） | 中/低 | S1 已记录单窗口径；滑窗作为独立小项 | 单窗口径明示非发布数字 |
+| R11 | 家族代码跨任务 import（`semantic_segmentation/gtr` → `detection/shared/gtr`） | 低/低 | layering 契约允许（同层）；后续可归并 `tasks/shared/gtr/` | 归并作为独立重构项 |

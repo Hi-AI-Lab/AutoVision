@@ -49,7 +49,10 @@ remediation plan: docs/design/28-clean-provenance-refactor.md):
   src/autovision/tasks/detection/shared/gtr/vit_adapter.py and
   src/autovision/tasks/detection/shared/gtr/spatial_swiglu.py, and the
   RF-DETR/LW-DETR-style multi-scale projector (GTREncoder) in
-  src/autovision/tasks/detection/shared/gtr/encoder.py.
+  src/autovision/tasks/detection/shared/gtr/encoder.py, and the
+  semantic-segmentation FCN head (SemSegHead, itself the mmseg FCNHead
+  convention via GTR's engine/gtr/semseg/gtrsemseg.py) in
+  src/autovision/tasks/semantic_segmentation/gtr/segmentation_head.py.
   Runtime dependency (optional extra ``gtr``): flash-linear-attention
   0.5.0 (MIT).
 
