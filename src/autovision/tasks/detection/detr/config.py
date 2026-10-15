@@ -646,6 +646,18 @@ class DETRObjectDetectionTrainArgs(TrainModelArgs, PydanticConfig):
     #: float summation order (< 1e-6 fp32 in tests); off by default for
     #: the same run-comparability reason as ``fused_optimizer``.
     criterion_flat_losses: bool = False
+    #: Instance-segmentation mask branch (GTR seg lineage, design doc 31
+    #: §11 S2): point-sampled mask CE + Dice losses and the matcher's
+    #: point-sampled mask costs. Requires the task model built with
+    #: ``mask_downsample_ratio`` (decoder mask head) and targets carrying
+    #: ``masks``; weights mirror the official seg recipe (``gtrseg_base``:
+    #: loss 5.0/5.0, matcher costs 5.0/5.0, 16-point ratio shared by both).
+    mask_losses: bool = False
+    mask_sampling_ratio: int = 16
+    mask_ce_weight: float = 5.0
+    mask_dice_weight: float = 5.0
+    mask_cost_ce_weight: float = 5.0
+    mask_cost_dice_weight: float = 5.0
     optimizer_betas: tuple[float, float] = (0.9, 0.999)
     lr_warmup_steps: int | Literal["auto"] = "auto"
     scheduler_flat_steps: int | Literal["auto"] = "auto"

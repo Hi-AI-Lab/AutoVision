@@ -26,6 +26,7 @@ __all__ = [
     "GTRAsset",
     "GTR_ASSET_ROOT",
     "GTR_ASSETS",
+    "GTR_SEG_VARIANTS",
     "GTR_SEMSEG_VARIANTS",
     "gtr_assets_for_task",
     "resolve_gtr_asset",
@@ -67,6 +68,19 @@ GTR_SEMSEG_VARIANTS: dict[str, tuple[int, int, float, int]] = {
     "m": (256, 4, 4.0, 256),
     "l": (384, 6, 4.0, 256),
     "x": (384, 6, 6.0, 256),
+}
+
+
+#: Instance-segmentation backbone widths (configs/seg/coco_seg_finetune +
+#: checkpoint shapes, 2026-10-16): variant -> (embed_dim, num_heads,
+#: ffn_ratio); decoder hidden/FFN width follows the same table as
+#: detection (S: 192/512, M: 256/1024, L: 384/1024, X: 384/1024 — only S
+#: is registered as a task variant today, see the S2 record).
+GTR_SEG_VARIANTS: dict[str, tuple[int, int, float]] = {
+    "s": (192, 3, 4.0),
+    "m": (256, 4, 4.0),
+    "l": (384, 6, 4.0),
+    "x": (384, 6, 6.0),
 }
 
 

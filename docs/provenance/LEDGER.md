@@ -103,3 +103,11 @@
   |---|---|---|
   | `tasks/semantic_segmentation/gtr/segmentation_head.py` | `engine/gtr/semseg/gtrsemseg.py::SemSegHead` | re-port（去 core 注册器/设备逻辑），模块名逐字保留（conv/bn/act/dropout/classifier）保证 `head.*` 权重键直面装载 |
   ③ 家族四模块（config/task_model/train_model/__init__）+ CLI dispatch（`gtr/<s|m|l|x>`）+ 官方权重装载器（EMA-first、`encoder.*`/`head.*` 覆盖率门禁 1.0、backbone 经 `extract_gtr_backbone` strict 直载）。**金标准对拍（RTX 4090D）**：官方 `GTRSemSeg`（其引擎/其 semseg-S 配置/官方 EMA 权重）与家族网络同输入 logits **逐比特一致（maxdiff 0.0；随机 512 / 真实图 512 / 真实图 1024 三组）**，argmax 一致率 1.0；尾部测试含 CPU 键形状核对 + CUDA 门控训练闭环（`gtr/s` dispatch，4 步，导出成功）。`tests/test_gtr_semseg.py` ×5。
+
+- 2026-10-16（**GTR 多任务集成 S2 登记，roadmap 分册 31 §11**）：实例分割 re-port（来源 `Intellindust-AI-Lab/GTR`，MIT；相关文件均"Modified from RF-DETR"，Apache-2.0）：
+  | 本文件 | GTR 源 | 处置 |
+  |---|---|---|
+  | `tasks/detection/shared/gtr/segmentation_head.py` | `engine/gtr/det/segmentation_head.py`（SegmentationHead/DepthwiseConvBlock/MLPBlock/point_sample/uncertain-point 采样） | re-port；去掉 `export()` 运行期方法替换（部署走 ONNX/TRT 导出器） |
+  | `tasks/detection/shared/matcher.py`（`_batch_sigmoid_ce_loss`/`_batch_dice_loss`） | `engine/gtr/box_ops.py` | 逐行 re-port（对拍逐比特一致，同种子） |
+  | `tasks/detection/shared/dfine_criterion.py`（`mask_point_losses`/`_mask_dice`/`_mask_sigmoid_ce`） | `engine/gtr/det/criterion.py`（`loss_masks`/`dice_loss`/`sigmoid_ce_loss`/`calculate_uncertainty`） | re-port（同种子对拍 BIT-EQUAL） |
+  集成面：decoder mask 路径（`mask_downsample_ratio`，head 单次注册于 inner decoder，官方键序 `decoder.decoder.segmentation_head.*`）；criterion mask 分支（main/aux/pre/dn 四路 + weight 后缀展开）；matcher mask 代价（共享随机点网格、对角线块提取）；家族 `tasks/instance_segmentation/gtr/` + CLI `gtr/s`。

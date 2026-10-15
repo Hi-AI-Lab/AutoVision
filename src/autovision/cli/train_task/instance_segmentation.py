@@ -62,7 +62,26 @@ def train_instance_segmentation(
         build_eomt_instance_transform,
     )
 
-    if model.startswith("dinov3/eomt"):
+    is_gtr = isinstance(model, str) and model.startswith("gtr/")
+    if is_gtr:
+        from autovision.tasks.instance_segmentation.gtr import (
+            GTRSegTrain as train_cls,
+        )
+        from autovision.tasks.instance_segmentation.gtr import (
+            GTRSegTrainArgs as args_cls,
+        )
+
+        # ``gtr/<s|m|l|x>`` selects the official GTR seg width;
+        # ``model_args.checkpoint`` loads the official MIT weights.
+        resolved_model_args = pydantic_model_validate(
+            args_cls,
+            {
+                "num_classes": num_classes,
+                "variant": model.split("/", 1)[1],
+                **(model_args or {}),
+            },
+        )
+    elif model.startswith("dinov3/eomt"):
         from autovision.tasks.instance_segmentation.dinov3_eomt import (
             Dinov3EomtInstanceSegmentationTrain as train_cls,
         )
@@ -101,10 +120,11 @@ def train_instance_segmentation(
             annotations, images_dir=images_dir, transform=None
         )
 
-    resolved_model_args = pydantic_model_validate(
-        args_cls,
-        {"num_classes": num_classes, **(model_args or {})},
-    )
+    if not is_gtr:
+        resolved_model_args = pydantic_model_validate(
+            args_cls,
+            {"num_classes": num_classes, **(model_args or {})},
+        )
     save_args = pydantic_model_validate(_SaveCheckpointArgs, dict(save_checkpoint_args or {}))
     batch_size_resolved = (
         args_cls.default_batch_size
@@ -125,8 +145,11 @@ def train_instance_segmentation(
     per_device_batch = max(1, global_batch_size // num_devices)
 
     def _transformed(dataset: COCOInstanceSegmentationDataset, train: bool):
+        image_size = resolved_model_args.image_size
+        if isinstance(image_size, (tuple, list)):
+            image_size = int(image_size[0])
         dataset.transform = build_eomt_instance_transform(
-            image_size=resolved_model_args.image_size,
+            image_size=image_size,
             normalize_mean=resolved_model_args.normalize.mean,
             normalize_std=resolved_model_args.normalize.std,
             train=train,

@@ -31,6 +31,7 @@ from __future__ import annotations
 import logging
 
 import torch
+import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
 from torch import nn
 
@@ -169,7 +170,106 @@ def _build_cost(
         + matcher.cost_bbox * l1_cost
         + matcher.cost_giou * giou_cost
     )
+    mask_cost = _mask_cost(matcher, outputs, targets, num_targets, max_targets, device)
+    if mask_cost is not None:
+        cost = cost + mask_cost
     return torch.nan_to_num(cost, nan=1.0), num_targets
+
+
+# ── mask costs (GTR seg lineage, design doc 31 §11 S2) ──────────────────
+# Point-sampled pairwise CE/Dice, re-ported from GTR's engine/gtr/box_ops.py
+# (MIT; those helpers are RF-DETR's, Apache-2.0) — ledger:
+# docs/provenance/LEDGER.md. Only active when the matcher was constructed
+# with mask costs and the outputs/targets carry masks.
+def _batch_dice_loss(inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    inputs = inputs.sigmoid().flatten(1)
+    numerator = 2 * torch.einsum("nc,mc->nm", inputs, targets)
+    denominator = inputs.sum(-1)[:, None] + targets.sum(-1)[None, :]
+    return 1 - (numerator + 1) / (denominator + 1)
+
+
+def _batch_sigmoid_ce_loss(inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    hw = inputs.shape[1]
+    pos = F.binary_cross_entropy_with_logits(
+        inputs, torch.ones_like(inputs), reduction="none"
+    )
+    neg = F.binary_cross_entropy_with_logits(
+        inputs, torch.zeros_like(inputs), reduction="none"
+    )
+    loss = torch.einsum("nc,mc->nm", pos, targets) + torch.einsum(
+        "nc,mc->nm", neg, (1 - targets)
+    )
+    return loss / hw
+
+
+def _mask_cost(
+    matcher: "HungarianMatcher", outputs, targets, num_targets, max_targets, device
+):
+    """(B, Q, Nmax) point-sampled mask CE+Dice cost, or ``None``.
+
+    Official semantics (GTR matcher): one shared random point grid per
+    call at ``h*w // mask_point_sample_ratio`` points; predictions sampled
+    bilinearly, target masks nearest; pairwise costs normalized per pair.
+    Target masks are resized (nearest) to the prediction mask grid so a
+    batch of mixed-resolution masks stays one batched op — per-image
+    slices in the solve make the extra off-diagonal pairs irrelevant.
+    """
+    if not (matcher.cost_mask_ce or matcher.cost_mask_dice):
+        return None
+    if matcher.mask_point_sample_ratio is None:
+        return None
+    out_masks = outputs.get("pred_masks")
+    if out_masks is None or not targets:
+        return None
+    if "masks" not in targets[0] or targets[0]["masks"] is None:
+        return None
+
+    from autovision.tasks.detection.shared.gtr.segmentation_head import point_sample
+
+    batch_size, num_queries = out_masks.shape[0], out_masks.shape[1]
+    mask_h, mask_w = out_masks.shape[-2:]
+    num_points = max(mask_h * mask_w // matcher.mask_point_sample_ratio, 1)
+
+    tgt_masks = torch.zeros(
+        (batch_size, max_targets, mask_h, mask_w),
+        dtype=out_masks.dtype,
+        device=device,
+    )
+    for index, target in enumerate(targets):
+        count = num_targets[index]
+        if not count:
+            continue
+        masks = target["masks"].to(device=device, dtype=out_masks.dtype)
+        if masks.ndim == 2:
+            masks = masks.unsqueeze(0)
+        if tuple(masks.shape[-2:]) != (mask_h, mask_w):
+            masks = F.interpolate(
+                masks.unsqueeze(1), size=(mask_h, mask_w), mode="nearest"
+            ).squeeze(1)
+        tgt_masks[index, :count] = masks
+
+    flat_pred = out_masks.flatten(0, 1)
+    flat_tgt = tgt_masks.flatten(0, 1)
+    point_coords = torch.rand(1, num_points, 2, device=device)
+    pred_points = point_sample(
+        flat_pred.unsqueeze(1), point_coords.repeat(flat_pred.shape[0], 1, 1),
+        align_corners=False,
+    ).squeeze(1)
+    tgt_points = point_sample(
+        flat_tgt.unsqueeze(1), point_coords.repeat(flat_tgt.shape[0], 1, 1),
+        align_corners=False, mode="nearest",
+    ).squeeze(1)
+
+    ce = _batch_sigmoid_ce_loss(pred_points, tgt_points)
+    dice = _batch_dice_loss(pred_points, tgt_points)
+    # Diagonal blocks only: (B*Q, B*N) -> (B, Q, B, N) -> per-image (B, Q, N).
+    ce = ce.view(batch_size, num_queries, batch_size, max_targets)
+    dice = dice.view(batch_size, num_queries, batch_size, max_targets)
+    diagonal = torch.arange(batch_size, device=device)
+    return (
+        matcher.cost_mask_ce * ce[diagonal, :, diagonal, :]
+        + matcher.cost_mask_dice * dice[diagonal, :, diagonal, :]
+    )
 
 
 def _scipy_solve(cost_cpu: torch.Tensor, count: int):
@@ -347,6 +447,9 @@ class HungarianMatcher(nn.Module):
         cost_giou: float = 2.0,
         alpha: float = 0.25,
         gamma: float = 2.0,
+        cost_mask_ce: float = 0.0,
+        cost_mask_dice: float = 0.0,
+        mask_point_sample_ratio: int | None = None,
     ) -> None:
         super().__init__()
         self.cost_class = cost_class
@@ -354,6 +457,12 @@ class HungarianMatcher(nn.Module):
         self.cost_giou = cost_giou
         self.alpha = alpha
         self.gamma = gamma
+        #: Mask costs (GTR seg lineage): active only with a sampling ratio
+        #: and non-zero weights; ``outputs['pred_masks']`` + target
+        #: ``masks`` must be present or they are silently skipped.
+        self.cost_mask_ce = cost_mask_ce
+        self.cost_mask_dice = cost_mask_dice
+        self.mask_point_sample_ratio = mask_point_sample_ratio
 
     def forward(
         self, outputs: dict[str, torch.Tensor], targets: list[dict[str, torch.Tensor]]

@@ -4,7 +4,7 @@
 Based on the official D-FINE implementation (D-FINE: Redefine Regression
 Task of DETRs as Fine-grained Distribution Refinement, Apache-2.0,
 ``Peterande/D-FINE`` @ ``956d170``, ``src/zoo/dfine/dfine_decoder.py``),
-modified by Autovision per Apache-2.0 section 4b; ledger:
+modified by AutoVision per Apache-2.0 section 4b; ledger:
 ``docs/provenance/LEDGER.md`` (P1-2). This is the decoder architecture the
 published baseline D-FINE COCO checkpoints were trained with — its
 decoder layer fuses self-attention
@@ -59,6 +59,9 @@ from autovision.tasks.detection.shared.denoising import (
 from autovision.tasks.detection.shared.dfine_utils import (
     distance2bbox,
     weighting_function,
+)
+from autovision.tasks.detection.shared.gtr.segmentation_head import (
+    SegmentationHead,
 )
 from autovision.tasks.detection.shared.open_vocab import (
     ContrastiveClassHead,
@@ -376,6 +379,7 @@ class _OfficialFDRDecoder(nn.Module):
         layer_scale: float = 2,
         activation: str = "relu",
         frozen_query_pos: bool = False,
+        segmentation_head: nn.Module | None = None,
     ) -> None:
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -383,6 +387,7 @@ class _OfficialFDRDecoder(nn.Module):
         self.layer_scale = layer_scale
         self.num_head = num_head
         self.frozen_query_pos = frozen_query_pos
+        self.segmentation_head = segmentation_head
         self.eval_idx = eval_idx if eval_idx >= 0 else num_layers + eval_idx
         # References to the owner's parameters: registered under BOTH
         # ``decoder.up`` and ``decoder.decoder.up`` (published-checkpoint
@@ -445,6 +450,7 @@ class _OfficialFDRDecoder(nn.Module):
         memory_mask: torch.Tensor | None = None,
         dn_meta: dict | None = None,
         text_embeds: torch.Tensor | None = None,
+        spatial_features: torch.Tensor | None = None,
     ) -> tuple:
         output = target
         output_detach: torch.Tensor | int = 0
@@ -455,6 +461,9 @@ class _OfficialFDRDecoder(nn.Module):
         dec_out_logits: list[torch.Tensor] = []
         dec_out_pred_corners: list[torch.Tensor] = []
         dec_out_refs: list[torch.Tensor] = []
+        #: Query hidden states per producing layer (mask head input; only
+        #: collected when a segmentation head is attached).
+        dec_out_hidden: list[torch.Tensor] = []
         if not hasattr(self, "project"):
             project = weighting_function(self.reg_max, up, reg_scale)
         else:
@@ -545,11 +554,32 @@ class _OfficialFDRDecoder(nn.Module):
                     dec_out_bboxes.append(inter_ref_bbox_fp32.to(output.dtype))
                     dec_out_pred_corners.append(pred_corners_fp32.to(output.dtype))
                     dec_out_refs.append(ref_points_initial_fp32.to(output.dtype))
+                if self.segmentation_head is not None:
+                    dec_out_hidden.append(output)
+                if not self.training:
                     break
 
             pred_corners_undetach = pred_corners_fp32
             ref_points_detach = inter_ref_bbox_fp32.detach().to(dtype=output.dtype)
             output_detach = output.detach()
+
+        # Segmentation: per-layer mask logits from the collected query
+        # features and the stride-8 spatial features (official placement —
+        # the head runs once over the loop's hidden states).
+        masks = None
+        pre_segs = None
+        if self.segmentation_head is not None:
+            if spatial_features is None:
+                raise ValueError(
+                    "the segmentation head requires spatial_features "
+                    "(encoder level 0); the decoder was called without them."
+                )
+            mask_logits = self.segmentation_head(
+                spatial_features=spatial_features,
+                query_features=dec_out_hidden,
+            )
+            masks = torch.stack(mask_logits)
+            pre_segs = mask_logits[0]
 
         return (
             torch.stack(dec_out_bboxes),
@@ -558,6 +588,8 @@ class _OfficialFDRDecoder(nn.Module):
             torch.stack(dec_out_refs),
             pre_bboxes_fp32,
             pre_scores,
+            masks,
+            pre_segs,
         )
 
 
@@ -582,6 +614,7 @@ class DFINEOfficialDecoder(nn.Module):
         activation: str = "relu",
         gtr_compat: bool = False,
         num_groups: int = 3,
+        mask_downsample_ratio: int | None = None,
         num_denoising: int = 100,
         label_noise_ratio: float = 0.5,
         box_noise_scale: float = 1.0,
@@ -658,6 +691,31 @@ class DFINEOfficialDecoder(nn.Module):
                 "gtr_compat=True is the closed-set GTR lineage decoder; "
                 "the open-vocabulary branch requires the D-FINE layout."
             )
+        # Instance segmentation head (GTR seg lineage): per-query mask
+        # logits from the decoder's per-layer hidden states × the stride-8
+        # spatial features, at eval_spatial_size / mask_downsample_ratio.
+        # Owned by the INNER decoder only (official layout: the parameter
+        # keys are ``decoder.decoder.segmentation_head.*``; registering it
+        # here too would double every weight in state_dict).
+        segmentation_head: nn.Module | None = None
+        if mask_downsample_ratio is not None:
+            if not self.gtr_compat:
+                raise NotImplementedError(
+                    "mask_downsample_ratio is the GTR-seg lineage feature "
+                    "(gtr_compat=True); upstream D-FINE does not ship an "
+                    "instance-segmentation decoder."
+                )
+            if eval_spatial_size is None:
+                raise ValueError(
+                    "the segmentation head bakes eval_spatial_size into its "
+                    "output resolution; pass it (e.g. (640, 640))."
+                )
+            segmentation_head = SegmentationHead(
+                hidden_dim,
+                num_layers,
+                downsample_ratio=int(mask_downsample_ratio),
+                image_size=(int(eval_spatial_size[0]), int(eval_spatial_size[1])),
+            )
         # Open-vocabulary branch (design doc 27) — same contract as the
         # fork decoders (rtdetrv2_decoder.py): contrastive score heads over
         # the persistent ``ov_text_embeds`` buffer, reduced (B, Q, C) view.
@@ -727,6 +785,7 @@ class DFINEOfficialDecoder(nn.Module):
             layer_scale,
             activation,
             frozen_query_pos=gtr_compat,
+            segmentation_head=segmentation_head,
         )
 
         self.num_denoising = num_denoising
@@ -1118,11 +1177,16 @@ class DFINEOfficialDecoder(nn.Module):
 
     @torch.jit.unused
     def _set_aux_loss(
-        self, outputs_class: Any, outputs_coord: Any
+        self, outputs_class: Any, outputs_coord: Any, outputs_mask: Any = None
     ) -> list[dict[str, torch.Tensor]]:
+        if outputs_mask is None:
+            return [
+                {"pred_logits": a, "pred_boxes": b}
+                for a, b in zip(outputs_class, outputs_coord)
+            ]
         return [
-            {"pred_logits": a, "pred_boxes": b}
-            for a, b in zip(outputs_class, outputs_coord)
+            {"pred_logits": a, "pred_boxes": b, "pred_masks": m}
+            for a, b, m in zip(outputs_class, outputs_coord, outputs_mask)
         ]
 
     def forward(
@@ -1160,23 +1224,33 @@ class DFINEOfficialDecoder(nn.Module):
             memory, spatial_shapes, denoising_logits, denoising_bbox_unact
         )
 
-        out_bboxes, out_logits, out_corners, out_refs, pre_bboxes, pre_logits = (
-            self.decoder(
-                init_ref_contents,
-                init_ref_points_unact,
-                memory,
-                spatial_shapes,
-                self.dec_bbox_head,
-                self.dec_score_head,
-                self.query_pos_head,
-                self.pre_bbox_head,
-                self.integral,
-                self.up,
-                self.reg_scale,
-                attn_mask=attn_mask,
-                dn_meta=dn_meta,
-                text_embeds=self._ov_forward_text_embeds(),
-            )
+        (
+            out_bboxes,
+            out_logits,
+            out_corners,
+            out_refs,
+            pre_bboxes,
+            pre_logits,
+            out_masks,
+            pre_segs,
+        ) = self.decoder(
+            init_ref_contents,
+            init_ref_points_unact,
+            memory,
+            spatial_shapes,
+            self.dec_bbox_head,
+            self.dec_score_head,
+            self.query_pos_head,
+            self.pre_bbox_head,
+            self.integral,
+            self.up,
+            self.reg_scale,
+            attn_mask=attn_mask,
+            dn_meta=dn_meta,
+            text_embeds=self._ov_forward_text_embeds(),
+            spatial_features=(
+                feats[0] if self.decoder.segmentation_head is not None else None
+            ),
         )
 
         if self.training and dn_meta is not None:
@@ -1198,12 +1272,25 @@ class DFINEOfficialDecoder(nn.Module):
             dn_out_refs, out_refs = torch.split(
                 out_refs, dn_meta["dn_num_split"], dim=2
             )
+            if out_masks is not None:
+                dn_out_masks, out_masks = torch.split(
+                    out_masks, dn_meta["dn_num_split"], dim=2
+                )
+                dn_pre_segs, pre_segs = torch.split(
+                    pre_segs, dn_meta["dn_num_split"], dim=1
+                )
+            else:
+                dn_out_masks = None
 
         if self.training:
             out: dict[str, Any] = {
                 "pred_logits": out_logits[-1],
                 "pred_boxes": out_bboxes[-1],
-                "aux_outputs": self._set_aux_loss(out_logits[:-1], out_bboxes[:-1]),
+                "aux_outputs": self._set_aux_loss(
+                    out_logits[:-1],
+                    out_bboxes[:-1],
+                    out_masks[:-1] if out_masks is not None else None,
+                ),
                 "pre_outputs": {"pred_logits": pre_logits, "pred_boxes": pre_bboxes},
                 "enc_aux_outputs": self._set_aux_loss(
                     enc_topk_logits_list, enc_topk_bboxes_list
@@ -1214,14 +1301,21 @@ class DFINEOfficialDecoder(nn.Module):
                 "pred_corners_list": list(out_corners),
                 "ref_boxes_list": list(out_refs),
             }
+            if out_masks is not None:
+                out["pred_masks"] = out_masks[-1]
+                out["pre_outputs"]["pred_masks"] = pre_segs
             if dn_meta is not None:
                 out["dn_aux_outputs"] = self._set_aux_loss(
-                    dn_out_logits, dn_out_bboxes
+                    dn_out_logits,
+                    dn_out_bboxes,
+                    dn_out_masks if dn_out_masks is not None else None,
                 )
                 out["dn_pre_outputs"] = {
                     "pred_logits": dn_pre_logits,
                     "pred_boxes": dn_pre_bboxes,
                 }
+                if out_masks is not None:
+                    out["dn_pre_outputs"]["pred_masks"] = dn_pre_segs
                 out["dn_meta"] = dn_meta
                 out["dn_pred_corners_list"] = list(dn_out_corners)
                 out["dn_ref_boxes_list"] = list(dn_out_refs)
@@ -1230,5 +1324,7 @@ class DFINEOfficialDecoder(nn.Module):
                 "pred_logits": out_logits[-1],
                 "pred_boxes": out_bboxes[-1],
             }
+            if out_masks is not None:
+                out["pred_masks"] = out_masks[-1]
 
         return out

@@ -180,8 +180,15 @@ class DETRObjectDetectionTrain(TrainModel):
     task = "object_detection"
     watch_metric = "val_metric/map"
 
-    def __init__(self, model_args: DETRObjectDetectionTrainArgs) -> None:
-        task_model = DETRObjectDetection(
+    def _build_task_model(
+        self, model_args: DETRObjectDetectionTrainArgs
+    ) -> DETRObjectDetection:
+        """Construct the task model from the train args.
+
+        Extracted so task subclasses (e.g. the GTR instance-segmentation
+        family) can override the construction without copying the ctor.
+        """
+        return DETRObjectDetection(
             num_classes=model_args.num_classes,
             model_name=model_args.backbone,
             image_size=model_args.image_size,
@@ -214,6 +221,9 @@ class DETRObjectDetectionTrain(TrainModel):
             token_drop=model_args.token_drop,
             open_vocab=model_args.open_vocab,
         )
+
+    def __init__(self, model_args: DETRObjectDetectionTrainArgs) -> None:
+        task_model = self._build_task_model(model_args)
         super().__init__(task_model=task_model)
         self.model_args = model_args
         if model_args.warm_start is not None:
@@ -239,7 +249,17 @@ class DETRObjectDetectionTrain(TrainModel):
                 "baseline detector checkpoint '%s' loaded: %s",
                 checkpoint_path, summary,
             )
-        self.matcher = HungarianMatcher()
+        self.matcher = HungarianMatcher(
+            cost_mask_ce=(
+                model_args.mask_cost_ce_weight if model_args.mask_losses else 0.0
+            ),
+            cost_mask_dice=(
+                model_args.mask_cost_dice_weight if model_args.mask_losses else 0.0
+            ),
+            mask_point_sample_ratio=(
+                model_args.mask_sampling_ratio if model_args.mask_losses else None
+            ),
+        )
         # EMA is created before the criterion so the ``self:ema`` distill
         # teacher can alias this copy (design doc 23 §4.2); deepcopy draws
         # no RNG, so moving it changes nothing else about init.
@@ -335,6 +355,10 @@ class DETRObjectDetectionTrain(TrainModel):
                 # distill_params carries the class-space-adjusted cls_coef
                 # (the teacher is built above, before this ctor).
                 distill_params=distill_params,
+                mask_losses=model_args.mask_losses,
+                mask_sampling_ratio=model_args.mask_sampling_ratio,
+                mask_ce_weight=model_args.mask_ce_weight,
+                mask_dice_weight=model_args.mask_dice_weight,
             )
         else:
             self.criterion = RTDETRCriterionV2(self.matcher)
@@ -364,6 +388,18 @@ class DETRObjectDetectionTrain(TrainModel):
         self._val_window_ratios: list[float] = []
 
     # ── steps ───────────────────────────────────────────────────────────
+    def _build_targets(
+        self, batch: dict[str, Any], x: torch.Tensor
+    ) -> list[dict[str, torch.Tensor]]:
+        """Batch -> criterion targets (boxes/labels on the input device).
+
+        Task subclasses add their extra target keys (masks) by overriding.
+        """
+        return [
+            {"boxes": boxes.to(x.device), "labels": labels.to(x.device)}
+            for boxes, labels in zip(batch["bboxes"], batch["classes"])
+        ]
+
     def training_step(self, batch: dict, step: int) -> TaskStepResult:
         x = batch["image"]
         # In-backbone background token dropping (design doc 17): masks are
@@ -386,10 +422,7 @@ class DETRObjectDetectionTrain(TrainModel):
                     int(x.shape[-1]),
                     token_drop,
                 )
-        targets = [
-            {"boxes": boxes.to(x.device), "labels": labels.to(x.device)}
-            for boxes, labels in zip(batch["bboxes"], batch["classes"])
-        ]
+        targets = self._build_targets(batch, x)
         if window_masks is not None and any(m is not None for m in window_masks):
             for target, mask in zip(targets, window_masks):
                 if mask is not None:

@@ -52,7 +52,12 @@ remediation plan: docs/design/28-clean-provenance-refactor.md):
   src/autovision/tasks/detection/shared/gtr/encoder.py, and the
   semantic-segmentation FCN head (SemSegHead, itself the mmseg FCNHead
   convention via GTR's engine/gtr/semseg/gtrsemseg.py) in
-  src/autovision/tasks/semantic_segmentation/gtr/segmentation_head.py.
+  src/autovision/tasks/semantic_segmentation/gtr/segmentation_head.py,
+  the instance-segmentation mask head + PointRend point sampling
+  (GTR's engine/gtr/det/segmentation_head.py, itself RF-DETR/PointRend
+  derived) in src/autovision/tasks/detection/shared/gtr/segmentation_head.py,
+  and the pairwise mask CE/Dice cost helpers (GTR's engine/gtr/box_ops.py,
+  RF-DETR derived) in src/autovision/tasks/detection/shared/matcher.py.
   Runtime dependency (optional extra ``gtr``): flash-linear-attention
   0.5.0 (MIT).
 

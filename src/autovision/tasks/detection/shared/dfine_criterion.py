@@ -35,6 +35,7 @@ from __future__ import annotations
 from typing import Literal
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from autovision.runtime.distributed import reduce_dict
@@ -75,6 +76,91 @@ from autovision.tasks.detection.shared.ssl_contrastive import (
 )
 
 __all__ = ["DFINECriterionV2"]
+
+
+# ── mask losses (GTR seg lineage, design doc 31 §11 S2) ─────────────────
+# Point-sampled BCE + Dice on matched masks, re-ported from GTR's
+# engine/gtr/det/criterion.py::GTRCriterion.loss_masks (MIT; the point
+# sampler is PointRend's, via GTR's segmentation_head) — ledger:
+# docs/provenance/LEDGER.md.
+def mask_point_losses(
+    pred_masks: torch.Tensor,
+    targets: list[dict[str, torch.Tensor]],
+    indices: list[tuple[torch.Tensor, torch.Tensor]],
+    num_boxes: torch.Tensor,
+    sampling_ratio: int,
+) -> dict[str, torch.Tensor]:
+    """``{'loss_mask_ce', 'loss_mask_dice'}`` over the matched pairs.
+
+    ``pred_masks``: (B, Q, h, w) mask logits of one layer; target masks
+    are sampled at the SAME point grid at their own resolution (their
+    pipeline keeps target masks at dataset resolution). Point count:
+    ``h * w // sampling_ratio`` (official; the ``max(h, ...)`` guard only
+    matters for degenerate tiny grids).
+    """
+    from autovision.tasks.detection.shared.gtr.segmentation_head import (
+        get_uncertain_point_coords_with_randomness,
+        point_sample,
+    )
+
+    device = pred_masks.device
+    flat_q, flat_gt, batch_idx = flatten_match_indices(
+        indices, pred_masks.shape[1], device
+    )
+    src_masks = pred_masks.reshape(-1, *pred_masks.shape[-2:])[flat_q]
+    if src_masks.numel() == 0:
+        zeros = pred_masks.sum() * 0.0
+        return {"loss_mask_ce": zeros, "loss_mask_dice": zeros}
+
+    # Per-pair slices are 2-D (Ht, Wt) — stack, not cat (a 2-D cat along
+    # dim 0 would flatten the rows). Official indexes with the (tensor)
+    # match indices and cats the kept leading dim; same result.
+    target_masks = torch.stack(
+        [
+            targets[b].get("masks")[g].to(device=device)
+            for b, g in zip(batch_idx.tolist(), flat_gt.tolist())
+        ],
+        dim=0,
+    )
+    src_masks = src_masks.unsqueeze(1)
+    target_masks = target_masks.unsqueeze(1).float()
+
+    height, width = src_masks.shape[-2], src_masks.shape[-1]
+    num_points = max(height, height * width // sampling_ratio)
+
+    with torch.no_grad():
+        point_coords = get_uncertain_point_coords_with_randomness(
+            src_masks,
+            lambda logits: -(torch.abs(logits)),
+            num_points,
+            3,
+            0.75,
+        )
+        point_labels = point_sample(
+            target_masks, point_coords, align_corners=False, mode="nearest"
+        ).squeeze(1)
+
+    point_logits = point_sample(src_masks, point_coords, align_corners=False).squeeze(1)
+
+    denominator = num_boxes.clamp(min=1) if torch.is_tensor(num_boxes) else max(num_boxes, 1)
+    return {
+        "loss_mask_ce": _mask_sigmoid_ce(point_logits, point_labels, denominator),
+        "loss_mask_dice": _mask_dice(point_logits, point_labels, denominator),
+    }
+
+
+def _mask_dice(inputs: torch.Tensor, targets: torch.Tensor, num_masks) -> torch.Tensor:
+    inputs = inputs.sigmoid().flatten(1)
+    numerator = 2 * (inputs * targets).sum(-1)
+    denominator = inputs.sum(-1) + targets.sum(-1)
+    loss = 1 - (numerator + 1) / (denominator + 1)
+    return loss.sum() / num_masks
+
+
+def _mask_sigmoid_ce(inputs: torch.Tensor, targets: torch.Tensor, num_masks) -> torch.Tensor:
+    loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
+    return loss.mean(1).sum() / num_masks
+
 
 
 class DFINECriterionV2(nn.Module):
@@ -129,6 +215,10 @@ class DFINECriterionV2(nn.Module):
         siou_theta: float = 4.0,
         flat_losses: bool = False,
         distill_params: DistillParams | None = None,
+        mask_losses: bool = False,
+        mask_sampling_ratio: int = 16,
+        mask_ce_weight: float = 5.0,
+        mask_dice_weight: float = 5.0,
     ) -> None:
         super().__init__()
         if box_regression_iou not in ("giou", "siou"):
@@ -190,6 +280,16 @@ class DFINECriterionV2(nn.Module):
         # Off by default: the flattened sums reorder float ops, so
         # in-flight ablation runs stay bitwise-comparable.
         self.flat_losses = flat_losses
+        # Mask branch (GTR seg lineage): the point count follows the
+        # matcher's ``mask_point_sample_ratio`` when present (official
+        # fallback order), else the explicit ratio.
+        self.mask_losses = bool(mask_losses)
+        self.mask_sampling_ratio = int(
+            getattr(matcher, "mask_point_sample_ratio", None) or mask_sampling_ratio
+        )
+        if self.mask_losses:
+            self.weight_dict.setdefault("loss_mask_ce", mask_ce_weight)
+            self.weight_dict.setdefault("loss_mask_dice", mask_dice_weight)
         # Cross-model distillation contract (design doc 23). None
         # disables the branch entirely — no weight_dict entries, no
         # distill handling in forward.
@@ -347,6 +447,16 @@ class DFINECriterionV2(nn.Module):
                 query_mask=query_mask,
                 flat_indexing=self.flat_losses,
             )
+            # Mask losses ride the same per-layer matching (official).
+            if self.mask_losses and outputs.get("pred_masks") is not None:
+                for name, value in mask_point_losses(
+                    outputs["pred_masks"],
+                    targets,
+                    layer_indices[output_index],
+                    num_boxes,
+                    self.mask_sampling_ratio,
+                ).items():
+                    losses[f"{name}{suffix}"] = value
 
         # Union matching across all decoded layers + the pre-output head
         # + the encoder proposals (official ``_get_go_indices``): box losses
@@ -389,6 +499,12 @@ class DFINECriterionV2(nn.Module):
                 pre_outputs, targets, indices_go, num_boxes_go
             ).items():
                 losses[f"{name}_pre"] = value
+            if self.mask_losses and pre_outputs.get("pred_masks") is not None:
+                for name, value in mask_point_losses(
+                    pre_outputs["pred_masks"], targets, pre_indices, num_boxes,
+                    self.mask_sampling_ratio,
+                ).items():
+                    losses[f"{name}_pre"] = value
 
         final_outputs = outputs_list[-1]
         for name, value in self._loss_boxes(
@@ -523,12 +639,24 @@ class DFINECriterionV2(nn.Module):
                     dn_pre_outputs, targets, dn_indices, dn_num_boxes,
                 flat_indexing=self.flat_losses,
             )
+                if self.mask_losses and dn_pre_outputs.get("pred_masks") is not None:
+                    for name, value in mask_point_losses(
+                        dn_pre_outputs["pred_masks"], targets, dn_indices, dn_num_boxes,
+                        self.mask_sampling_ratio,
+                    ).items():
+                        losses[f"{name}_dn_pre"] = value
             for dn_index, dn_layer in enumerate(dn_outputs):
                 suffix = f"_dn_{dn_index}"
                 losses[f"loss_vfl{suffix}"] = loss_labels_vfl(
                     dn_layer, targets, dn_indices, dn_num_boxes,
                 flat_indexing=self.flat_losses,
             )
+                if self.mask_losses and dn_layer.get("pred_masks") is not None:
+                    for name, value in mask_point_losses(
+                        dn_layer["pred_masks"], targets, dn_indices, dn_num_boxes,
+                        self.mask_sampling_ratio,
+                    ).items():
+                        losses[f"{name}{suffix}"] = value
                 for name, value in self._loss_boxes(
                     dn_layer, targets, dn_indices, dn_num_boxes
                 ).items():
@@ -767,6 +895,10 @@ class DFINECriterionV2(nn.Module):
             weights["loss_vfl_dn_pre"] = self.weight_dict["loss_vfl"]
             weights["loss_bbox_dn_pre"] = self.weight_dict["loss_bbox"]
             weights[f"{iou_key}_dn_pre"] = self.weight_dict[iou_key]
+        if self.mask_losses:
+            for mask_suffix in ("_pre", "_dn_pre"):
+                weights[f"loss_mask_ce{mask_suffix}"] = self.weight_dict["loss_mask_ce"]
+                weights[f"loss_mask_dice{mask_suffix}"] = self.weight_dict["loss_mask_dice"]
         for enc_index in range(len(enc_aux_outputs or [])):
             for key, value in self.weight_dict.items():
                 weights[f"{key}_enc_{enc_index}"] = value

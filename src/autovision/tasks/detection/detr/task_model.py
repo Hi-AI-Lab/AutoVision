@@ -140,6 +140,7 @@ class DETRObjectDetection(ONNXExportMixin, TaskNetwork):
         label_noise_ratio: float = 0.5,
         box_noise_scale: float = 1.0,
         dn_max_gt_cap: int | None = None,
+        mask_downsample_ratio: int | None = None,
         backbone_pretrained: bool = False,
         backbone_weights: str | None = None,
         load_weights: bool = True,
@@ -495,6 +496,15 @@ class DETRObjectDetection(ONNXExportMixin, TaskNetwork):
                 reg_scale=reg_scale,
                 activation="silu" if spec.dec_lineage == "gtr" else "relu",
                 gtr_compat=(spec.dec_lineage == "gtr"),
+                mask_downsample_ratio=mask_downsample_ratio,
+                # The mask head bakes its output resolution (image_size /
+                # downsample_ratio) and the official seg recipe is
+                # fixed-shape eval (640); anchors pin to the same canvas.
+                # Det mode keeps eval_spatial_size None → runtime-generated
+                # anchors, exactly as before this parameter existed.
+                eval_spatial_size=(
+                    tuple(self.image_size) if mask_downsample_ratio is not None else None
+                ),
             )
         elif decoder == "dfine":
             if self._density_enabled:
