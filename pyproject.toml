@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "autovision"
 version = "0.1.0"
-description = "VTrain: enterprise visual model training framework (pretrain/distill -> finetune -> evaluate -> export)"
+description = "AutoVision: enterprise visual model training framework (pretrain/distill -> finetune -> evaluate -> export)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
@@ -40,6 +40,20 @@ super-gradients = ["super-gradients>=3.6.1"]
 # AGPL-3.0: extras-only by policy — never a core dependency, never imported
 # at module level (see src/autovision/encoders/ultralytics/).
 ultralytics = ["ultralytics>=8.1.0"]
+# GTR GLA-backbone line (roadmap design doc 31 G2): flash-linear-attention
+# provides the chunked GLA Triton kernels. MIT; CUDA-only at forward time
+# (Triton). Pin matches the GTR reference environment; the module imports
+# lazily without it (shared/gtr/) and construction raises with guidance.
+gtr = ["flash-linear-attention==0.5.0"]
+# Batched GPU linear-assignment solver for the DETR matcher (Apache-2.0,
+# Ivan Karpukhin, ivan-chai/torch-linear-assignment): one Triton kernel
+# replaces the per-image scipy loop once a training step's matcher
+# problems are consolidated. Linux + compute capability >= 8.0 +
+# torch >= 2.4 for the CUDA path; the package falls back to the same
+# scipy solve everywhere else, and the matcher imports it lazily with an
+# automatic scipy fallback (measured 4.5x on merged problem batches;
+# see tasks/detection/shared/matcher.py). AUTOVISION_LSAP=scipy disables.
+lsap = ["torch-linear-assignment==0.1.0"]
 # DINOv2/DINOv3, RF-DETR and DEIMv2 backbones via HuggingFace transformers
 # (per framework policy: prefer transformers over third-party/vendored model
 # code; see src/autovision/encoders/rfdetr/). The RF-DETR package gates on
@@ -78,7 +92,13 @@ testpaths = ["tests"]
 [tool.ruff]
 target-version = "py310"
 src = ["src", "tests"]
-extend-exclude = ["src/autovision.egg-info"]
+extend-exclude = [
+    "src/autovision.egg-info",
+    # GTR GLA CUDA extension: vendored verbatim from upstream
+    # (MIT, Intellindust-AI-Lab/GTR, csrc/) — build scripts + their test
+    # tooling; kept byte-identical for provenance, not linted as ours.
+    "src/autovision/tasks/detection/shared/gtr/csrc",
+]
 
 [tool.ruff.lint]
 # High-signal core: pycodestyle errors (E4/E7/E9), pyflakes (F), and

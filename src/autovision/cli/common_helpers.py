@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Shared command helpers: out dir, batch size, num workers."""
 
 from __future__ import annotations
@@ -104,12 +104,58 @@ def resolve_data_paths(data: PathLike | Sequence[PathLike]) -> list[Path]:
     return [Path(item) for item in data]
 
 
+def resolve_gradient_accumulation(
+    gradient_accumulation_steps: int | str,
+    nominal_batch_size: int,
+    global_batch_size: int,
+) -> int:
+    """Resolve ``"auto"`` accumulation from a nominal batch size.
+
+    ``"auto"`` → ``max(1, round(nominal / global_batch))`` (the
+    ultralytics ``nbs`` convention): the effective batch lands near the
+    nominal one regardless of the per-step batch, so recipes can hold a
+    fixed nominal batch while memory decides the micro-batch. Explicit
+    integers pass through unchanged. LR scaling is deliberately NOT
+    touched here — it keeps referencing the per-step batch
+    (``build_detr_optimizer``), matching the pre-existing semantics.
+    """
+    if isinstance(gradient_accumulation_steps, str):
+        if gradient_accumulation_steps != "auto":
+            raise ValueError(
+                "gradient_accumulation_steps must be a positive int or "
+                f"\"auto\", got {gradient_accumulation_steps!r}."
+            )
+        return max(1, round(nominal_batch_size / max(1, global_batch_size)))
+    resolved = int(gradient_accumulation_steps)
+    if resolved < 1:
+        raise ValueError(
+            f"gradient_accumulation_steps must be >= 1, got {resolved}."
+        )
+    return resolved
+
+
 def build_task_dataloader(dataset, batch_size: int, num_workers: int, train: bool):
     """Train/val task dataloaders (global batch already split per device)."""
+    import math
+
     from torch.utils.data import DataLoader
 
     from autovision.runtime.env import Env
 
+    # Do not create more worker processes than the loader has batches to
+    # produce: tiny datasets would otherwise pay a persistent worker pool
+    # (and, on CUDA, hold GPU context in every idle worker) for a single
+    # batch. Fewer than two batches run in-process.
+    #
+    # Measured alternatives that did NOT land here (2026-10-15, batch-level
+    # isolation on this box's 12-thread CPU): torch's default
+    # ``prefetch_factor=2`` beat 4 (23.1 vs 26.4 ms/batch — data is ~3% of
+    # a detection step, so extra in-flight batches only add contention),
+    # and capping worker intra-op threads at 1 (the ultralytics
+    # OMP_NUM_THREADS=1 recipe) was slower still (28.2 ms/batch).
+    num_batches = math.ceil(len(dataset) / batch_size) if batch_size else 0
+    if num_workers > 0:
+        num_workers = 0 if num_batches <= 1 else min(num_workers, num_batches)
     return DataLoader(
         dataset,
         batch_size=batch_size,

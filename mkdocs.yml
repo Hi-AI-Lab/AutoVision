@@ -1,4 +1,4 @@
-site_name: Autovision
+site_name: AutoVision
 site_description: Enterprise visual model training framework
 theme: {name: material}
 nav:
@@ -22,3 +22,6 @@ nav:
       - SIoU Box Regression: design/15-siou-box-regression-loss.md
       - Box-Aware Eraser: design/16-box-aware-eraser.md
       - Clean Provenance Refactor: design/28-clean-provenance-refactor.md
+      - DETR Productization Roadmap: design/29-detr-productization-roadmap.md
+      - Task-First Layout (As-Built): design/30-task-first-layout.md
+      - GTR Integration Design: design/31-gtr-integration.md

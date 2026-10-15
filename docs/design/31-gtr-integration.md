@@ -1,0 +1,183 @@
+# VTrain 实现蓝图 · 分册 31：GTR 集成设计——线性注意力骨干、装配兼容性与蒸馏教师线
+
+| 文档属性 | 内容 |
+|---|---|
+| 版本 | v1.0（设计评审稿，待实施） |
+| 状态 | 设计完成；实施计划见 §7，验收 gate 见 §8 |
+| 分析对象 | `/home/hdjs/Research/Software/GTR-main`（Intellindust-AI-Lab《Gated Token Recurrence for Efficient Dense Prediction》，代码 **MIT**；本地权重 `Dino-Dome-Research/weight/gtr/`，checkpoint **MIT**，README front-matter 同） |
+| 决策依据 | 2026-10-15 方向输入：GTR 代码与 S/M/L/X 权重到位，评估三条集成路径（蒸馏教师 / 装配兼容变体 / 骨干家族引进） |
+| 关联分册 | 23（跨模型蒸馏教师协议）、28（清洁溯源与 re-port 纪律）、29（产品化路线 §3.1 谱系、D1b 教师池、D10 冻结纪律）、30（任务优先目录） |
+| 上游 | GTR-main（MIT）；`flash-linear-attention` 0.5.0（GTR 的 GLA 算子库，license 随 extras 引入时以 wheel 元数据复核）；DEIMv2 vit_tiny 蒸馏骨干链（Apache-2.0，GTR 权重命名 `vit_tiny*` 所指） |
+| 受影响模块 | `tasks/detection/detr/`（骨干家族、decoder 变体、encoder 变体、蒸馏教师）、`registry/`（资产/模型卡）、`export/`（GLA 的 TRT 路径）、`scripts/`、`docs/provenance/`（LEDGER/NOTICE） |
+
+> **标注约定**：【审计】对 GTR-main 源码/权重的实测事实（出处 `文件:行` 或探针脚本输出，可复查）；【设计】本册决策（附编号 G1–G…及理由）；【目标】可验收目标；【风险】风险与缓解。
+
+---
+
+## 1. 执行摘要与定位判断
+
+GTR 是 DEIM/D-FINE 同团队（Intellindust-AI-Lab）的下一代实时全任务架构：softmax-free 线性注意力骨干（GLA）+ Spatial SwiGLU + 双向 token 扫描，COCO 检测 AP **S=53.6 / M=57.3 / L=58.9 / X=59.4**（EMA 口径，README 基准表），四档权重 MIT 就在本地。对 AutoVision 产品线（分册 29）的意义按价值排序：
+
+1. **教师线（性价比最高）**：GTR det/obj365 全档 MIT 权重本地就位，是 D1b N 档蒸馏与未来各档的现成强教师——只需把 doc 23 的教师协议接到 GTR 的 ckpt 格式（`{model, ema, last_epoch}`，EMA 口径）。
+2. **装配兼容变体（中等）**：GTRTransformer decoder 与我们 `dfine_official` **键形同构**；hidden-192 + dec-FFN-512 的谱系变体可高覆盖装配 GTR-S decoder 权重（§3.2 实证：104 键已精确匹配，12 个失配全部是 FFN 宽度，spec 对齐即消）。
+3. **骨干家族引进（最大，可选）**：GLA 线性注意力骨干是全新家族（fla 依赖 + 可选 CUDA 扩展 + TRT plugin），也是 GTR 全部增益的来源——是否引进是产品方向级决策，本册给出完整蓝图但不默认启动。
+
+【设计 G1】三条路径**独立成段、按 A→B→C 递进**，每段独立可验收；A 不依赖 B/C，B 不依赖 C。谱系承诺（D10）不因 C 的评估而动摇——在 G2 通过验收前，GTR 骨干不进 `SPECTRUM` frozen 档。
+
+## 2. GTR 架构分析（代码实证）
+
+### 2.1 总装配（`engine/gtr/gtr.py`，123 行）
+
+`GTR = backbone → encoder → decoder` 三件套，无任务专用胶水；`deploy()` 递归调 `convert_to_deploy`（与我们 `TaskNetwork.deploy` 同约定）。独有增量：`GTR_AMP_SAFE_MODE` 环境变量支持 `encoder_decoder_fp32` / `decoder_fp32` 三档 AMP 豁免——分配敏感的 query-selection/decoder 数学可强制 FP32（【审计】gtr.py:33-58）。这对我们 AMP 训练 GLA 有直接参考价值（§9 R3）。
+
+### 2.2 骨干核心：GatedLinearAttention（`backbone/vit_adapter.py:255-607`）
+
+【审计】逐参数读出的机制清单：
+
+- **门控线性注意力**（softmax-free recurrent）：`q/k/v/g` 四投影 + **低秩门控** `gk_proj`（`gate_low_rank_dim=16` 的两层 Linear）+ `FusedRMSNormGated`（gate 与 RMSNorm 融合，`gate_fn='swish'`）；`expand_k=0.5`（key 维减半）、GQA 式 `num_kv_heads` 分组、`qk_norm` 开关。
+- **三种执行模式**：`chunk`（训练默认，fla 的 `chunk_gla`）/ `fused_chunk` / `fused_recurrent`（推理）。
+- **三层算子栈**：① `fla.ops.gla`（flash-linear-attention 0.5.0，训练可用）；② 自研 CUDA 扩展 `gla_torch_ext`（`backbone/csrc/`，**仅部署模式启用**，经 `torch.library.custom_op` 注册 + fake impl 保图可 trace）；③ TensorRT plugin（`tensorrt_plugin/trt_plugin/gla_plugin.cu`）。`GTR_DISABLE_CUDA_GLA=1` 全局降级回 fla。
+- 部署优化：`convert_to_deploy` 把 q/k/v/g/gk_low 五个投影**融合为单个大 Linear**（`vit_adapter.py:340` 附近），hidden 只读一次。
+
+### 2.3 SpatialSwiGLU（`backbone/vit_adapter_spatial_swiglu.py`，136 行）
+
+SwiGLU（GLAMLP）的 value 分支恢复为 2D 网格后过 **3×3 depthwise conv** 再门控——位置信息由卷积供给，因此整个变体**无 pos_embed / 无 CLS / 无 mask token**（`use_pos_embed=False`，显式 `del` 三件）。部署路径把打包的 gate/value GEMM 拆开 + `channels_last`，消掉每块一次的转置拷贝（【审计】convert_to_deploy 注释，这是他们实测延迟优化点）。
+
+### 2.4 双向扫描（Gated Token Recurrence 的「Recurrence」）
+
+【审计】`VisionTransformerSpatialSwiGLU._apply_bid_scan`（:88-95）：逐层对 token 序列 `x.flip(1)`（反向扫描），**奇数层且 `if_quad_dir` 时追加空间转置**（`[B,gs,gs,C].transpose(1,2)`，四方向扫描的第三/四向）；tap 输出处用 `torch.argsort(perm)` 把序列还原到规范 patch 顺序。机制 = 让因果的线性注意力在每个块覆盖不同扫描方向，两个方向成对出现时注意力覆盖完整 2D 邻域。置换跟踪 `_update_perm` 与扫描同步维护。
+
+### 2.5 ViTAdapter 与特征金字塔
+
+`ViTAdapter`（:933-1128，DEIMv2 系多层级联 adapter）：`interaction_indexes=[3,7,11]` 三处 tap，从 **同分辨率**（`multi_layer_same_res: True`，patch 网格全程不变）的 12 层骨干取三层特征，输出 **均匀通道**（gtr_s：[192,192,192]）。金字塔化交给 encoder。
+
+### 2.6 GTREncoder（`hybrid_encoder.py:551-687`）
+
+RF-DETR / LW-DETR 风格的 MultiScaleProjector：对每个目标尺度独立做 `scale_factors=[2.0,1.0,0.5]` 重采样（↑2 = ConvTranspose 通道减半；↓2 = stride-2 ConvBNAct），沿通道 concat 后 **C2f(in→hidden) + LayerNorm2d**。比我们 HybridEncoder（AIFI + CSP）轻得多；`force_contiguous` 开关记录了一个真实的部署坑（depth 任务发布权重训练时无 contiguous 拷贝，:580 注释）。
+
+### 2.7 GTRTransformer decoder（`det/decoder.py`，1194 行）
+
+与 `dfine_official` 同一 gateway 谱系（self-attn + deformable cross-attn 经 learned Gate 融合、无 value_proj/output_proj、FGL/DDF 头），增量：`layer_scale`（逐层可学残差缩放）、`activation: silu`、`group_detr`（DEIM 分组训练）、FFN 每档独立（512/1024/1024/2048）。criterion 新增 **loss_mal**（Matchability-Aware Loss，DEIM 系，`gamma=1.5/alpha=0.75`，替换 VFL；matcher 权重 2/5/2、alpha 0.25/gamma 2.0）。
+
+### 2.8 训练配方（`configs/det/gtr_base.yml` + `coco_finetune/gtr_*.yml`）
+
+【审计】base（COCO 30ep）：lr 2e-3（flatcosine，`lr_gamma 0.5`）、total_batch 128、Mosaic `policy: stop_epoch`（mosaic_epoch 15 / stop 26 后移除 photometric+zoomout+iou-crop）、**copyblend** 增强（copy-paste 系，`copyblend_epochs [4,50]`，`with_expand`）、EMA 0.9999/warmups 1000、grad clip 0.1、sync_bn、`find_unused_parameters: True`。finetune 覆盖：backbone lr **1.5e-5**（预训练骨干微调）、`use_amp: False`（S 档！）、`group_detr: 3`、权重从 `weights/vit_tiny*_spatial_swiglu_distilled.pth` 蒸馏骨干初始化。
+
+### 2.9 缩放表（S/M/L/X，全部实证自 finetune 配置）
+
+| 档 | 预训练教师（DEIMv2 链） | embed_dim/heads | enc/dec hidden | dec FFN | dec layers | COCO AP |
+|---|---|---|---|---|---|---|
+| S | vit_tiny_spatial_swiglu_distilled | 192/3 | 192 | 512 | 4 | 53.6 |
+| M | vit_tinyplus_… | 256/4 | 256 | 1024 | 4 | 57.3 |
+| L | vit_small_… | 384/6 | 256 | 1024 | 4 | 58.9 |
+| X | vit_smallplus_… | 384/6 | 256 | 2048 | 4 | 59.4 |
+
+教师链依赖注意：`vit_tiny*_distilled.pth` 是 **DEIMv2 蒸馏中间产物，不在本地权重目录**——但 `tools/extract_backbone.py` 可从 GTR 全模型 checkpoint 抽取骨干（这就是该工具的用途），因此骨干初始化不依赖外部下载。
+
+## 3. 与 AutoVision 的对照（实证）
+
+### 3.1 构件矩阵
+
+| GTR 构件 | AutoVision 现状 | 关系 |
+|---|---|---|
+| GatedLinearAttention + csrc + TRT plugin | 无 | **新件**（路线 C 的全部难点所在） |
+| SpatialSwiGLU / bid_scan / ViTAdapter | 无（DEIMv2 vit_tiny 谱系近亲，LEDGER P0-4 已有 DEIMv2 re-port 先例） | **新件**（但 adapter 部分与 DEIMv2 同源） |
+| GTREncoder | 无（HybridEncoder 是重型近亲） | **新件**（~140 行，独立性强） |
+| GTRTransformer decoder | `shared/dfine_official_decoder.py` 同 gateway 谱系 | **近亲**（差异：layer_scale/silu/FFN 每档化/group_detr 挂钩） |
+| loss_mal / matcher | criterion 框架同族（VFL 位） | **增量**（MAL 替换 VFL 的 loss 一枚） |
+| HybridEncoder（base 配置线） | 已有（同上游 D-FINE/RT-DETR） | 同源 |
+| 训练配方（Mosaic stop_epoch/copyblend/EMA） | 增强/eraser 系已有等价物 | 配方差异，非架构差异 |
+
+### 3.2 装配兼容性实证（2026-10-15 探针）
+
+以 `detr/s` spec 强制 `hidden_dim=192, decoder_hidden_dim=192` 构建目标网络，对照 `gtr_s_coco.pth` **EMA** 权重：**502 源键中 104 个精确同名同形，12 个失配全部是 decoder FFN（GTR 512 vs spec 1024）**——spec 增设 `dec_dim_feedforward=512` 变体后这 12 项同名同宽即匹配；decoder 覆盖率随即从 0.55 大幅上升（FFN 参数占 decoder 近半）。骨干键形不同构（GTR 自研块），骨干权重不参与装配（与 dfine_s 路线同构处理：骨干走自己的预训练线）。
+
+### 3.3 依赖面
+
+新增运行时依赖仅 `flash-linear-attention==0.5.0`（GTR pin；训练路径必需）；CUDA 扩展与 TRT plugin 均为**可选部署加速件**，官方已有环境变量降级路径（`GTR_DISABLE_CUDA_GLA=1`）。torch pin 2.11/cu128 是 GTR 基准环境，非我们矩阵（分册 10 §16：torch 2.4–2.7）——fla 0.5.0 在我们 torch 矩阵上的兼容性是 G2 前置验证项（§9 R5）。
+
+## 4. 溯源与许可分析
+
+- **代码 MIT**（`GTR-main/LICENSE`，Copyright 2026 Intellindust-AI-Lab）：允许直接 re-port 保留版权与许可声明——比 AGPL 宽松，**无 clean-room 义务**，但仍按分册 28 纪律执行：逐文件 re-port + 文件头归属（「based on GTR … MIT, modified by AutoVision」）+ LEDGER 登记（来源/许可/整改状态）+ NOTICE 增 GTR 与 fla 条目。
+- **权重 MIT**（HuggingFace 仓 front-matter `license: mit`）：教师/装配/重发布均可；模型卡（分册 29 §3.4 D4）license 字段填 `MIT`。
+- **依赖链**：`fla`（flash-linear-attention，随 extras 引入时核验 wheel license）、自研 CUDA ext（随 GTR-main MIT 一并归属）。DEIMv2 vit_tiny 骨干链为 Apache-2.0（LEDGER 已有引用先例 P0-4）。
+- 【设计 G2-溯源】新增 `extras: gtr = ["flash-linear-attention==0.5.0"]`（惰性加载，缺依赖时骨干清单为空——沿用模型包惯例）。
+
+## 5. 与现有谱系/训练面的接线设计
+
+### 5.1 路线 A：蒸馏教师（G0）
+
+- 教师加载器扩展（doc 23 协议的 GTR 适配）：读 `{model, ema, last_epoch}`，**默认取 `ema.module`**（README 明示基准数字为 EMA 口径），键前缀剥离 `backbone.backbone._model.`（骨干只用于特征教师时）或整网加载（logit/特征双教师时）。
+- 教师注册：`registry/` 增本地资产条目（路径指向 `Dino-Dome-Research/weight/gtr/det/*.pth`，sha256 钉住，license=MIT）——沿用 `registry/apache_assets.py` 模式。
+- N 档脚本 `train_spectrum_n_distill.py --mode distill` 的拒绝门禁改为可用状态。
+
+### 5.2 路线 B：装配兼容变体（G1）
+
+- `variants.py` 增 `gtr-s` 宽度配方：`hidden_dim=192, enc/dec hidden 192, dec_dim_feedforward=512, dec_layers=4, dec_num_points=(4,4,4)`（实证自 gtr_s EMA 探针），`decoder_default="dfine_official"`；SPECTRUM 增注（**planned，不冻结**——等 G1 验收）。
+- 装配器复用 `dfine_official_warm_start.build_dfine_official_warm_start`，新增 `source_format="gtr"` 分支（EMA 取权重 + 前缀剥离 + FFN-512 spec）。
+- backbone 侧：GTR-S 骨干权重经 `tools/extract_backbone.py` 同款抽取 → `backbone_weights` 既有入口（`_load_backbone_weights` 已支持 safetensors/plain sd + 前缀漂移重对齐）。
+
+### 5.3 路线 C：GTR 骨干家族（G2，可选，需方向决策）
+
+- 新家族 `family="gtr"`（`backbone_package="gtr"`）：re-port `vit_adapter.py`（1128 行，最大单件）+ `vit_adapter_spatial_swiglu.py` + `GLAMLP`；fla extras；`convert_to_deploy` 链路对齐我们 `TaskNetwork.deploy`；导出面需评估 GLA 的 ONNX/TRT 表达（官方 TRT plugin 是现成答案，但引入 `.so` 分发是新的部署矩阵项）。
+- 谱系动作：G2 验收前 `SPECTRUM` 不动；验收后按 D10 以**新 minor + 新权重条目**方式引入候选档（例如 `detr/gtr-s`），不覆盖现有 frozen 档。
+
+## 6. 训练配方映射（GTR → AutoVision）
+
+| GTR 配方项 | 值 | 我们对应物 | 差异处置 |
+|---|---|---|---|
+| lr / 调度 | 2e-3 flatcosine γ0.5 | flat-cosine 已有（`multistep_schedule`/Dome LR） | 参数化即可 |
+| Mosaic stop_epoch | 15/26 移除三增强 | box-aware eraser / step-window 调度（分册 16） | 配方等价，保留我们系 |
+| copyblend | copy-paste + expand | eraser 系近似 | 保留我们系（baseline 忠实优先） |
+| group_detr 3 | 分组 DN | denoising 已有，分组未开 | decoder 参数化增量 |
+| EMA 0.9999/1000 | 同 | 同（engine 既有） | 无差异 |
+| use_amp False（S finetune） | — | AMP bf16 默认开 | GLA 数值敏感，G2 需 AMP 矩阵（§9 R3） |
+
+## 7. 实施计划
+
+| 里程碑 | 周期 | 内容 | 退出门禁 |
+|---|---|---|---|
+| **G0 教师线** | 1 周 | GTR 教师加载器（EMA 口径 + 前缀剥离）接入 doc 23 协议；本地资产注册（sha256/license）；N 档 distill 门禁解锁 | 教师 forward 对拍（logit/特征一致性单测）；N 档蒸馏冒烟（coco8，教师常数 loss 下降）；模型卡可生成 |
+| **G1 装配兼容变体** | 1–2 周 | `gtr-s` 宽度配方（hidden 192/FFN 512/4 层/(4,4,4)）；装配器 `source_format="gtr"`；骨干抽取接线 | 装配覆盖率实测 ≥0.9（decoder 参数量口径）并写入报告；detr/gtr-s 谱系键 planned→frozen 评审；coco8 闭环 |
+| **G2 骨干家族（可选，需方向决策）** | 3–4 周 | re-port vit_adapter（MIT 归属头）+ SpatialSwiGLU + GLAMLP；fla extras；AMP/离线/导出矩阵 | COCO 短程复现 GTR-S 趋势（12ep 蒸馏 ≥ 官方 30ep 的 85% AP）；TRT FP16 导出 + 对拍门禁过；LEDGER/NOTICE 全套 |
+
+依赖：G0 独立可先行；G1 依赖 G0 的资产注册；G2 依赖 G1 的 decoder 变体验证且需用户拍板（谱系方向）。
+
+### 实施记录（2026-10-15，G0 + G1 代码侧落地）
+
+- **G0**：`registry/gtr_assets.py`——四档 det COCO 资产注册（本地路径 + **sha256 实测钉住** + MIT + `gtr_ckpt_v1` 格式 + COCO AP 元数据，`verify_gtr_asset` 强校验）；`detr/gtr_teacher.py`——教师包加载器（**EMA-first 语义**、键清单报告 hidden/classes/last_epoch、`extract_gtr_backbone` 前缀剥离、`decoder_decoder_state` 装配交接、`teacher_forward` 契约存根：GLA 后端缺位时显式 `GTRBackendUnavailableError` 指向 G2）。教师模型卡可生成（MIT + sha256 + limitation 注记）。
+- **G1**：`variants.py` 增 `gtr-s` 宽度配方（hidden 192 / dec FFN 512 / 4 层 / points (4,4,4)，骨干仍走 timm HGNetV2 线）；装配器增 `source_format="gtr"`（EMA 取权重）；`SPECTRUM["gtr-s"]` planned（组件键已存在、档位冻结待评审——与 m/l/x 的「无键 planned」语义区分）。**覆盖率实测 0.9613 ≥ 0.9（G1 门禁达成）**：144 张量传递、3 个形状跳过。
+- **测试** `tests/test_gtr_integration.py` ×14（sha256 实核、EMA≠model 抽键断言、骨干前缀剥离、GLA 契约拒绝、装配覆盖门禁、部分装配拒载、detr/gtr-s coco8 训练闭环、教师模型卡；9.65s）。回归 p1/p2/train_object_detection 41 过；ruff/layering/provenance 全绿。
+- **G0 gate 诚实修正**：原「教师 forward 对拍（logit/特征一致性单测）」依赖 GLA 推理路径（fla + vit_adapter 重移植），**并入 G2 前置项**；G0 交付状态级对拍（EMA≠model、键集一致、sha256）+ 契约存根。蒸馏冒烟（coco8 教师 loss 下降）同样随 G2 解锁。
+- **G2 保持待方向决策**（分册 §1 G1 设计判断），未启动。
+- **G2 代码侧实施记录（2026-10-15 同日，用户拍板继续）**：MIT re-port 三件入 `tasks/detection/shared/gtr/`（vit_adapter 1152 行 + spatial_swiglu + encoder 345 行，归属头 + LEDGER 登记 + NOTICE 增补）；fla 惰性守卫（模块可无依赖 import，构造期报错带安装指引）；pyproject `gtr` extras（flash-linear-attention==0.5.0）；家族接线 `family="gtr"` + `detr/gtrvit-s` 组件档（SPECTRUM 不动，G2 验收前不冻结——D10）；task_model 骨干/encoder 双分派（GTRViTBackbone + GTREncoder 金字塔）；`backbone_model` 指向内层 `_model` 使 `extract_gtr_backbone` 键形免重映射直载。**CUDA 实测**：gtrvit-s 全网 forward + coco8 3 步训练闭环 + GTR→GTR 骨干直载（零 unexpected keys）；测试 `tests/test_g2_gtr.py` ×6（fla+CUDA 门控）+ G0/G1 ×14，合计 54 过、三守卫绿。**G2 剩余（GPU 矩阵）**：COCO 短程趋势（≥官方 85% 判据）、TRT FP16 导出对拍、AMP 三档豁免矩阵。fla 0.5.0 已装入 dev venv（uv），pyproject extras 为声明面；uv.lock 再生留待发版流程。
+- **G2 GPU 实测记录（2026-10-15，RTX 4090D 24GB）**：① **AMP 探针**：gtrvit-s@640 纯网络 forward+反向在 fp32/bf16/fp16 三档全部数值有限（440 梯度张量）——R1/R3 数值风险实测低于预期，官方 S 档关 AMP 的保守性或与 MAL loss 数学相关，训练期仍建议 AMP 矩阵复验；② **COCO 短程判别实验**（真实 COCO train2017，bf16，bs16；COCO 图片目录曾为空已从本地 zip 恢复 118,287/5,000 张）：`gtrvit-s` 全随机对照 500 步 loss 41.6→42.9 波动、val≈0.0008（ViT 系从零无信号，符合预期）；**`gtrvit-s` + 官方 GTR-S 骨干直载（`extract_gtr_backbone`→`backbone_weights`）2000 步 val 单调升 14.7→19.0 AP / 31.1 AP50**，较同日程 `detr/s`（HGNetV2-b1 + dfine_s 装配，13.0 AP）**+6.0 AP**——GLA 集成正确性强证据，GTR 骨干质量优势兑现（V3 趋势判据短程证据，完整 85% 判据待全程训练）；③ 冒烟配方三偏差定位并修正（EMA warmup 2000 未完即评估→`ema_warmup_steps` 参数化 / 骨干预训练缺失→直载链 / 步数 0.45%）；④ `docs/benchmarks.md` 首填：torch eager 延迟表（4 模型 × bs1/4 × fp32/fp16；GLA fp16 慢于 fp32 的 Triton 核特性入表注）+ 短程趋势冒烟表（明确标注非发布口径）。**仍待**：TRT FP16 对拍（onnx/tensorrt 未装）、全程训练、uv.lock 再生。
+- **部署工程迁移记录（2026-10-15 晚，G2 剩余矩阵三项的实测落地）**：① **自研 CUDA GLA 核迁移完成**——`shared/gtr/csrc/`（nvcc 13.0 与 torch cu130 匹配；setup.py `-std=c++17→c++20` 补丁适配 torch 2.14；官方 test_gla **ALL PASS**；`.so` 经包 `__init__` sys.path 注入，vit_adapter 既有 `import gla_torch_ext` 零改动生效）；**骨干级实测 640px FP16 bs1：fla Triton 16.25ms → deploy+自研核 7.97ms（2.04×）**（recursive convert_to_deploy 28 钩子）；② **torch.compile 实测负收益**（默认模式 9.62ms，GLA custom op 图断裂；CUDA Graphs 模式被拒——custom op `mutates_args={"out"}` 原地写需改接口；官方 1.225ms 依赖 py≥3.11 compile+graphs+其引擎层 graph 封装）；③ **整网 half 与 decoder bbox FP32 精修块（fp16 溢出保护）冲突确认**——正确部署形态是混合精度导出（TRT），整网 half eager 不支持。口径差距（33ms eager→官方 1.225ms）分解完毕：自研核（已迁移，2×）+ compile/graphs（需 py3.11 + op 接口改造）+ 预处理/融合（TRT 路径覆盖）。**G2 剩余更新**：TRT 对拍、全程训练、op 接口改造（graphs）、Python 3.11 评估、uv.lock。
+
+## 8. 验收 gate
+
+| # | 判据 | 证据物 |
+|---|---|---|
+| V1 | GTR-S 教师在 N 档 12ep 蒸馏中可用且增益可测（vs baseline 锚 ≥ +1 AP） | 训练记录 + 基准表新行 |
+| V2 | `detr/gtr-s` 装配覆盖率 ≥0.9、coco8 闭环、模型卡齐全 | 装配报告 + 测试 |
+| V3 | （若 G2 启动）12ep 蒸馏达官方 30ep AP 的 ≥85%，TRT 导出对拍过 | runs + 对拍报告 |
+| V4 | 溯源全套：LEDGER 逐文件、NOTICE 增补、extras 隔离 | 溯源扫描绿 |
+
+## 9. 风险登记册
+
+| # | 风险 | 概率/影响 | 缓解 | 兜底 |
+|---|---|---|---|---|
+| R1 | GLA 训练数值敏感（官方 S 档 finetune 直接 `use_amp: False`） | 中/高 | G2 引入 `GTR_AMP_SAFE_MODE` 同款三档豁免；AMP 矩阵单列 | bf16 全程 FP32 decoder |
+| R2 | fla 0.5.0 与我们 torch 2.4–2.7 矩阵不兼容（GTR pin torch 2.11） | 中/高 | G2 前置 wheel 兼容验证；extras 隔离 | 降级 `fused_recurrent` 纯 PyTorch 路径（官方自带） |
+| R3 | CUDA ext / TRT plugin 的 ABI 与分发负担 | 中/中 | 部署加速件保持可选（官方降级开关）；不进默认轮子 | 纯 fla 路径发布 |
+| R4 | 教师口径错误（model vs EMA）导致蒸馏增益虚低 | 中/中 | 加载器默认 EMA + README 口径注记；对拍单测 | 双口径 A/B 记录 |
+| R5 | MIT 源码演进的同步负担 | 低/中 | re-port 时逐文件钉 commit；LEDGER 记录上游版本 | 不跟踪上游，独立演化 |
+| R6 | 谱系方向被 GTR 牵引偏离 D10 冻结 | 低/高 | 本册 G1/G2 产物一律 planned 起步；frozen 变更走 minor + 新权重条目 | 谱系评审会否决 |
+
+---
+
+## 10. 维护约定
+
+- 本册为 GTR 集成的单一定义源；G0/G1/G2 实施记录追加至 §7 表后（附日期），重大偏差按 ADR 落档。
+- 谱系相关变更（`gtr-s` 冻结、`detr/gtr-s` 键）同步分册 29 §3/§12 与 `variants.py` 注释。
+- 上游（GTR-main）版本钉住记录进 LEDGER；re-port 文件头保留 MIT 归属。

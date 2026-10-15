@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Command-line interface (typer thin shell over the public API).
 
 Commands share the exact validation of the Python API: keyword-style
@@ -14,13 +14,15 @@ config validators.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import typer
+import yaml
 
 app = typer.Typer(
     name="autovision-cli",
-    help="Autovision: enterprise visual model training framework.",
+    help="AutoVision: enterprise visual model training framework.",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -127,6 +129,93 @@ def list_methods_command() -> None:
 
     for name in list_methods():
         typer.echo(name)
+
+
+@app.command("val")
+def val_command(arguments: list[str] = typer.Argument(None)) -> None:
+    """COCO evaluation of an exported detection model.
+
+        autovision-cli val model=runs/d1/exported_models/exported_best.pt data=coco8 [out=metrics.json]
+    """
+    from autovision.cli.model_handle import evaluate_object_detection
+
+    kwargs = _parse_kwargs(list(arguments or []))
+    out = kwargs.pop("out", None)
+    metrics = evaluate_object_detection(**kwargs)
+    if out is not None:
+        Path(str(out)).write_text(json.dumps(metrics, indent=2))
+    for key, value in sorted(metrics.items()):
+        typer.echo(f"{key}\t{value:.4f}" if isinstance(value, float) else f"{key}\t{value}")
+
+
+@app.command("predict")
+def predict_command(arguments: list[str] = typer.Argument(None)) -> None:
+    """Run prediction over an image or directory.
+
+        autovision-cli predict model=model.pt images=dir/ out=preds/ threshold=0.5
+    """
+    from autovision.cli.model_handle import predict_to_files
+
+    kwargs = _parse_kwargs(list(arguments or []))
+    if "out" in kwargs:
+        kwargs["out_dir"] = kwargs.pop("out")
+    typer.echo(str(predict_to_files(**kwargs)))
+
+
+@app.command("download")
+def download_command(arguments: list[str] = typer.Argument(None)) -> None:
+    """Download + extract a registered dataset.
+
+        autovision-cli download dataset=coco2017-val out=datasets/
+    """
+    from autovision.data.downloads import download_dataset
+
+    kwargs = _parse_kwargs(list(arguments or []))
+    dataset = kwargs.pop("dataset", None)
+    if dataset is None:
+        raise typer.BadParameter("dataset=<name> is required")
+    typer.echo(str(download_dataset(str(dataset), Path(kwargs.get("out", "datasets")))))
+
+
+@app.command("convert-data")
+def convert_data_command(arguments: list[str] = typer.Argument(None)) -> None:
+    """Convert detection annotations between YOLO and COCO.
+
+        autovision-cli convert-data from=yolo images=img/ names=a.yaml out=train.json
+        autovision-cli convert-data from=coco annotations=train.json out-labels=labels/
+    """
+    from autovision.data.convert import coco_to_yolo, yolo_to_coco
+
+    kwargs = _parse_kwargs(list(arguments or []))
+    source = str(kwargs.pop("from", ""))
+    if source == "yolo":
+        names = kwargs.pop("names", None)
+        if names is None:
+            raise typer.BadParameter("from=yolo requires names=<yaml|json list|inline list>")
+        if isinstance(names, str):
+            loaded = yaml.safe_load(Path(names).read_text())
+            names = (
+                loaded.get("names", loaded) if isinstance(loaded, dict) else loaded
+            )
+        typer.echo(str(yolo_to_coco(names=names, **kwargs)))
+    elif source == "coco":
+        typer.echo(str(coco_to_yolo(**kwargs)))
+    else:
+        raise typer.BadParameter("from= must be 'yolo' or 'coco'")
+
+
+@app.command("plot-curves")
+def plot_curves_command(arguments: list[str] = typer.Argument(None)) -> None:
+    """Plot training curves from a run's metrics.jsonl (needs matplotlib).
+
+        autovision-cli plot-curves run=runs/d1
+    """
+    from autovision.cli.plot import plot_training_curves
+
+    kwargs = _parse_kwargs(list(arguments or []))
+    run = Path(str(kwargs.pop("run")))
+    metrics = run / "metrics.jsonl" if run.is_dir() else run
+    typer.echo(str(plot_training_curves(metrics, out_path=kwargs.get("out"))))
 
 
 def cli_entrypoint() -> None:

@@ -1,8 +1,8 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """D-FINE criterion: RT-DETRv2 losses + FGL (0.15) + DDF (1.5) [+ SSL] [+ SIoU].
 
 Source lineage: D-FINE ``dfine_criterion.py`` (Apache-2.0, ``Peterande/D-FINE`` @ ``956d170``)
-over the RT-DETRv2 loss set (``lyuwenyu/RT-DETR`` @ ``df2a96c``), restructured by Autovision;
+over the RT-DETRv2 loss set (``lyuwenyu/RT-DETR`` @ ``df2a96c``), restructured by AutoVision;
 ledger ``docs/provenance/LEDGER.md`` (P1-3).
 
 Runs ONE Hungarian matching pass per decoder layer (the D-FINE losses share
@@ -61,6 +61,7 @@ from autovision.tasks.detection.shared.distillation import (
     cross_model_distill_losses,
 )
 from autovision.tasks.detection.shared.matcher import (
+    forward_match_many,
     indices_to_device,
 )
 from autovision.tasks.detection.shared.rtdetrv2_criterion import (
@@ -227,6 +228,7 @@ class DFINECriterionV2(nn.Module):
             num_boxes,
             iou_term=self.box_regression_iou,
             siou_theta=self.siou_theta,
+            flat_indexing=self.flat_losses,
         )
 
     def forward(
@@ -299,27 +301,22 @@ class DFINECriterionV2(nn.Module):
 
         losses: dict[str, torch.Tensor] = {}
         num_entries = len(outputs_list)
-        layer_indices: list[list[tuple[torch.Tensor, torch.Tensor]]] = []
         device = outputs_list[-1]["pred_logits"].device
-        for output_index, outputs in enumerate(outputs_list):
-            indices = indices_to_device(self.matcher(outputs, targets), device)
-            layer_indices.append(indices)
-            suffix = "" if output_index == num_entries - 1 else f"_aux_{output_index}"
-            # VFL keeps each layer's own Hungarian assignment (official).
-            losses[f"loss_vfl{suffix}"] = loss_labels_vfl(
-                outputs, targets, indices, num_boxes, query_mask=query_mask
-            )
-
-        # Union matching across all decoded layers + the pre-output head
-        # + the encoder proposals (official ``_get_go_indices``): box losses
-        # (final AND every aux layer, baseline aux loop) and the FGL targets
-        # ride the union; FGL targets are cached once against the fixed
-        # initial anchor and reused by every layer.
-        aux_indices = layer_indices[:-1]
-        pre_indices: list[tuple[torch.Tensor, torch.Tensor]] | None = None
+        # One consolidated matcher pass for every output group of this step
+        # (decoder layers + pre-output + encoder proposals): the merged
+        # problem batch (5 groups x B at the S3 spectrum configs) turns the
+        # per-image scipy loop into a single batched GPU solve when the
+        # optional ``lsap`` extra is present, and cuts the host transfers
+        # to one otherwise — see matcher.forward_match_many for the
+        # measurements and the sentinel/padding contract.
+        match_groups: list[
+            tuple[dict[str, torch.Tensor], list[dict[str, torch.Tensor]]]
+        ] = [(outputs, targets) for outputs in outputs_list]
+        pre_group_index: int | None = None
         if pre_outputs is not None:
-            pre_indices = indices_to_device(self.matcher(pre_outputs, targets), device)
-        enc_indices_list: list[list[tuple[torch.Tensor, torch.Tensor]]] = []
+            pre_group_index = len(match_groups)
+            match_groups.append((pre_outputs, targets))
+        enc_first_index: int | None = None
         if enc_aux_outputs:
             class_agnostic = bool(enc_meta.get("class_agnostic", False))
             enc_targets_list = (
@@ -330,10 +327,42 @@ class DFINECriterionV2(nn.Module):
                 if class_agnostic
                 else targets
             )
-            for enc_outputs in enc_aux_outputs:
-                enc_indices_list.append(
-                    indices_to_device(self.matcher(enc_outputs, enc_targets_list), device)
-                )
+            enc_first_index = len(match_groups)
+            match_groups.extend(
+                (enc_outputs, enc_targets_list) for enc_outputs in enc_aux_outputs
+            )
+        solved = forward_match_many(self.matcher, match_groups)
+        layer_indices: list[list[tuple[torch.Tensor, torch.Tensor]]] = [
+            indices_to_device(solved[output_index], device)
+            for output_index in range(num_entries)
+        ]
+        for output_index, outputs in enumerate(outputs_list):
+            suffix = "" if output_index == num_entries - 1 else f"_aux_{output_index}"
+            # VFL keeps each layer's own Hungarian assignment (official).
+            losses[f"loss_vfl{suffix}"] = loss_labels_vfl(
+                outputs,
+                targets,
+                layer_indices[output_index],
+                num_boxes,
+                query_mask=query_mask,
+                flat_indexing=self.flat_losses,
+            )
+
+        # Union matching across all decoded layers + the pre-output head
+        # + the encoder proposals (official ``_get_go_indices``): box losses
+        # (final AND every aux layer, baseline aux loop) and the FGL targets
+        # ride the union; FGL targets are cached once against the fixed
+        # initial anchor and reused by every layer.
+        aux_indices = layer_indices[:-1]
+        pre_indices: list[tuple[torch.Tensor, torch.Tensor]] | None = None
+        if pre_group_index is not None:
+            pre_indices = indices_to_device(solved[pre_group_index], device)
+        enc_indices_list: list[list[tuple[torch.Tensor, torch.Tensor]]] = []
+        if enc_first_index is not None:
+            enc_indices_list = [
+                indices_to_device(solved[enc_first_index + enc_index], device)
+                for enc_index in range(len(enc_aux_outputs or []))
+            ]
         indices_go = self._get_go_indices(
             layer_indices[-1],
             aux_indices + ([pre_indices] if pre_indices else []) + enc_indices_list,
@@ -351,7 +380,8 @@ class DFINECriterionV2(nn.Module):
 
         if pre_outputs is not None:
             losses["loss_vfl_pre"] = loss_labels_vfl(
-                pre_outputs, targets, pre_indices, num_boxes, query_mask=query_mask
+                pre_outputs, targets, pre_indices, num_boxes, query_mask=query_mask,
+                flat_indexing=self.flat_losses,
             )
             # Box losses ride the union assignment (baseline: the pre head
             # is one more entry in the go-indices union for "boxes").
@@ -490,13 +520,15 @@ class DFINECriterionV2(nn.Module):
                 ).items():
                     losses[f"{name}_dn_pre"] = value
                 losses["loss_vfl_dn_pre"] = loss_labels_vfl(
-                    dn_pre_outputs, targets, dn_indices, dn_num_boxes
-                )
+                    dn_pre_outputs, targets, dn_indices, dn_num_boxes,
+                flat_indexing=self.flat_losses,
+            )
             for dn_index, dn_layer in enumerate(dn_outputs):
                 suffix = f"_dn_{dn_index}"
                 losses[f"loss_vfl{suffix}"] = loss_labels_vfl(
-                    dn_layer, targets, dn_indices, dn_num_boxes
-                )
+                    dn_layer, targets, dn_indices, dn_num_boxes,
+                flat_indexing=self.flat_losses,
+            )
                 for name, value in self._loss_boxes(
                     dn_layer, targets, dn_indices, dn_num_boxes
                 ).items():
@@ -718,7 +750,8 @@ class DFINECriterionV2(nn.Module):
                     enc_targets,
                     enc_indices_list[enc_index],
                     num_boxes,
-                )
+                flat_indexing=self.flat_losses,
+            )
                 for name, value in self._loss_boxes(
                     enc_outputs, enc_targets, indices_go, num_boxes_go
                 ).items():

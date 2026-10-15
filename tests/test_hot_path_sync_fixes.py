@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Equivalence tests for the hot-path sync-removal refactors.
 
 Each test pins the refactored implementation against a verbatim copy of
@@ -28,6 +28,7 @@ Covered refactors:
 
 import math
 
+import pytest
 import torch
 
 from autovision.tasks.detection.detr.dome_decoder import (
@@ -60,12 +61,22 @@ REG_MAX = 8
 
 
 def _reference_match_per_image(matcher, outputs, targets):
-    """Pre-refactor forward_match: one host transfer per image."""
+    """Per-image reference for the batched-padded matcher.
+
+    Same costs (GIoU on normalized xyxy — the official D-FINE/RT-DETR
+    matcher convention), same guards, one host transfer + one scipy solve
+    per image: the batched implementation must produce identical
+    assignments.
+    """
     from scipy.optimize import linear_sum_assignment
 
     from autovision.geometry.box_ops import (
         generalized_box_iou_loss,
     )
+
+    def to_xyxy(boxes):
+        cx, cy, w, h = boxes.unbind(-1)
+        return torch.stack([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], dim=-1)
 
     batch_logits = outputs["pred_logits"]
     batch_boxes = torch.nan_to_num(
@@ -100,7 +111,9 @@ def _reference_match_per_image(matcher, outputs, targets):
         )
         class_cost = pos_cost - neg_cost
         l1_cost = torch.cdist(pred_boxes, target_boxes, p=1)
-        giou_cost = generalized_box_iou_loss(pred_boxes, target_boxes)
+        giou_cost = generalized_box_iou_loss(
+            to_xyxy(pred_boxes), to_xyxy(target_boxes)
+        )
         cost = (
             matcher.cost_class * class_cost
             + matcher.cost_bbox * l1_cost
@@ -296,6 +309,96 @@ class TestMatcherBatchedTransfer:
         targets = [{"boxes": torch.rand(1, 4), "labels": torch.tensor([1])}]
         (src, dst), = forward_match(HungarianMatcher(), outputs, targets)
         assert src.tolist() == [0] and dst.tolist() == [0]
+
+    def test_mixed_empty_and_uneven_counts(self):
+        """Empty-GT images keep the short path; uneven counts pad correctly."""
+        generator = torch.Generator().manual_seed(23)
+        outputs, targets = self._random_batch(generator)
+        targets[2] = {
+            "boxes": torch.zeros(0, 4),
+            "labels": torch.zeros(0, dtype=torch.int64),
+        }
+        matcher = HungarianMatcher()
+        got = forward_match(matcher, outputs, targets)
+        want = _reference_match_per_image(matcher, outputs, targets)
+        for (g_src, g_dst), (w_src, w_dst) in zip(got, want):
+            assert torch.equal(g_src, w_src) and torch.equal(g_dst, w_dst)
+        assert got[2][0].numel() == 0 and got[2][1].numel() == 0
+
+    def test_more_targets_than_queries(self):
+        generator = torch.Generator().manual_seed(5)
+        outputs = {
+            "pred_logits": torch.randn(2, 8, 3, generator=generator),
+            "pred_boxes": torch.rand(2, 8, 4, generator=generator),
+        }
+        targets = [
+            {
+                "boxes": torch.rand(25, 4, generator=generator) * 0.4 + 0.1,
+                "labels": torch.randint(0, 3, (25,), generator=generator),
+            }
+            for _ in range(2)
+        ]
+        matcher = HungarianMatcher()
+        got = forward_match(matcher, outputs, targets)
+        want = _reference_match_per_image(matcher, outputs, targets)
+        for (g_src, g_dst), (w_src, w_dst) in zip(got, want):
+            assert torch.equal(g_src, w_src) and torch.equal(g_dst, w_dst)
+        assert got[0][0].numel() == 8  # every query matched exactly once
+
+    def test_nan_pred_boxes_guarded(self):
+        generator = torch.Generator().manual_seed(7)
+        outputs, targets = self._random_batch(generator)
+        outputs["pred_boxes"][0, :3] = float("nan")
+        outputs["pred_boxes"][0, 3] = float("inf")
+        matcher = HungarianMatcher()
+        got = forward_match(matcher, outputs, targets)
+        want = _reference_match_per_image(matcher, outputs, targets)
+        for (g_src, g_dst), (w_src, w_dst) in zip(got, want):
+            assert torch.equal(g_src, w_src) and torch.equal(g_dst, w_dst)
+
+    def test_deterministic(self):
+        generator = torch.Generator().manual_seed(13)
+        outputs, targets = self._random_batch(generator)
+        matcher = HungarianMatcher()
+        first = forward_match(matcher, outputs, targets)
+        second = forward_match(matcher, outputs, targets)
+        assert all(
+            torch.equal(a[0], b[0]) and torch.equal(a[1], b[1])
+            for a, b in zip(first, second)
+        )
+
+    def test_multi_seed_parity(self):
+        matcher = HungarianMatcher()
+        for seed in range(1, 40):
+            generator = torch.Generator().manual_seed(seed)
+            outputs, targets = self._random_batch(generator)
+            got = forward_match(matcher, outputs, targets)
+            want = _reference_match_per_image(matcher, outputs, targets)
+            for (g_src, g_dst), (w_src, w_dst) in zip(got, want):
+                assert torch.equal(g_src, w_src), f"rows differ at seed {seed}"
+                assert torch.equal(g_dst, w_dst), f"cols differ at seed {seed}"
+
+    def test_giou_batched_matches_pairwise_exact(self):
+        """The vmap'd per-image GIoU is bit-identical to the pairwise loop
+        (locks the single-source-of-truth math)."""
+        from autovision.geometry.box_ops import generalized_box_iou_loss
+        from autovision.tasks.detection.shared.matcher import _giou_batched
+
+        generator = torch.Generator().manual_seed(3)
+        pred = torch.rand(4, 20, 4, generator=generator)
+        tgt = torch.rand(4, 7, 4, generator=generator)
+        batched = _giou_batched(pred, tgt)
+        reference = torch.stack(
+            [generalized_box_iou_loss(pred[i], tgt[i]) for i in range(4)]
+        )
+        assert torch.equal(batched, reference)
+
+    def test_xyxy_conversion_helper(self):
+        from autovision.tasks.detection.shared.matcher import _cxcywh_to_xyxy_norm
+
+        boxes = torch.tensor([[0.5, 0.5, 0.2, 0.4]])
+        expected = torch.tensor([[0.4, 0.3, 0.6, 0.7]])
+        assert torch.allclose(_cxcywh_to_xyxy_norm(boxes), expected)
 
 
 # ── _get_go_indices ─────────────────────────────────────────────────────
@@ -981,3 +1084,284 @@ class TestDenoisingMaxGtCap:
         _, _, _, meta_capped = self._build(counts, max_gt_cap=300)
         assert meta["dn_num_group"] == 1
         assert meta_capped["dn_num_group"] == 1
+
+
+# ── dataloader worker hygiene (ultralytics port, item 4) ────────────────
+
+
+class _ThreadProbeDataset(torch.utils.data.Dataset):
+    """One item per index; carries the worker's torch thread count."""
+
+    def __init__(self, length: int = 4) -> None:
+        self.length = length
+
+    def __len__(self) -> int:
+        return self.length
+
+    def __getitem__(self, index: int) -> torch.Tensor:
+        return torch.tensor(torch.get_num_threads(), dtype=torch.int64)
+
+
+class TestDataloaderWorkerHygiene:
+    def test_worker_cap_by_batch_count(self):
+        from autovision.cli.common_helpers import build_task_dataloader
+
+        # 2 batches with 8 requested workers -> capped to the batch count.
+        loader = build_task_dataloader(
+            _ThreadProbeDataset(4), batch_size=2, num_workers=8, train=True
+        )
+        assert loader.num_workers == 2
+        # A single-batch loader runs in-process (no persistent pool).
+        loader = build_task_dataloader(
+            _ThreadProbeDataset(2), batch_size=8, num_workers=8, train=True
+        )
+        assert loader.num_workers == 0
+        assert loader.prefetch_factor is None
+
+
+# ── clip disabled path: foreach norm (ultralytics port, item 2) ─────────
+
+
+class TestClipDisabledPathForeach:
+    def _stub(self, max_norm: float):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            model_args=SimpleNamespace(gradient_clip_val=max_norm)
+        )
+
+    def _optimizer(self, seed: int = 0):
+        generator = torch.Generator().manual_seed(seed)
+        params = [
+            torch.nn.Parameter(torch.randn(7, 5, generator=generator)),
+            torch.nn.Parameter(torch.randn(11, generator=generator)),
+        ]
+        for p in params:
+            p.grad = torch.randn_like(p, generator=generator)
+        return torch.optim.SGD(params, lr=0.1)
+
+    def test_disabled_path_matches_reference_and_no_mutation(self):
+        from autovision.tasks.detection.rtdetr.train_model import (
+            RTDETRObjectDetectionTrain,
+        )
+
+        optimizer = self._optimizer()
+        before = [p.grad.clone() for g in optimizer.param_groups for p in g["params"]]
+        got = RTDETRObjectDetectionTrain.clip_gradients(
+            self._stub(0.0), optimizer
+        )
+        # Reference: per-tensor norms then the outer norm (pre-foreach code).
+        grads = [p.grad for g in optimizer.param_groups for p in g["params"]]
+        reference = float(
+            torch.linalg.vector_norm(
+                torch.stack([torch.linalg.vector_norm(g) for g in grads])
+            )
+        )
+        assert got == pytest.approx(reference, rel=1e-6)
+        after = [p.grad for g in optimizer.param_groups for p in g["params"]]
+        assert all(torch.equal(a, b) for a, b in zip(before, after))
+
+    def test_enabled_path_smoke(self):
+        from autovision.tasks.detection.rtdetr.train_model import (
+            RTDETRObjectDetectionTrain,
+        )
+
+        optimizer = self._optimizer(seed=3)
+        total = RTDETRObjectDetectionTrain.clip_gradients(self._stub(0.05), optimizer)
+        assert math.isfinite(total)
+        grads = [p.grad for g in optimizer.param_groups for p in g["params"]]
+        assert float(
+            torch.linalg.vector_norm(torch.stack([g.norm() for g in grads]))
+        ) <= 0.05 + 1e-5
+
+
+# ── nominal-batch auto accumulation (ultralytics port, item 3) ──────────
+
+
+class TestGradientAccumulationResolution:
+    def _resolve(self, accum, nominal, batch):
+        from autovision.cli.common_helpers import resolve_gradient_accumulation
+
+        return resolve_gradient_accumulation(accum, nominal, batch)
+
+    def test_auto_from_nominal_batch(self):
+        assert self._resolve("auto", 64, 16) == 4
+        assert self._resolve("auto", 64, 32) == 2
+        # Larger per-step batch than nominal -> no accumulation.
+        assert self._resolve("auto", 64, 128) == 1
+        # round(0.5) = 0 would disable training steps entirely.
+        assert self._resolve("auto", 64, 192) == 1
+
+    def test_explicit_passthrough_and_validation(self):
+        assert self._resolve(3, 64, 16) == 3
+        with pytest.raises(ValueError, match=">= 1"):
+            self._resolve(0, 64, 16)
+        with pytest.raises(ValueError, match="auto"):
+            self._resolve("sometimes", 64, 16)
+
+    def test_auto_accumulation_end_to_end(self, tmp_path):
+        """accum=round(8/2)=4 over the 8-image coco8 smoke set."""
+        from autovision import train_object_detection
+        from autovision.data.coco8 import ensure_coco8
+
+        data = ensure_coco8(tmp_path / "coco8")
+        result = train_object_detection(
+            out=tmp_path / "run",
+            data=data,
+            model="detr/n",
+            steps=2,
+            batch_size=2,
+            nominal_batch_size=8,
+            gradient_accumulation_steps="auto",
+            num_workers=0,
+            model_args={
+                "image_size": (64, 64),
+                "num_queries": 50,
+                "num_top_queries": 50,
+                "num_denoising": 10,
+            },
+            transform_args={
+                "mosaic_prob": 0.0,
+                "scale_jitter": None,
+                "photometric_distort_prob": None,
+                "random_zoom_out_prob": None,
+                "random_iou_crop_prob": None,
+            },
+            trainer_args={"val_every_num_steps": 100_000},
+        )
+        assert result.steps_run == 2
+
+
+class TestMatcherL1CostEquivalence:
+    def test_elementwise_l1_matches_cdist(self):
+        """The matcher's L1 cost uses elementwise abs-sum (cdist is 6-12x
+        slower at these shapes); values must agree with cdist up to fp32
+        rounding on shapes the matcher actually sees."""
+        generator = torch.Generator().manual_seed(29)
+        pred = torch.rand(6, 60, 4, generator=generator)
+        tgt = torch.rand(6, 21, 4, generator=generator)
+        elementwise = (pred[:, :, None, :] - tgt[:, None, :, :]).abs().sum(-1)
+        cdist = torch.cdist(pred, tgt, p=1)
+        assert torch.allclose(elementwise, cdist, atol=1e-5)
+        assert torch.equal(elementwise, cdist) or (
+            elementwise - cdist
+        ).abs().max() < 1e-5
+
+
+# ── consolidated matcher: many-groups solve + optional GPU LSAP ─────────
+
+
+class TestConsolidatedMatching:
+    def _groups(self, seed: int, num_groups: int = 5, batch: int = 5, queries: int = 40):
+        generator = torch.Generator().manual_seed(seed)
+        groups = []
+        for _ in range(num_groups):
+            targets = []
+            for _ in range(batch):
+                count = int(torch.randint(0, 7, (1,), generator=generator))
+                targets.append(
+                    {
+                        "boxes": torch.rand(count, 4, generator=generator) * 0.4 + 0.1,
+                        "labels": torch.randint(0, 6, (count,), generator=generator),
+                    }
+                )
+            outputs = {
+                "pred_logits": torch.randn(batch, queries, 6, generator=generator),
+                "pred_boxes": torch.rand(batch, queries, 4, generator=generator),
+            }
+            groups.append((outputs, targets))
+        return groups
+
+    def _force_scipy(self, monkeypatch):
+        import autovision.tasks.detection.shared.matcher as matcher_module
+
+        monkeypatch.setenv("AUTOVISION_LSAP", "scipy")
+        matcher_module._LSAP["tried"] = False
+        matcher_module._LSAP["fn"] = None
+
+    def _restore_auto(self, monkeypatch):
+        import autovision.tasks.detection.shared.matcher as matcher_module
+
+        monkeypatch.setenv("AUTOVISION_LSAP", "auto")
+        matcher_module._LSAP["tried"] = False
+        matcher_module._LSAP["fn"] = None
+
+    def test_many_matches_sequential_scipy(self, monkeypatch):
+        from autovision.tasks.detection.shared.matcher import (
+            forward_match,
+            forward_match_many,
+        )
+
+        self._force_scipy(monkeypatch)
+        matcher = HungarianMatcher()
+        for seed in (3, 11, 29):
+            groups = self._groups(seed)
+            got = forward_match_many(matcher, groups)
+            for (outputs, targets), group_result in zip(groups, got):
+                want = forward_match(matcher, outputs, targets)
+                for (g_src, g_dst), (w_src, w_dst) in zip(group_result, want):
+                    assert torch.equal(g_src, w_src) and torch.equal(g_dst, w_dst)
+
+    def test_gpu_path_matches_scipy(self, monkeypatch):
+        pytest.importorskip("torch_linear_assignment")
+        if not torch.cuda.is_available():
+            pytest.skip("GPU LSAP needs CUDA")
+        from autovision.tasks.detection.shared.matcher import forward_match_many
+
+        matcher = HungarianMatcher()
+        for seed in (5, 17):
+            groups = self._groups(seed)
+            self._force_scipy(monkeypatch)
+            reference = forward_match_many(matcher, groups)
+            self._restore_auto(monkeypatch)
+            gpu = forward_match_many(matcher, groups)
+            for ref_group, gpu_group in zip(reference, gpu):
+                for (r_src, r_dst), (g_src, g_dst) in zip(ref_group, gpu_group):
+                    assert torch.equal(r_src, g_src.cpu())
+                    assert torch.equal(r_dst, g_dst.cpu())
+
+    def test_kill_switch_forces_scipy(self, monkeypatch):
+        import autovision.tasks.detection.shared.matcher as matcher_module
+
+        self._force_scipy(monkeypatch)
+        assert matcher_module._load_lsap() is None
+
+    def test_more_targets_than_queries_falls_back(self, monkeypatch):
+        """Batched GPU kernels require full column coverage; >Q targets
+        must stay on the scipy path and still solve exactly."""
+        from autovision.tasks.detection.shared.matcher import forward_match_many
+
+        generator = torch.Generator().manual_seed(2)
+        outputs = {
+            "pred_logits": torch.randn(2, 8, 3, generator=generator),
+            "pred_boxes": torch.rand(2, 8, 4, generator=generator),
+        }
+        targets = [
+            {
+                "boxes": torch.rand(13, 4, generator=generator) * 0.4 + 0.1,
+                "labels": torch.randint(0, 3, (13,), generator=generator),
+            }
+            for _ in range(2)
+        ]
+        matcher = HungarianMatcher()
+        self._force_scipy(monkeypatch)
+        reference = forward_match_many(matcher, [(outputs, targets)])
+        self._restore_auto(monkeypatch)
+        got = forward_match_many(matcher, [(outputs, targets)])
+        for (r_src, r_dst), (g_src, g_dst) in zip(reference[0], got[0]):
+            assert torch.equal(r_src, g_src.cpu())
+            assert torch.equal(r_dst, g_dst.cpu())
+
+    def test_all_empty_group_among_solved_groups(self, monkeypatch):
+        from autovision.tasks.detection.shared.matcher import forward_match_many
+
+        self._force_scipy(monkeypatch)
+        groups = self._groups(7, num_groups=3)
+        empty_targets = [
+            {"boxes": torch.zeros(0, 4), "labels": torch.zeros(0, dtype=torch.int64)}
+            for _ in range(groups[0][0]["pred_logits"].shape[0])
+        ]
+        groups.append((groups[0][0], empty_targets))
+        got = forward_match_many(HungarianMatcher(), groups)
+        assert got[0]  # non-empty groups still solved
+        assert all(src.numel() == 0 and dst.numel() == 0 for src, dst in got[-1])

@@ -1,9 +1,12 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
-"""Autovision: enterprise visual model training framework.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
+"""AutoVision: enterprise visual model training framework.
 
 Public API:
 
 - :func:`autovision.pretrain` — self-supervised pretraining / distillation.
+- :func:`autovision.detection` / :func:`autovision.load_model` — object
+  detection model handles (``train / val / predict / export``).
+- :func:`autovision.ensure_coco8` — bundled synthetic smoke dataset.
 - :func:`autovision.list_models` — all models exposed by registered packages.
 - :func:`autovision.list_methods` — all registered pretraining methods.
 """
@@ -31,8 +34,15 @@ from autovision.cli import (
     train_semantic_segmentation,
 )
 from autovision.cli.extract_video_frames import extract_video_frames
+from autovision.cli.model_handle import (
+    DetectionModel,
+    detection,
+    evaluate_object_detection,
+    load_model,
+)
+from autovision.data.coco8 import ensure_coco8
 from autovision.encoders import list_models
-from autovision.errors import AutovisionError
+from autovision.errors import AutoVisionError
 from autovision.export import benchmark
 from autovision.features import embed
 from autovision.pretext import list_methods
@@ -43,17 +53,22 @@ from autovision.tasks.task_model_helpers import load_task_model
 install_graphmodule_deepcopy_fix()
 
 __all__ = [
-    "AutovisionError",
+    "AutoVisionError",
+    "DetectionModel",
     "PretrainConfig",
     "PretrainResult",
     "__version__",
+    "detection",
     "errors",
     "list_methods",
     "list_models",
     "embed",
     "benchmark",
+    "ensure_coco8",
+    "evaluate_object_detection",
     "extract_video_frames",
     "load_embedding_model",
+    "load_model",
     "load_task_model",
     "pretrain",
     "train_image_classification",
@@ -78,7 +93,7 @@ def load_embedding_model(path: str | Path, device: str | None = None) -> Any:
 
     raw = torch.load(path, map_location="cpu", weights_only=True)
     if not isinstance(raw, dict) or "kind" not in raw:
-        raise ValueError(f"File '{path}' is not an exported Autovision model.")
+        raise ValueError(f"File '{path}' is not an exported AutoVision model.")
     model_name = raw.get("model_name")
     if model_name is None:
         raise ValueError(

@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Verified pretrained-weight loading (supply-chain integrity, §3.2/§6.3).
 
 Every pretrained download goes through :func:`load_pretrained_verified`:
@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from autovision.errors import AutovisionError, CheckpointError
+from autovision.errors import AutoVisionError, CheckpointError
 from autovision.runtime.env import Env
 
 __all__ = [
@@ -73,6 +73,21 @@ def _bridge_mirror_to_hf_endpoint() -> None:
         logger.info("Using weight mirror: %s", mirror_url)
 
 
+def bridge_hub_env() -> None:
+    """Point third-party hub consumers (timm/transformers) at the mirror.
+
+    Complements :func:`_bridge_mirror_to_hf_endpoint` (already applied at
+    import) with the offline switch: ``AUTOVISION_OFFLINE=1`` maps to
+    ``HF_HUB_OFFLINE=1`` so ``timm.create_model(pretrained=True)`` and
+    friends resolve cache-only instead of reaching the network. Callers
+    must invoke this BEFORE the consumer library is first imported (same
+    import-time-freeze caveat as the mirror bridge).
+    """
+    if Env.OFFLINE.value and not os.getenv("HF_HUB_OFFLINE"):
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        logger.info("AUTOVISION_OFFLINE=1 -> HF_HUB_OFFLINE=1 (cache-only hub)")
+
+
 _bridge_mirror_to_hf_endpoint()
 
 _WEIGHT_PATTERNS = ("*.safetensors", "*.bin")
@@ -85,7 +100,7 @@ _RETRY_MESSAGE = (
 )
 
 
-class WeightVerificationError(AutovisionError):
+class WeightVerificationError(AutoVisionError):
     """A pretrained weight file failed sha256 verification after one retry."""
 
 
@@ -386,6 +401,27 @@ def _load_from_hub(
     return model_cls.from_pretrained(snapshot_dir, **config_kwargs)
 
 
+#: License tags in the weight manifest that are NOT commercially
+#: unrestricted. Loading still proceeds (the per-package gates decide
+#: that); this warning makes the obligation visible at the moment of use,
+#: including for downstream obligations such as distilling from these
+#: weights as teachers.
+_NON_PERMISSIVE_LICENSE_MARKERS = ("cc-by-nc", "dinov3-custom", "custom")
+
+
+def _warn_non_permissive_license(repo_id: str, artifact: WeightArtifact) -> None:
+    tag = artifact.license.lower()
+    if any(marker in tag for marker in _NON_PERMISSIVE_LICENSE_MARKERS):
+        logger.warning(
+            "Pretrained weights '%s' carry license '%s' — not commercially "
+            "unrestricted. Ensure your use (including models trained from "
+            "these weights as initialization or distillation teachers) "
+            "complies; see NOTICE for the framework's weights policy.",
+            repo_id,
+            artifact.license,
+        )
+
+
 def load_pretrained_verified(
     model_cls: Any,
     repo_id: str,
@@ -399,6 +435,8 @@ def load_pretrained_verified(
             "sha256 verification.", repo_id,
         )
         return model_cls.from_pretrained(repo_id, **(config_kwargs or {}))
+
+    _warn_non_permissive_license(repo_id, artifact)
 
     source = Env.WEIGHT_SOURCE.value
     mirrorable = artifact.modelscope_id is not None and bool(artifact.sha256)
@@ -429,7 +467,7 @@ def _render_manifest(manifest: dict[str, WeightArtifact]) -> str:
     """Deterministic manifest source (single formatting source, used by
     ``scripts/update_weight_hashes.py`` to re-pin hashes in place)."""
     lines = [
-        "# Copyright (c) 2026 Autovision contributors. Apache-2.0.",
+        "# Copyright (c) 2026 AutoVision contributors. Apache-2.0.",
         '"""Pinned pretrained-weight manifest (machine-managed).',
         "",
         "Regenerate with scripts/update_weight_hashes.py; hand-edits are",

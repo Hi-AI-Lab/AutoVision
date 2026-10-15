@@ -1,4 +1,4 @@
-# VTrain 实现蓝图 · 分册 26：训练步工程优化（launch-bound 算子消除与 kernel 效率）
+# AutoVision 实现蓝图 · 分册 26：训练步工程优化（launch-bound 算子消除与 kernel 效率）
 
 | 文档属性 | 内容 |
 |---|---|
@@ -10,7 +10,7 @@
 | 受影响模块 | `ltdetr_object_detection/train_model.py`、`object_detection_components/dfine_criterion.py`、`dfine_utils.py`、`object_detection_components/defe.py`（heatmap 循环）、新增 `_optim/` fused optimizer 开关、`tests/test_step_engineering.py`（新） |
 | 基线兼容承诺 | 全部改动数值等价（浮点重排容差内）或默认关闭；`W1/W2` 落地后为默认开启（有门槛与回退位），`W3/W4` 恒为实验旗标 |
 
-> **标注约定**：【DS】DeepSeek 仓库/技术报告已验证事实；【VTrain】本仓现状（`文件:行` 相对 `src/autovision/`）；【设计】本文档决策；【差异】D1–D5。
+> **标注约定**：【DS】DeepSeek 仓库/技术报告已验证事实；【AutoVision】本仓现状（`文件:行` 相对 `src/autovision/`）；【设计】本文档决策；【差异】D1–D5。
 
 ---
 
@@ -21,7 +21,7 @@
 - `scripts/profile_step_phases.py`：按 `backbone → encoder → decoder → criterion → backward → optim+ema` 分相计时（`:91-163`），定位粗粒度瓶颈；
 - `scripts/profile_criterion_ops.py`：定位 criterion 内 per-image 循环的 launch-bound 小算子。
 
-【VTrain】**已完成的同源工程**（本册的盘点基线，避免重复劳动）：
+【AutoVision】**已完成的同源工程**（本册的盘点基线，避免重复劳动）：
 
 | 已做项 | 位置 | 机制 |
 |---|---|---|
@@ -57,7 +57,7 @@
 
 ### W1（P0）：fused AdamW
 
-【VTrain】`get_optimizer`（`ltdetr_object_detection/train_model.py:699-704`，deimv2 同款 `deimv2_object_detection/train_model.py:231-236`）用默认 AdamW（foreach/multi_tensor_apply 实现——每步约 10 次 foreach kernel，但每次都要跨 140+ 个张量分块遍历，小张量占比高的检测模型在此很吃亏）。
+【AutoVision】`get_optimizer`（`ltdetr_object_detection/train_model.py:699-704`，deimv2 同款 `deimv2_object_detection/train_model.py:231-236`）用默认 AdamW（foreach/multi_tensor_apply 实现——每步约 10 次 foreach kernel，但每次都要跨 140+ 个张量分块遍历，小张量占比高的检测模型在此很吃亏）。
 
 【设计】CUDA 上 `torch.optim.AdamW(..., fused=True)`：整步参数更新折叠为单 kernel。
 
@@ -69,7 +69,7 @@
 
 ### W2（P0）：criterion per-image 循环块对角向量化
 
-【VTrain】criterion 里仍存留四个 per-image Python 循环群（VisDrone 密集批下每图 union 匹配数百对，B=8~16 → 每步数百次小 kernel launch + 数百次 Python 迭代）：
+【AutoVision】criterion 里仍存留四个 per-image Python 循环群（VisDrone 密集批下每图 union 匹配数百对，B=8~16 → 每步数百次小 kernel launch + 数百次 Python 迭代）：
 
 | 循环 | 位置 | 每步迭代数 |
 |---|---|---|
@@ -92,7 +92,7 @@
 
 ### W3（P1，实验旗标）：decoder 子模块 torch.compile
 
-【VTrain】torch.compile 默认关闭（编译训练 step 破坏 metrics 的既有结论）。decoder 前向是纯张量代码（`dfine_decoder.py` 的 `_refine_layers` 循环），是 compile 的合理最小面。
+【AutoVision】torch.compile 默认关闭（编译训练 step 破坏 metrics 的既有结论）。decoder 前向是纯张量代码（`dfine_decoder.py` 的 `_refine_layers` 循环），是 compile 的合理最小面。
 
 【设计】实验旗标 `compile_decoder: bool = False`：
 
@@ -104,7 +104,7 @@
 
 ### W4（P2，评估项）：GPU 匈牙利匹配
 
-【VTrain】matcher 每步跑 `num_entries + pre + enc` 次全批匹配（`dfine_criterion.py:273-309`：3 层 decoder + pre + enc_aux），每次 = GPU cost 矩阵 + 单次批量 D2H + scipy 逐图。D2H 已批量化后，剩余成本 = scipy 本身（CPU，与 GPU 计算重叠有限）。
+【AutoVision】matcher 每步跑 `num_entries + pre + enc` 次全批匹配（`dfine_criterion.py:273-309`：3 层 decoder + pre + enc_aux），每次 = GPU cost 矩阵 + 单次批量 D2H + scipy 逐图。D2H 已批量化后，剩余成本 = scipy 本身（CPU，与 GPU 计算重叠有限）。
 
 【设计】**评估先行，不直接实施**：
 
@@ -203,7 +203,7 @@
 | DeepEP（MoE all-to-all 通信/计算重叠——单卡不适用，方法论参考） | `github.com/deepseek-ai/DeepEP` |
 | "launch-bound 小算子融合 > 算法改进"的工程判断 | DeepSeek 开源周（2025-02）系列仓库 README 与技术报告 §4（基础设施） |
 
-**VTrain 受影响面**（`src/autovision/`）：
+**AutoVision 受影响面**（`src/autovision/`）：
 
 | 内容 | 位置 |
 |---|---|
@@ -264,3 +264,22 @@ W1 与 W2 已实施（同日交付），**两个开关均为 off-by-default**（
 - 初版蒸馏接线（分册 23）在 criterion 构造处误用原始 `model_args.distill.to_distill_params()`，绕过了类空间规则对 `cls_coef` 的修正——测试 `test_class_space_relaxed_drops_cls_leg` 抓到后改为使用 teacher 构建后的最终参数。
 - `_build_gt_to_teacher_query` 对空匹配图返回的 float 空 tensor 加 `.long()` 防御（测试抓到 IndexError）。
 - teacher 导出加载器：`weights_only=True` 对引擎导出必失败（`model_init_args` 的 `locals()` 快照带 `__class__` 类引用）→ 改为"safe loader 失败则告警 + 全量 unpickler"（teacher 是操作者自有可信工件）；导出键前缀实测为 `ema_model.<task key>`（非 `ema_model.model.`）。
+
+---
+
+## 12. 实施记录补遗（2026-10-15，W2 覆盖面补齐 + 实测）
+
+W2 首轮落地时 `criterion_flat_losses` 只覆盖了 `fg_loss`/`ddf_loss` 的 `flat_indexing` 双路径；`loss_boxes` 与 `loss_labels_vfl` 仍是逐图循环（且 `loss_boxes` 每图按**逐对全矩阵 GIoU 取对角线**，O(n²) 计算 O(n) 需求）。本次补齐：
+
+| 文件 | 内容 |
+|---|---|
+| `rtdetrv2_criterion.py` | `loss_boxes(flat_indexing=...)`：一次扁平 gather + 行对齐 `elementwise_giou_loss`/`elementwise_siou`（同时惠及 RT-DETR 家族）；`loss_labels_vfl(flat_indexing=...)`：单次散布写入 + 行对齐 IoU（`elementwise_box_iou`） |
+| `dfine_criterion.py` | `_loss_boxes` 包装与全部 5 处 VFL 调用点透传 `flat_indexing=self.flat_losses` |
+| `tests/test_step_engineering.py` | +4：loss_boxes（giou/siou）/VFL（含 query_mask）/全空 indices 的 flat↔legacy parity（<1e-6 约定）+ `criterion_flat_losses=True` E2E |
+
+**实测量级（4090D，bs16@640，detr/s，最小增强；flat ON vs OFF 同 seed）**：
+- **步时 0.898 → 0.321 s/step（2.8×）**；loss@300 31.410 → 31.374（fp 求和序链式漂移 0.11%，单步 parity <1e-6）；
+- 调用数：`fg_loss_from_targets` 47.8 → 3.0 /步、`bbox2distance` 15.9 → 3.0 /步（逐图循环清零）；`loss_boxes` 12.4 → 1.83 ms/次、`loss_labels_vfl` 9.3 → 2.2 ms/次；
+- 结论：先前"criterion 损失数学 ~390ms"的顽固成本 = 四个逐图循环 + O(n²) 对角线路径，本次全部清零。
+
+**默认值纪律不变**：`criterion_flat_losses` 维持 off-by-default（在飞消融 run 的可比性约定），新配方显式开启——已落 `scripts/finetune_spectrum_s.py` 与 `scripts/train_spectrum_n_distill.py`。建议后续以一次 minor 版本 + 消融分隔点把默认翻转为 True（决策待定）。

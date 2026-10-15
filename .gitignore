@@ -31,6 +31,12 @@ output/
 *.engine
 *.plan
 
+# GTR GLA CUDA extension: built in-place by
+# src/autovision/tasks/detection/shared/gtr/csrc/build.sh (sources are
+# vendored; the compiled extension is a local build product).
+*.so
+src/autovision/tasks/detection/shared/gtr/csrc/build/
+
 # Environment / secrets
 .env
 .env.*

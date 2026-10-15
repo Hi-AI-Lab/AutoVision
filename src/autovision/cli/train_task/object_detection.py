@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Object detection finetuning (COCO / YOLO formats)."""
 
 from __future__ import annotations
@@ -49,6 +49,10 @@ _DATA_FORMATS = {"coco": COCOObjectDetectionDataArgs, "yolo": YOLOObjectDetectio
 
 
 def _load_data_config(data: PathLike | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(data, str) and data == "coco8":
+        from autovision.data.coco8 import ensure_coco8
+
+        return ensure_coco8()
     if isinstance(data, dict):
         payload = dict(data)
     else:
@@ -72,7 +76,8 @@ def train_object_detection(
     *,
     steps: int | str = "auto",
     batch_size: int | str = "auto",
-    gradient_accumulation_steps: int = 1,
+    gradient_accumulation_steps: int | str = 1,
+    nominal_batch_size: int = 64,
     num_workers: int | str = "auto",
     devices: int | str = "auto",
     precision: str = "auto",
@@ -224,6 +229,9 @@ def train_object_detection(
     global_batch_size = common_helpers.get_global_batch_size(
         batch_size_resolved, max(1, _dataset_size(data_args, "train")), num_devices
     )
+    grad_accum_resolved = common_helpers.resolve_gradient_accumulation(
+        gradient_accumulation_steps, nominal_batch_size, global_batch_size
+    )
     num_workers_resolved = common_helpers.get_num_workers(num_workers, num_devices)
     per_device_batch = global_batch_size // num_devices
 
@@ -281,7 +289,7 @@ def train_object_detection(
                 RTDETRDetectionTransformArgs,
                 {"image_size": default_image_size, **(transform_args or {})},
             )
-        train_transform_args.resolve_auto(
+        train_transform_args.resolve_auto_fields(
             num_channels=3, default_image_size=default_image_size
         )
         if ssl_two_crop:
@@ -298,7 +306,7 @@ def train_object_detection(
         train_transform_args.resolve_step_schedule(
             total_steps=steps_resolved,
             train_num_batches=len(train_loader),
-            gradient_accumulation_steps=gradient_accumulation_steps,
+            gradient_accumulation_steps=grad_accum_resolved,
         )
         train_transform_args.resolve_incompatible()
         val_transform_args = build_val_transform_args(train_transform_args)
@@ -359,7 +367,7 @@ def train_object_detection(
             val_loader,
             out_dir=out_dir,
             steps=steps_resolved,
-            gradient_accumulation_steps=gradient_accumulation_steps,
+            gradient_accumulation_steps=grad_accum_resolved,
             step_hooks=[train_transform, train_collate],
             val_every_num_steps=(trainer_args or {}).get("val_every_num_steps"),
             save_every_num_steps=save_args.save_every_num_steps,

@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Tests for the training-step engineering items (design doc 26).
 
 W1: fused AdamW flag (plumbing, CPU fallback, state-dict round trip).
@@ -269,3 +269,127 @@ class TestLtdetrFlatFlag:
         args = DETRObjectDetectionTrainArgs(**VARIANT_ARGS, criterion_flat_losses=True)
         wrapper = DETRObjectDetectionTrain(args)
         assert wrapper.criterion.flat_losses is True
+
+
+# ── W2: flat box/VFL loss paths (loss_boxes + loss_labels_vfl) ─────────
+
+
+class TestFlatBoxAndVFLLosses:
+    """The flat paths must reproduce the legacy per-image loops to
+    < 1e-6 (doc 26 W2 convention): fp32 summation order may differ."""
+
+    def _case(self, seed: int = 0, batch: int = 4, queries: int = 30, classes: int = 5):
+        torch.manual_seed(seed)
+        logits = torch.randn(batch, queries, classes)
+        boxes = torch.rand(batch, queries, 4) * 0.6 + 0.05
+        targets, indices = [], []
+        counts = [0, 3, 7, 12, 1, 5][:batch]
+        for n in counts:
+            targets.append(
+                {
+                    "boxes": torch.rand(n, 4) * 0.4 + 0.1,
+                    "labels": torch.randint(0, classes, (n,)),
+                }
+            )
+            if n:
+                indices.append(
+                    (torch.randperm(queries)[:n], torch.arange(n))
+                )
+            else:
+                indices.append(
+                    (
+                        torch.empty(0, dtype=torch.long),
+                        torch.empty(0, dtype=torch.long),
+                    )
+                )
+        outputs = {"pred_logits": logits, "pred_boxes": boxes}
+        num_boxes = torch.tensor(float(sum(n for n in counts)))
+        return outputs, targets, indices, num_boxes
+
+    def test_loss_boxes_flat_matches_legacy(self):
+        from autovision.tasks.detection.shared.rtdetrv2_criterion import loss_boxes
+
+        outputs, targets, indices, num_boxes = self._case()
+        for iou_term in ("giou", "siou"):
+            legacy = loss_boxes(outputs, targets, indices, num_boxes, iou_term=iou_term)
+            flat = loss_boxes(
+                outputs, targets, indices, num_boxes,
+                iou_term=iou_term, flat_indexing=True,
+            )
+            assert legacy.keys() == flat.keys()
+            for key in legacy:
+                torch.testing.assert_close(flat[key], legacy[key], rtol=1e-6, atol=1e-7)
+
+    def test_vfl_flat_matches_legacy(self):
+        from autovision.tasks.detection.shared.rtdetrv2_criterion import (
+            loss_labels_vfl,
+        )
+
+        outputs, targets, indices, num_boxes = self._case(seed=1)
+        mask = torch.ones(outputs["pred_logits"].shape[:2], dtype=torch.bool)
+        mask[0, 20:] = False
+        for query_mask in (None, mask):
+            legacy = loss_labels_vfl(
+                outputs, targets, indices, num_boxes, query_mask=query_mask
+            )
+            flat = loss_labels_vfl(
+                outputs, targets, indices, num_boxes,
+                query_mask=query_mask, flat_indexing=True,
+            )
+            torch.testing.assert_close(flat, legacy, rtol=1e-6, atol=1e-7)
+
+    def test_flat_paths_with_no_matches_at_all(self):
+        from autovision.tasks.detection.shared.rtdetrv2_criterion import (
+            loss_boxes,
+            loss_labels_vfl,
+        )
+
+        outputs, targets, indices, num_boxes = self._case(seed=2)
+        empty_indices = [
+            (
+                torch.empty(0, dtype=torch.long),
+                torch.empty(0, dtype=torch.long),
+            )
+            for _ in indices
+        ]
+        legacy = loss_boxes(outputs, targets, empty_indices, num_boxes)
+        flat = loss_boxes(outputs, targets, empty_indices, num_boxes, flat_indexing=True)
+        for key in legacy:
+            torch.testing.assert_close(flat[key], legacy[key], rtol=1e-6, atol=1e-7)
+        vfl = loss_labels_vfl(outputs, targets, empty_indices, num_boxes)
+        vfl_flat = loss_labels_vfl(
+            outputs, targets, empty_indices, num_boxes, flat_indexing=True
+        )
+        torch.testing.assert_close(vfl_flat, vfl, rtol=1e-6, atol=1e-7)
+
+    def test_criterion_flat_flag_end_to_end(self, tmp_path):
+        """The flag threads through the full criterion and training loop."""
+        from autovision import train_object_detection
+        from autovision.data.coco8 import ensure_coco8
+
+        data = ensure_coco8(tmp_path / "coco8")
+        result = train_object_detection(
+            out=tmp_path / "run",
+            data=data,
+            model="detr/n",
+            steps=2,
+            batch_size=4,
+            num_workers=0,
+            model_args={
+                "image_size": (64, 64),
+                "num_queries": 50,
+                "num_top_queries": 50,
+                "num_denoising": 10,
+                "criterion_flat_losses": True,
+            },
+            transform_args={
+                "mosaic_prob": 0.0,
+                "scale_jitter": None,
+                "photometric_distort_prob": None,
+                "random_zoom_out_prob": None,
+                "random_iou_crop_prob": None,
+            },
+            trainer_args={"val_every_num_steps": 100_000},
+        )
+        assert result.steps_run == 2
+        assert "val_metric/map" in result.best_metrics or result.best_metrics == {}

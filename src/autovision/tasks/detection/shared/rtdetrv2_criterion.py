@@ -1,10 +1,10 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """RT-DETRv2 criterion: Varifocal (VFL) classification + L1 + GIoU boxes.
 
 Losses (baseline weight dict): ``loss_vfl 1.0 + loss_bbox 5.0 + loss_giou
 
 Source lineage: RT-DETRv2 criterion (``lyuwenyu/RT-DETR`` @ ``df2a96c``, Apache-2.0),
-restructured by Autovision; ledger ``docs/provenance/LEDGER.md`` (P1-4).
+restructured by AutoVision; ledger ``docs/provenance/LEDGER.md`` (P1-4).
 2.0``; the box losses are normalized by the total number of target boxes
 (averaged across ranks with ``all_reduce``). Auxiliary decoder layers are
 weighted with factor 1.0 through the same loss names (``*_aux_{i}``), like
@@ -20,12 +20,17 @@ import torch.nn.functional as F
 from torch import nn
 
 from autovision.geometry.box_ops import (
+    elementwise_box_iou,
+    elementwise_giou_loss,
     elementwise_siou,
     generalized_box_iou_loss,
 )
 from autovision.runtime.distributed import reduce_dict
 from autovision.tasks.detection.shared.denoising import (
     get_cdn_matched_indices,
+)
+from autovision.tasks.detection.shared.dfine_utils import (
+    flatten_match_indices,
 )
 from autovision.tasks.detection.shared.matcher import (
     indices_to_device,
@@ -51,6 +56,7 @@ def loss_labels_vfl(
     alpha: float = 0.75,
     gamma: float = 2.0,
     query_mask: torch.Tensor | None = None,
+    flat_indexing: bool = False,
 ) -> torch.Tensor:
     """Varifocal loss with IoU-scored targets on the matched queries.
 
@@ -72,16 +78,49 @@ def loss_labels_vfl(
     # Baseline sanitizes the predicted side before the quality IoU (NaN
     # boxes would zero the whole VFL term via the trailing nan_to_num).
     pred_boxes = _clip_normalize_boxes(outputs["pred_boxes"])
-    for batch_index, (src, dst) in enumerate(indices):
-        if src.numel() == 0:
-            continue
-        ious = _matched_iou(
-            pred_boxes[batch_index, src].detach(),
-            targets[batch_index]["boxes"][dst].to(pred_boxes.device),
-        )
-        classes = targets[batch_index]["labels"][dst].to(logits.device)
-        target_scores[batch_index, src, classes] = ious
-        target[batch_index, src, classes] = 1.0
+    if flat_indexing:
+        # W2 flat path: one row-aligned IoU over the concatenated matched
+        # pairs + a single scattered write, instead of per-image loop
+        # iterations with a pairwise IoU-diagonal each. Same math; the
+        # fp32 summation order of the trailing BCE is unchanged.
+        device = logits.device
+        flat_q, _, _ = flatten_match_indices(indices, num_queries, device)
+        if flat_q.numel():
+            gt_matched = torch.cat(
+                [
+                    targets[batch_index]["boxes"][dst.to(device)].to(
+                        device=device, dtype=pred_boxes.dtype
+                    )
+                    for batch_index, (_, dst) in enumerate(indices)
+                    if dst.numel()
+                ]
+            )
+            classes_matched = torch.cat(
+                [
+                    targets[batch_index]["labels"][dst.to(device)].to(device=device)
+                    for batch_index, (_, dst) in enumerate(indices)
+                    if dst.numel()
+                ]
+            )
+            ious, _ = elementwise_box_iou(
+                _cxcywh_to_xyxy_unit(pred_boxes.reshape(-1, 4)[flat_q].detach()),
+                _cxcywh_to_xyxy_unit(gt_matched),
+            )
+            target_scores.reshape(-1, num_classes)[flat_q, classes_matched] = (
+                ious.clamp(min=0.0)
+            )
+            target.reshape(-1, num_classes)[flat_q, classes_matched] = 1.0
+    else:
+        for batch_index, (src, dst) in enumerate(indices):
+            if src.numel() == 0:
+                continue
+            ious = _matched_iou(
+                pred_boxes[batch_index, src].detach(),
+                targets[batch_index]["boxes"][dst].to(pred_boxes.device),
+            )
+            classes = targets[batch_index]["labels"][dst].to(logits.device)
+            target_scores[batch_index, src, classes] = ious
+            target[batch_index, src, classes] = 1.0
     pred_scores = logits.sigmoid().detach()
     # Baseline RT-DETRv2 VFL: the (1 - .) term is gated by the ONE-HOT
     # class indicator, NOT the continuous IoU scores — positives pay no
@@ -123,6 +162,7 @@ def loss_boxes(
     *,
     iou_term: Literal["giou", "siou"] = "giou",
     siou_theta: float = 4.0,
+    flat_indexing: bool = False,
 ) -> dict[str, torch.Tensor]:
     """L1 + a matched-pair IoU loss, normalized by num_boxes (rank-reduced).
 
@@ -130,10 +170,50 @@ def loss_boxes(
     ``iou_term="siou"`` emits ``loss_siou`` (Scylla-IoU, arXiv:2205.12740)
     instead — the emissions are mutually exclusive, so every box-loss
     consumer switches together (design doc 15 §4.2).
+
+    ``flat_indexing`` (design doc 26 W2): one flat gather over the
+    concatenated matched pairs with the row-aligned
+    :func:`~autovision.geometry.box_ops.elementwise_giou_loss` instead of
+    the per-image loop of pairwise-matrix diagonals; numerically
+    equivalent up to float summation order (tested < 1e-6).
     """
     l1_total = outputs["pred_boxes"].sum() * 0.0
     iou_total = outputs["pred_boxes"].sum() * 0.0
     pred_boxes_sanitized = _clip_normalize_boxes(outputs["pred_boxes"])
+    if flat_indexing:
+        device = pred_boxes_sanitized.device
+        num_queries = pred_boxes_sanitized.shape[1]
+        flat_q, _, _ = flatten_match_indices(indices, num_queries, device)
+        if flat_q.numel():
+            gt_matched = torch.cat(
+                [
+                    targets[batch_index]["boxes"][dst.to(device)].to(
+                        device=device, dtype=pred_boxes_sanitized.dtype
+                    )
+                    for batch_index, (_, dst) in enumerate(indices)
+                    if dst.numel()
+                ]
+            )
+            pred = pred_boxes_sanitized.reshape(-1, 4)[flat_q]
+            l1_total = l1_total + (pred - gt_matched).abs().sum()
+            pred_xyxy = _cxcywh_to_xyxy_unit(pred)
+            target_xyxy = _cxcywh_to_xyxy_unit(gt_matched)
+            if iou_term == "siou":
+                iou_total = iou_total + elementwise_siou(
+                    pred_xyxy, target_xyxy, theta=siou_theta
+                ).sum()
+            else:
+                iou_total = iou_total + elementwise_giou_loss(
+                    pred_xyxy, target_xyxy
+                ).sum()
+        losses = {
+            "loss_bbox": l1_total / num_boxes.clamp(min=1),
+        }
+        if iou_term == "siou":
+            losses["loss_siou"] = iou_total / num_boxes.clamp(min=1)
+        else:
+            losses["loss_giou"] = iou_total / num_boxes.clamp(min=1)
+        return losses
     for batch_index, (src, dst) in enumerate(indices):
         if src.numel() == 0:
             continue

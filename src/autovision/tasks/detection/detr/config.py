@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """DETR object detection: train-argument dataclasses.
 
 The ``detr/<backbone>`` variant registry lives in :mod:`.variants` and is
@@ -531,7 +531,7 @@ class DETRObjectDetectionTrainArgs(TrainModelArgs, PydanticConfig):
 
     #: Reference batch for the ``lr × sqrt(global/default)`` LR scaling.
     #: Baseline: 32 across the DETR family, 16 only for the dinov2 V2
-    #: args — "auto" resolves by backbone package in :meth:`resolve_auto`
+    #: args — "auto" resolves by backbone package in :meth:`resolve_auto_fields`
     #: (``batch_size="auto"`` resolves through
     #: :func:`detr_default_batch_size` with the same rule).
     lr_reference_batch: int | Literal["auto"] = "auto"
@@ -560,6 +560,13 @@ class DETRObjectDetectionTrainArgs(TrainModelArgs, PydanticConfig):
     #: class-count-dependent decoder heads are skipped when the class
     #: count differs. See coco_checkpoint.load_baseline_coco_checkpoint.
     detector_checkpoint: Path | None = None
+    #: Path to an AVWarmStart v1 asset (registry/warm_start.py — the
+    #: framework's own licensed warm-start format, e.g. produced by
+    #: ``detr.dfine_official_warm_start``). Transfers encoder/decoder
+    #: knowledge shape-compatibly; the license field is mandatory (R7)
+    #: and the decoder coverage gate applies. Roadmap doc 29 P1 (S 档
+    #: 装配 warm-start 微调).
+    warm_start: Path | None = None
 
     #: Detection head family. "auto" picks the per-variant default
     #: ("dfine_official" only when explicitly selected, else "rtdetrv2").
@@ -706,7 +713,7 @@ class DETRObjectDetectionTrainArgs(TrainModelArgs, PydanticConfig):
                 )
         return self
 
-    def resolve_auto(
+    def resolve_auto_fields(
         self, total_steps: int, train_num_batches: int, gradient_accumulation_steps: int
     ) -> None:
         from autovision.tasks.shared.flat_cosine import (

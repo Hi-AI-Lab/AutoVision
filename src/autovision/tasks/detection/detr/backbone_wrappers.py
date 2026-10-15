@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Detection backbone wrappers for the AV-DETR family.
 
 Ports the baseline ``ltdetr_object_detection`` backbone adapters:
@@ -34,7 +34,9 @@ from autovision.encoders.dinov3.dinov3_wrapper import TransformersDinov3ConvNext
 __all__ = [
     "CONVNEXT_DETECTION_PATCH_SIZE",
     "ConvNeXtDetectionBackbone",
+    "GTRViTBackbone",
     "SpatialPriorModule",
+    "TimmCNNBackbone",
     "ViTDetectionBackbone",
 ]
 
@@ -110,7 +112,7 @@ class ViTDetectionBackbone(Module):
     ) -> None:
         super().__init__()
         self._model_wrapper = model_wrapper
-        embed_dim = model_wrapper.feature_dim()
+        embed_dim = model_wrapper.encoder_dim()
 
         assert len(interaction_indexes) == 3
         self.interaction_indexes = tuple(interaction_indexes)
@@ -162,14 +164,14 @@ class ViTDetectionBackbone(Module):
     @property
     def backbone_model(self) -> Module:
         """The pretrained ViT (only this part trains at backbone LR)."""
-        return self._model_wrapper.get_model()
+        return self._model_wrapper.raw_module()
 
     @property
     def in_channels(self) -> list[int]:
         hidden_dim = (
             self.convs[0].out_channels
             if self.project_features
-            else self._model_wrapper.feature_dim()
+            else self._model_wrapper.encoder_dim()
         )
         return [hidden_dim] * 3
 
@@ -184,11 +186,11 @@ class ViTDetectionBackbone(Module):
             # tokens and zero-fills the dropped positions, so the taps keep
             # the dense (B, D, H', W') shapes and everything below — STA
             # fusion, pyramid resize, projection — is untouched.
-            sem_feats = self._model_wrapper.forward_multiscale_features_masked(
+            sem_feats = self._model_wrapper.stage_feature_maps_masked(
                 x, self.interaction_indexes, window_keep_masks
             )
         else:
-            sem_feats = self._model_wrapper.forward_multiscale_features(
+            sem_feats = self._model_wrapper.stage_feature_maps(
                 x, self.interaction_indexes
             )
 
@@ -289,7 +291,7 @@ class ConvNeXtDetectionBackbone(Module):
 
     @property
     def backbone_model(self) -> Module:
-        return self._model_wrapper.get_model()
+        return self._model_wrapper.raw_module()
 
     @property
     def in_channels(self) -> list[int]:
@@ -297,7 +299,7 @@ class ConvNeXtDetectionBackbone(Module):
         return [hidden_sizes[i] for i in self.stage_indices]
 
     def forward(self, x: Tensor) -> tuple[Tensor, ...]:
-        outputs = self._model_wrapper.get_model()(
+        outputs = self._model_wrapper.raw_module()(
             pixel_values=x, output_hidden_states=True
         )
         hidden_states = outputs.hidden_states  # (embeddings, stage_0, ...)
@@ -307,3 +309,126 @@ class ConvNeXtDetectionBackbone(Module):
                 f"Expected {self.num_stages} ConvNeXt stage features, got {len(feats)}."
             )
         return feats
+
+
+class TimmCNNBackbone(Module):
+    """timm CNN (HGNetV2 line) -> detection pyramid from stage taps.
+
+    Uses timm's ``features_only`` mode: ``out_indices=(1, 2, 3)`` yields
+    the stride-8/16/32 pyramid the HybridEncoder consumes, mirroring the
+    RT-DETR/D-FINE backbone treatment. Pretrained weights come from timm
+    (ImageNet, Apache-2.0-friendly provenance); ``AUTOVISION_OFFLINE`` /
+    ``AUTOVISION_MIRROR_URL`` are bridged to the HF hub env vars before
+    the timm import so cache-only / mirror resolution applies (roadmap
+    design doc 29, P1 mirror/offline 收口).
+    """
+
+    def __init__(
+        self,
+        model_name: str,
+        pretrained: bool = True,
+        finetune: bool = True,
+        num_stages: int = 3,
+    ) -> None:
+        super().__init__()
+        if num_stages != 3:
+            raise ValueError(
+                f"TimmCNNBackbone num_stages must be 3, got {num_stages}."
+            )
+        from autovision.encoders.weight_verification import bridge_hub_env
+
+        bridge_hub_env()
+        import timm
+
+        self._model = timm.create_model(
+            model_name,
+            pretrained=pretrained,
+            features_only=True,
+            out_indices=(1, 2, 3),
+        )
+        self._channels = list(self._model.feature_info.channels())
+        if not finetune:
+            self._model.eval()
+            self._model.requires_grad_(False)
+
+    @property
+    def backbone_model(self) -> Module:
+        return self._model
+
+    @property
+    def in_channels(self) -> list[int]:
+        return list(self._channels)
+
+    def forward(self, x: Tensor) -> tuple[Tensor, ...]:
+        feats = self._model(x)
+        if len(feats) != 3:
+            raise ValueError(
+                f"Expected 3 pyramid features from '{type(self._model).__name__}', "
+                f"got {len(feats)}."
+            )
+        return tuple(feats)
+
+
+class GTRViTBackbone(Module):
+    """GTR ViTAdapter (GLA + Spatial SwiGLU + bidirectional scan) wrapper.
+
+    Same-resolution taps (stride = patch_size, uniform ``embed_dim``
+    channels); the 8/16/32 pyramid comes from GTREncoder downstream
+    (roadmap design doc 31 G2). Requires the ``gtr`` extra
+    (flash-linear-attention) at construction — Triton GLA kernels are
+    CUDA-only, so forward needs a CUDA tensor.
+    """
+
+    def __init__(
+        self,
+        embed_dim: int = 192,
+        num_heads: int = 3,
+        interaction_indexes: tuple[int, ...] = (3, 7, 11),
+        patch_size: int = 16,
+        finetune: bool = True,
+    ) -> None:
+        super().__init__()
+        from autovision.errors import AutoVisionError
+        from autovision.tasks.detection.shared.gtr import (
+            ViTAdapterSpatialSwiGLU,
+            gtr_available,
+        )
+
+        if not gtr_available():
+            raise AutoVisionError(
+                "The GTR backbone line requires flash-linear-attention "
+                "(roadmap design doc 31 G2): pip install -e '.[gtr]'"
+            )
+        self.embed_dim = embed_dim
+        self.patch_size = patch_size
+        self._adapter = ViTAdapterSpatialSwiGLU(
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            interaction_indexes=list(interaction_indexes),
+            multi_layer_same_res=True,
+            skip_weights_warning=True,
+            patch_size=patch_size,
+        )
+        if not finetune:
+            self._adapter.eval()
+            self._adapter.requires_grad_(False)
+
+    @property
+    def backbone_model(self) -> Module:
+        # The inner VisionTransformer._model: its key layout matches
+        # gtr_teacher.extract_gtr_backbone output verbatim, so
+        # ``backbone_weights`` (task_model._load_backbone_weights) loads
+        # extracted GTR backbone states without remapping.
+        return self._adapter.backbone._model
+
+    @property
+    def in_channels(self) -> list[int]:
+        return [self.embed_dim] * 3
+
+    def forward(self, x: Tensor) -> tuple[Tensor, ...]:
+        feats = self._adapter(x)
+        if len(feats) != 3:
+            raise ValueError(
+                f"Expected 3 GTR tap features, got {len(feats)}."
+            )
+        return tuple(feats)

@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """RT-DETR object detection training wrapper."""
 
 from __future__ import annotations
@@ -209,7 +209,7 @@ class RTDETRObjectDetectionTrain(TrainModel):
             or args.scheduler_flat_steps == "auto"
             or args.scheduler_no_aug_steps == "auto"
         ):
-            args.resolve_auto(
+            args.resolve_auto_fields(
                 total_steps=total_steps,
                 train_num_batches=train_num_batches or total_steps,
                 gradient_accumulation_steps=gradient_accumulation_steps,
@@ -261,15 +261,20 @@ class RTDETRObjectDetectionTrain(TrainModel):
             # Clipping disabled: report the total norm without mutating
             # grads (baseline contract — clip_grad_norm_ with a
             # nonpositive max_norm would ZERO every gradient).
-            params = [p for g in optimizer.param_groups for p in g["params"]]
-            norms = [
-                torch.linalg.vector_norm(p.grad)
-                for p in params
+            grads = [
+                p.grad
+                for group in optimizer.param_groups
+                for p in group["params"]
                 if p.grad is not None
             ]
-            if not norms:
+            if not grads:
                 return 0.0
-            return float(torch.linalg.vector_norm(torch.stack(norms)))
+            # One grouped kernel instead of one per tensor (hundreds on a
+            # detector): _foreach_norm + the outer norm produce the same
+            # total the per-tensor loop did.
+            return float(
+                torch.linalg.vector_norm(torch.stack(torch._foreach_norm(grads)))
+            )
         params = [p for group in optimizer.param_groups for p in group["params"]]
         return float(torch.nn.utils.clip_grad_norm_(params, max_norm))
 

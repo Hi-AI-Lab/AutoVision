@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """DETR object detection task model (inference/export facing).
 
 Assembly (baseline ``dinov3_ltdetr``): SSL backbone wrapper -> stride
@@ -11,6 +11,7 @@ family. Per-variant encoder/decoder recipes come from the registry spec.
 from __future__ import annotations
 
 import pathlib
+from pathlib import Path
 from typing import Any, Literal
 
 import torch
@@ -51,6 +52,8 @@ from autovision.tasks.task_model import TaskNetwork
 
 from .backbone_wrappers import (
     ConvNeXtDetectionBackbone,
+    GTRViTBackbone,
+    TimmCNNBackbone,
     ViTDetectionBackbone,
 )
 from .config import (
@@ -303,13 +306,18 @@ class DETRObjectDetection(ONNXExportMixin, TaskNetwork):
             )
         self.open_vocab_args: DETROpenVocabArgs | None = open_vocab
 
-        if spec.backbone_name.startswith("vittest"):
-            backbone_wrapper: Any = _build_vit_test_backbone()
-        else:
-            full_name = f"{spec.backbone_package}/{spec.backbone_name}"
-            backbone_wrapper = get_wrapped_model(
-                full_name, num_input_channels=3, load_weights=load_weights
-            )
+        backbone_wrapper: Any = None
+        if spec.family not in ("timm_cnn", "gtr"):
+            # timm CNNs construct inside TimmCNNBackbone and the GTR GLA
+            # line inside GTRViTBackbone — neither has a transformers
+            # wrapper, so the wrapper stays None for those families.
+            if spec.backbone_name.startswith("vittest"):
+                backbone_wrapper = _build_vit_test_backbone()
+            else:
+                full_name = f"{spec.backbone_package}/{spec.backbone_name}"
+                backbone_wrapper = get_wrapped_model(
+                    full_name, num_input_channels=3, load_weights=load_weights
+                )
         self.backbone_wrapper = backbone_wrapper
 
         if self._token_drop_args is not None:
@@ -342,6 +350,22 @@ class DETRObjectDetection(ONNXExportMixin, TaskNetwork):
                 hidden_dim=hidden_dim,
                 project_features=spec.project_features,
                 resize_features=True,
+            )
+        elif spec.family == "timm_cnn":
+            self.backbone = TimmCNNBackbone(
+                spec.backbone_name,
+                pretrained=load_weights,
+                finetune=True,
+                num_stages=pyramid_levels,
+            )
+        elif spec.family == "gtr":
+            self.backbone = GTRViTBackbone(
+                embed_dim=spec.hidden_dim,
+                # GTR head convention: dim/64 (192->3, 256->4, 384->6).
+                num_heads=max(1, spec.hidden_dim // 64),
+                interaction_indexes=spec.interaction_indexes,
+                patch_size=spec.patch_size,
+                finetune=True,
             )
         else:
             self.backbone = ConvNeXtDetectionBackbone(
@@ -380,6 +404,22 @@ class DETRObjectDetection(ONNXExportMixin, TaskNetwork):
                 depth_mult=enc_depth,
                 use_encoder_idx=[pyramid_levels - 1],
                 density=density,
+            )
+        elif spec.family == "gtr":
+            # GTR line: GTREncoder (RF-DETR/LW-DETR style projector) instead
+            # of the HybridEncoder AIFI stack — the ViTAdapter taps are
+            # same-resolution and the pyramid comes from scale-factor
+            # resampling (roadmap design doc 31 G2).
+            from autovision.tasks.detection.shared.gtr.encoder import GTREncoder
+
+            self.encoder = GTREncoder(
+                in_channels,
+                hidden_dim=hidden_dim,
+                scale_factors=[2.0, 1.0, 0.5],
+                feat_strides=[8, 16, 32],
+                num_blocks=3,
+                layer_norm=True,
+                act="silu",
             )
         else:
             self.encoder = HybridEncoder(
@@ -763,3 +803,63 @@ def _dinov3_supported() -> bool:
         return vit is not None and convnext is not None
     except ImportError:
         return False
+
+
+def load_warm_start_into_network(
+    network: "DETRObjectDetection", warm_start: str | Path
+) -> dict[str, Any]:
+    """Load an AVWarmStart v1 payload into a DETR network (doc 29 P1).
+
+    Shape-compatible subset transfer over the payload's ``model`` state —
+    the license field is mandatory (registry R7: an unlicensed warm-start
+    asset must not exist) and the decoder coverage gate refuses partial
+    assemblies below 0.5. Returns the load report for run provenance.
+    """
+    from autovision.registry.warm_start import (
+        AV_WARM_START_FORMAT,
+        WarmStartError,
+        load_warm_start,
+    )
+
+    try:
+        payload = load_warm_start(warm_start)
+    except WarmStartError as error:
+        raise ValueError(f"Invalid AVWarmStart asset '{warm_start}': {error}") from error
+    if payload.license is None or not str(getattr(payload.license, "id", "")).strip():
+        raise ValueError(
+            f"AVWarmStart asset '{warm_start}' carries no license — refusing "
+            "to consume it (registry R7)."
+        )
+
+    target = network.state_dict()
+    transferred: dict[str, torch.Tensor] = {}
+    skipped_shape: list[str] = []
+    for key, tensor in payload.model.items():
+        if key not in target:
+            continue
+        if tensor.shape != target[key].shape:
+            skipped_shape.append(key)
+            continue
+        transferred[key] = tensor.to(dtype=target[key].dtype)
+    missing, unexpected = network.load_state_dict(transferred, strict=False)
+
+    decoder_keys = [k for k in target if k.startswith("decoder.")]
+    decoder_total = sum(target[k].numel() for k in decoder_keys)
+    decoder_done = sum(
+        target[k].numel() for k in transferred if k in decoder_keys
+    )
+    coverage = decoder_done / decoder_total if decoder_total else 0.0
+    if coverage < 0.5:
+        raise ValueError(
+            f"AVWarmStart '{warm_start}' decoder coverage {coverage:.3f} < 0.5 "
+            "— refusing a partial warm-start."
+        )
+    return {
+        "format": AV_WARM_START_FORMAT,
+        "license": str(payload.license.id),
+        "transferred": len(transferred),
+        "skipped_shape": len(skipped_shape),
+        "missing": len(missing),
+        "unexpected": len(unexpected),
+        "decoder_coverage": round(coverage, 4),
+    }

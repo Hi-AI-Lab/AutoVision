@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """DETR object detection training wrapper.
 
 Mirrors the RT-DETR training wrapper (criterion, EMA, flat-cosine,
@@ -110,7 +110,7 @@ def _build_window_keep_masks(
 def _load_teacher_from_export(path) -> torch.nn.Module:
     """Rebuild a task model from an AutoVision exported ``.pt`` (doc 23 D2).
 
-    The engine's export payload (``engine.export_model``) carries the task
+    The engine's export payload (``engine.export_weights``) carries the task
     model's ``model_class_path``/``model_init_args`` and a wrapper-level
     state dict; the wrapper prefixes (``model.`` for a bare export,
     ``ema_model.model.`` when EMA was on) are stripped so the checkpoint's
@@ -216,6 +216,15 @@ class DETRObjectDetectionTrain(TrainModel):
         )
         super().__init__(task_model=task_model)
         self.model_args = model_args
+        if model_args.warm_start is not None:
+            from autovision.tasks.detection.detr.task_model import (
+                load_warm_start_into_network,
+            )
+
+            summary = load_warm_start_into_network(task_model, model_args.warm_start)
+            logger.info(
+                "AVWarmStart '%s' loaded: %s", model_args.warm_start, summary
+            )
         if model_args.detector_checkpoint is not None:
             from autovision.tasks.detection.detr.coco_checkpoint import (
                 load_baseline_coco_checkpoint,
@@ -905,15 +914,20 @@ class DETRObjectDetectionTrain(TrainModel):
             # Clipping disabled: report the total norm without mutating
             # grads (baseline contract — clip_grad_norm_ with a
             # nonpositive max_norm would ZERO every gradient).
-            params = [p for g in optimizer.param_groups for p in g["params"]]
-            norms = [
-                torch.linalg.vector_norm(p.grad)
-                for p in params
+            grads = [
+                p.grad
+                for group in optimizer.param_groups
+                for p in group["params"]
                 if p.grad is not None
             ]
-            if not norms:
+            if not grads:
                 return 0.0
-            return float(torch.linalg.vector_norm(torch.stack(norms)))
+            # One grouped kernel instead of one per tensor (hundreds on a
+            # detector): _foreach_norm + the outer norm produce the same
+            # total the per-tensor loop did.
+            return float(
+                torch.linalg.vector_norm(torch.stack(torch._foreach_norm(grads)))
+            )
         params = [p for group in optimizer.param_groups for p in group["params"]]
         return float(torch.nn.utils.clip_grad_norm_(params, max_norm))
 

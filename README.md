@@ -1,6 +1,8 @@
-# Autovision (VTrain)
+# AutoVision
 
-企业级视觉模型训练框架的实现(设计文档见 [docs/framework_design.md](docs/framework_design.md) 及 [docs/design/](docs/design/) 分册)。对标 lightly-train 0.17.0 的机制,按 Apache-2.0 重新实现。
+企业级视觉模型训练框架:自监督预训练 → 蒸馏 → 微调 → 评测 → 导出,
+Apache-2.0(设计文档见 [docs/framework_design.md](docs/framework_design.md)
+及 [docs/design/](docs/design/) 分册;第三方组件溯源见 [NOTICE](NOTICE))。
 
 ## 已实现(M0–M2 预训练主干 + M4+ 首批任务/方法扩展)
 
@@ -8,14 +10,14 @@
 |---|---|---|
 | 配置系统 | `config/`(PydanticConfig 严格校验 + did-you-mean 报错美化 + Registry) | §5 |
 | 优化器 | `optim/`(AdamW/SGD/自研 LARS、无 weight-decay 参数规则、按架构 auto wd)、`optim/schedulers.py`(CosineWarmup) | §7.1 |
-| 模型层 | `encoders/`(ModelWrapper 协议族、包注册表 + custom 兜底、EmbeddingModel;**11 个包**:torchvision、**timm(架构前缀表 → auto wd)**、**super_gradients(CustomizableDetector)**、ultralytics(AGPL 隔离)、**dinov2(transformers)、dinov3(transformers 门控; 权重用户自持 D1-a)**、rfdetr(transformers 门控)、rtdetr wrapper) | §6 |
+| 模型层 | `encoders/`(EncoderProtocol 协议族、包注册表 + custom 兜底、FeatureExtractor;**7 个包**:torchvision、**timm(架构前缀表 → auto wd)**、**super_gradients(CustomizableDetector)**、ultralytics(AGPL 隔离)、**dinov2(transformers;预训练权重 CC-BY-NC,门控 `AUTOVISION_DINOV2_WEIGHTS=1`)**、**dinov3(transformers 门控; 权重用户自持 D1-a)**、rfdetr(transformers 门控)、rtdetr wrapper) | §6 |
 | 数据层 | `data/`(图像/ImageFolder 分类/成对分割数据集、mmap 文件清单:引用计数/原子发布/碰撞守卫/数据指纹) | §9.1–9.3 |
 | 变换 | `augment/`(ViewTransform 管线、MethodTransform 多视图协议、参数模型 + auto 解析) | §9.5 |
 | 方法层 | `pretext/`(**DistillationV3** 全规格、**SimCLR**(自研 NT-Xent)、**DINO**(EMA 教师 + 中心化损失 + 多裁剪 + 动量/温度/权重衰减三调度 + 末层冻结)、**kNN 探针**(`method_args.knn_eval`)) | §7 |
-| 运行时 | `engine/`(step 循环、预训练与**任务训练双 DDP**、混合精度、原子 checkpoint、resume、`on_before_optimizer_step` 钩子)、`_checkpoint.py`(自描述格式) | §10 |
-| 任务层 | 检测(RT-DETRv2 + **AV-DETR SSL 骨干微调**:`avdetr/dinov2-vits14` 等 37 变体(原 LT-DETR,R16 更名),ViT 中间层 tap + STA 空间先验 + 骨干/detector 分组 LR,打通自家预训练骨干 → 检测微调闭环;D-FINE 解码器可用)、**分类(ImageFolder + top-k 指标)**、**分割(线性头 + mIoU/混淆矩阵)**;任务指标支持跨 rank 状态汇聚(DDP 验证) | §8 |
+| 运行时 | `engine/`(step 循环、预训练与**任务训练双 DDP**、混合精度、原子 checkpoint、resume、`on_before_optimizer_step` 钩子)、自描述 checkpoint 格式 | §10 |
+| 任务层 | 检测(RT-DETRv2 + **DETR SSL 骨干微调**:`detr/dinov2-vits14` 等 37 变体(原 LT-DETR/AV-DETR,R16 终名 DETR),ViT 中间层 tap + STA 空间先验 + 骨干/detector 分组 LR,打通自家预训练骨干 → 检测微调闭环;D-FINE 解码器可用)、**分类(ImageFolder + top-k 指标)**、**分割(线性头 + mIoU/混淆矩阵)**;任务指标支持跨 rank 状态汇聚(DDP 验证) | §8 |
 | 部署 | ONNX(FP16 黑名单 + 数值对拍门禁)、**TensorRT 导出**(batch-only profile、attention FP32 强制)、**benchmark**(torch/ONNX/TensorRT backend + 可选 parity 门禁) | §12 |
-| 命令/API | `pretrain`/`train_object_detection`/`train_image_classification`/`train_semantic_segmentation`/`embed`/`benchmark`/`list_models`/`list_methods`/`load_*` | §4 |
+| 命令/API | `pretrain`/`train_object_detection`/`train_image_classification`/`train_semantic_segmentation`/`embed`/`benchmark`/`list_models`/`list_methods`/`load_*`；检测 handle:`detection(...).train().val().predict().export()`(`load_model` 从导出件构造)、`evaluate_object_detection`、`ensure_coco8`；CLI:`val`/`predict`/`download`/`convert-data`/`plot-curves` | §4 |
 
 ## 快速开始
 
@@ -33,12 +35,30 @@ result = autovision.pretrain(
 print(result.exported_model_path, result.metrics)
 ```
 
-目标检测微调:
+目标检测(训练 → 验证 → 预测 → 导出,五行闭环):
+
+```python
+import autovision
+
+data = autovision.ensure_coco8()  # 合成冒烟数据集;换你的 COCO/YOLO 配置或 YAML 路径
+model = autovision.detection("rtdetr/resnet18").train(
+    out="runs/det1", data=data, steps=2000, batch_size="auto",
+)
+model.val(data=data)                 # {'map': ..., 'map_50': ...}
+model.predict("image.jpg")           # {'bboxes':..., 'scores':..., 'labels':...}
+model.export("model.onnx")           # 按 .onnx/.engine/.pt 后缀分发
+```
+
+等价命令行(同一套 Pydantic 校验):`train-object-detection`、`val`、`predict`、
+`download`(数据集下载)、`convert-data`(YOLO↔COCO)、`plot-curves`(训练曲线,
+需 `pip install matplotlib`)。
+
+函数式 API(上面的 handle 即它的薄包装)照旧可用:
 
 ```python
 result = autovision.train_object_detection(
     out="runs/det1",
-    data={  # 或 YAML 路径
+    data={  # 或 YAML 路径、或字面量 "coco8"
         "format": "coco",
         "train": {"annotations": "train.json", "images": "images/"},
         "val": {"annotations": "val.json", "images": "images/"},
@@ -53,7 +73,7 @@ print(result.best_metrics["val_metric/map"])
 ```python
 autovision.train_image_classification(
     out="runs/cls1",
-    data={"train": "data/train/", "val": "data/val/"},  # ImageFolder 布局
+    data={"train": "data/train/", "val": "data/val/"},
     model="torchvision/resnet18",
 )
 
@@ -77,7 +97,7 @@ autovision.benchmark("rtdetr/resnet18", out="bench/", num_classes=2,
 ```
 
 大图切片推理(SAHI):瓦片合并组件见
-`autovision.tasks.detection.components.sahi`
+`autovision.tasks.detection.shared.sahi`
 (`tile_image` + `combine_object_detection_tiles`);检测类任务模型提供
 `predict_sahi(image, tile_size, overlap, threshold, ...)` 便捷入口
 (默认 tile 取模型输入尺寸、全图 resize 视图作全局瓦片一并推理)。
@@ -98,7 +118,7 @@ autovision-cli list-models | list-methods | embed out=emb.pt checkpoint=...
 
 ```bash
 pip install -e ".[dev]"
-pytest tests            # 1050+ 个测试(含金标准 loss 轨迹快照)
+pytest tests            # 1500+ 个测试(含金标准 loss 轨迹快照)
 ruff check src tests    # lint(CI 同款规则集,配置见 pyproject.toml)
 ```
 
@@ -112,13 +132,13 @@ ruff check src tests    # lint(CI 同款规则集,配置见 pyproject.toml)
 | `ultralytics`(AGPL) | YOLOv5/6/8/11/12/26、RT-DETR |
 | `rfdetr` | `rf-detr-{base,nano,small,medium,large}`(transformers `RfDetr` 类,需较新 transformers;`-notpretrained` 离线变体) |
 
-预训练权重从 HuggingFace 下载;受限网络设置镜像:`HF_ENDPOINT=https://hf-mirror.com`。`-notpretrained` 变体离线本地构建。真实 from_pretrained 的测试默认跳过,设 `AUTOVISION_HF_TESTS=1` 开启(timm 权重下载测试同门控)。
+预训练权重从 HuggingFace 下载;受限网络设置镜像:`HF_ENDPOINT=https://hf-mirror.com`。`-notpretrained` 变体离线本地构建。**许可注意**:dinov2 预训练权重为 CC-BY-NC 4.0、dinov3 权重为 DINOv3 License,二者默认均不下载——需分别设 `AUTOVISION_DINOV2_WEIGHTS=1` / `AUTOVISION_DINOV3_WEIGHTS=1` 自证已接受对应条款(政策见 [NOTICE](NOTICE));不受限的干净路径是 `-notpretrained` + 本框架自监督预训练。真实 from_pretrained 的测试默认跳过,设 `AUTOVISION_HF_TESTS=1` 开启(timm 权重下载测试同门控)。
 
 金标准快照在 `tests/golden/`;**有意的**配方变更后删除该文件重新录制(`pytest tests/test_methods_distillationv3.py` 跑两遍)。
 
 ## 环境变量
 
-见 `src/autovision/_env.py`(`AUTOVISION_*`,遥测默认关闭)。
+见 `src/autovision/runtime/env.py`(`AUTOVISION_*`,遥测默认关闭)。
 
 ## 已知边界(下一里程碑)
 

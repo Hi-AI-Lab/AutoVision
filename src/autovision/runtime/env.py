@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Framework configuration surface via environment variables.
 
 Every environment variable is declared here as a frozen :class:`EnvVar`
@@ -105,6 +105,13 @@ class Env:
     MIRROR_URL = EnvVar[str | None](
         "AUTOVISION_MIRROR_URL", _default=None, _type=_parse_optional_str
     )
+    # Batched GPU LSAP for the DETR matcher (optional extra ``lsap``,
+    # torch-linear-assignment, Apache-2.0): "auto" (default) uses the
+    # batched GPU solver when it imports and the problems fit the kernel,
+    # with automatic scipy fallback otherwise (design/measurement notes in
+    # tasks/detection/shared/matcher.py); "scipy"/"0"/"off" forces the
+    # per-image scipy loop.
+    LSAP = EnvVar[str]("AUTOVISION_LSAP", _default="auto", _type=str)
     # Weight download source: "auto" (default), "huggingface", or
     # "modelscope". "auto" uses the hub (honoring AUTOVISION_MIRROR_URL,
     # e.g. hf-mirror.com) and falls back to a pinned ModelScope mirror when

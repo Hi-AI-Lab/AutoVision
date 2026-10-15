@@ -1,0 +1,244 @@
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
+"""GTR integration (roadmap design doc 31): G0 teacher foundation +
+G1 assembly-compatible ``gtr-s`` variant.
+
+Checkpoint-dependent tests auto-skip when the local GTR weights are
+absent (fresh checkouts without ``Dino-Dome-Research/weight/gtr`` stay
+green).
+"""
+
+from __future__ import annotations
+
+import pytest
+import torch
+
+from autovision.data.coco8 import ensure_coco8
+from autovision.errors import AutoVisionError
+from autovision.registry.gtr_assets import (
+    GTR_ASSETS,
+    resolve_gtr_asset,
+    verify_gtr_asset,
+)
+from autovision.tasks.detection.detr.variants import (
+    SPECTRUM,
+    resolve_detr_variant,
+    resolve_spectrum_tier,
+)
+
+TINY_TRANSFORM_ARGS = {
+    "scale_jitter": None,
+    "photometric_distort_prob": 0.5,
+    "random_zoom_out_prob": None,
+    "random_iou_crop_prob": None,
+}
+
+
+def _gtr_s_checkpoint():
+    try:
+        return resolve_gtr_asset("gtr_s_coco").path
+    except AutoVisionError:
+        pytest.skip("local GTR weights not present")
+
+
+@pytest.fixture(scope="module")
+def gtr_s_checkpoint():
+    return _gtr_s_checkpoint()
+
+
+@pytest.fixture(scope="module")
+def coco8(tmp_path_factory):
+    return ensure_coco8(tmp_path_factory.mktemp("coco8"))
+
+
+class TestGtrAssets:
+    def test_registry_shape(self):
+        assert set(GTR_ASSETS) == {"gtr_s_coco", "gtr_m_coco", "gtr_l_coco", "gtr_x_coco"}
+        for asset in GTR_ASSETS.values():
+            assert asset.license == "MIT"
+            assert asset.format == "gtr_ckpt_v1"
+            assert len(asset.sha256) == 64
+            assert asset.coco_ap is not None and asset.coco_ap > 50
+
+    def test_unknown_asset_raises(self):
+        with pytest.raises(AutoVisionError, match="Unknown GTR asset"):
+            resolve_gtr_asset("gtr_zzz", verify=False)
+
+    def test_sha256_pin_matches_real_file(self, gtr_s_checkpoint):
+        verify_gtr_asset(resolve_gtr_asset("gtr_s_coco"))  # must not raise
+
+    def test_missing_file_refused(self, tmp_path):
+        from autovision.registry.gtr_assets import GTRAsset
+
+        ghost = GTRAsset(
+            name="ghost", path=tmp_path / "none.pth", sha256="0" * 64
+        )
+        with pytest.raises(AutoVisionError, match="not found"):
+            verify_gtr_asset(ghost)
+
+
+class TestGtrTeacherBundle:
+    def test_ema_semantics_and_inventory(self, gtr_s_checkpoint):
+        from autovision.tasks.detection.detr.gtr_teacher import load_gtr_teacher
+
+        bundle = load_gtr_teacher(
+            gtr_s_checkpoint,
+            asset=resolve_gtr_asset("gtr_s_coco"),
+        )
+        assert bundle.use_ema is True
+        assert bundle.license == "MIT"
+        assert bundle.inventory["decoder_hidden"] == 192
+        assert bundle.inventory["class_embed_rows"] == 81
+        assert bundle.last_epoch == 29
+        # EMA weights must differ from the raw model tail.
+        raw = torch.load(gtr_s_checkpoint, map_location="cpu", weights_only=True)
+        probe = "decoder.decoder.layers.3.self_attn.in_proj_weight"
+        assert not torch.equal(bundle.state[probe], raw["model"][probe])
+
+    def test_model_source_fallback(self, gtr_s_checkpoint):
+        from autovision.tasks.detection.detr.gtr_teacher import load_gtr_teacher
+
+        bundle = load_gtr_teacher(gtr_s_checkpoint, use_ema=False)
+        assert bundle.use_ema is False
+        assert bundle.inventory["weight_source"] == "model"
+
+    def test_backbone_extraction_strips_prefix(self, gtr_s_checkpoint):
+        from autovision.tasks.detection.detr.gtr_teacher import (
+            extract_gtr_backbone,
+            load_gtr_teacher,
+        )
+
+        bundle = load_gtr_teacher(gtr_s_checkpoint)
+        backbone = extract_gtr_backbone(bundle)
+        assert backbone
+        assert all(not k.startswith("backbone.") for k in backbone)
+        assert any(k.startswith("patch_embed") for k in backbone)
+
+    def test_forward_contract_refuses(self, gtr_s_checkpoint):
+        from autovision.tasks.detection.detr.gtr_teacher import (
+            GTRBackendUnavailableError,
+            load_gtr_teacher,
+            teacher_forward,
+        )
+
+        bundle = load_gtr_teacher(gtr_s_checkpoint)
+        with pytest.raises(GTRBackendUnavailableError, match="G2"):
+            teacher_forward(bundle, images=[])
+        assert bundle.decoder_decoder_state  # state-dict handoff works
+
+
+class TestGtrSVariant:
+    def test_width_recipe_is_gtr_s_faithful(self):
+        _, spec = resolve_detr_variant("detr/gtr-s")
+        assert spec.family == "timm_cnn"
+        assert spec.hidden_dim == 192
+        assert spec.dec_dim_feedforward == 512
+        assert spec.dec_layers == 4
+        assert spec.dec_num_points == (4, 4, 4)
+        assert spec.decoder_default == "dfine_official"
+
+    def test_spectrum_tier_is_planned_with_component(self):
+        tier = resolve_spectrum_tier("gtr-s")
+        assert tier.status == "planned"
+        assert tier.variant_key == "gtr-s"  # component exists (G1)
+        assert "gtr-s" not in {t for t, e in SPECTRUM.items() if e.status == "frozen"}
+
+
+class TestGtrAssembly:
+    def test_assembly_coverage_gate(self, gtr_s_checkpoint, tmp_path):
+        from autovision.registry.warm_start import load_warm_start
+        from autovision.tasks.detection.detr.dfine_official_warm_start import (
+            build_dfine_official_warm_start,
+        )
+
+        out = tmp_path / "detr_gtr_s_ws.pt"
+        report = build_dfine_official_warm_start(
+            "gtr-s",
+            out=out,
+            checkpoint=gtr_s_checkpoint,
+            backbone_pretrained=False,
+            license_id="MIT",
+            origin="https://huggingface.co/Phoenix8125/GTR",
+            source_format="gtr",
+        )
+        assert report["decoder_coverage"] >= 0.9  # G1 exit gate
+        assert report["source_format"] == "gtr"
+        payload = load_warm_start(out)
+        assert payload.license.id == "MIT"
+        assert payload.spec["decoder_coverage"] >= 0.9
+
+    def test_coverage_gate_refuses_partial(self, gtr_s_checkpoint, tmp_path):
+        from autovision.tasks.detection.detr.dfine_official_warm_start import (
+            WarmStartAssemblyError,
+            build_dfine_official_warm_start,
+        )
+
+        with pytest.raises(WarmStartAssemblyError, match="coverage"):
+            build_dfine_official_warm_start(
+                "gtr-s",
+                out=tmp_path / "x.pt",
+                checkpoint=gtr_s_checkpoint,
+                backbone_pretrained=False,
+                source_format="gtr",
+                min_decoder_coverage=0.99,  # 0.9613 measured < 0.99 → refuse
+            )
+
+
+class TestGtrSTrainClosure:
+    """detr/gtr-s 加载闭环: assembly -> warm-start -> tiny coco8 train."""
+
+    def test_train_detr_gtr_s(self, coco8, gtr_s_checkpoint, tmp_path):
+        from autovision import train_object_detection
+        from autovision.tasks.detection.detr.dfine_official_warm_start import (
+            build_dfine_official_warm_start,
+        )
+
+        warm_start = tmp_path / "ws_gtr_s.pt"
+        build_dfine_official_warm_start(
+            "gtr-s",
+            out=warm_start,
+            checkpoint=gtr_s_checkpoint,
+            backbone_pretrained=False,
+            license_id="MIT",
+            origin="https://huggingface.co/Phoenix8125/GTR",
+            source_format="gtr",
+        )
+        result = train_object_detection(
+            out=tmp_path / "run_gtr_s",
+            data=coco8,
+            model="detr/gtr-s",
+            steps=3,
+            batch_size=2,
+            num_workers=0,
+            model_args={
+                "image_size": (64, 64),
+                "num_queries": 50,
+                "num_top_queries": 50,
+                "num_denoising": 10,
+                "warm_start": warm_start,
+            },
+            transform_args=TINY_TRANSFORM_ARGS,
+            trainer_args={"val_every_num_steps": 2},
+        )
+        assert result.steps_run == 3
+        assert result.exported_model_path and result.exported_model_path.exists()
+
+
+class TestTeacherModelCard:
+    def test_teacher_card_generates(self, tmp_path):
+        from autovision.registry.model_card import ModelCard
+
+        asset = resolve_gtr_asset("gtr_s_coco", verify=False)
+        card = ModelCard(
+            model="teacher/gtr-s",
+            name="GTR-S COCO detection teacher (Intellindust GTR)",
+            train_dataset="COCO 2017 train2017 (upstream 30ep recipe)",
+            schedule="upstream frozen checkpoint (EMA weights)",
+            seed=0,
+            license=asset.license,
+            weights_sha256={asset.path.name: asset.sha256},
+            provenance={"source": asset.source, "format": asset.format},
+            known_limitations="Teacher-only until doc 31 G2 wires the GLA "
+            "inference backend.",
+        )
+        path = card.save(tmp_path / "teacher.pt")
+        assert path.exists()
