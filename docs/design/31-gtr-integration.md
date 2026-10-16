@@ -180,6 +180,8 @@ RF-DETR / LW-DETR 风格的 MultiScaleProjector：对每个目标尺度独立做
 
 - **S3b 实施记录（2026-10-16，OBB 训练面闭环）**：① re-port 两件：`shared/gtr/obb_criterion.py`（`OBBGTRCriterion` + `OBBHungarianMatcher`：MAL 软目标 + L1/KLD 框损失（含 angle-periodic L1 与 FGL/DDF 分支）+ union（go）匹配 + aux/pre/enc/dn 权重展开；matcher 成本 class 2/chamfer 5/KLD 2 于弧度域）与 `shared/gtr/obb_denoising.py`（定向 CDN：box-noise 模式、角度通道不动、DINO 组内对比掩码 + Per-Group DETR 组间掩码）。② 集成面：`OBBGTRTransformer.forward` 训练分支内部原生调用 CDN（与上游一致）；家族 `tasks/oriented_detection/gtr/train_model.py`（官方 losses `['mal','boxes']` 与权重默认、角点→**长边 rbox** 目标转换（w≥h、a=θ/π∈[0,1)）、oriented mAP 验证（val 损失不伪算——评测驱动的最优检查点）、backbone lr×0.36=官方 1.8e-4/5e-4）；CLI 增 `gtr/<s|x>` 分派。③ **单元对拍（同输入同种子 vs 官方实现）**：matcher 赋值完全一致；criterion 全 forward（**12 个 loss 键含 `_aux`/`_pre`/`_enc` 分支，group_detr=3）逐比特一致（BIT-EQUAL）**；定向 CDN（g=1 与 g=3）logits/unact/attn_mask/meta **逐比特一致**。④ 训练闭环：合成 YOLO-OBB 树经 oriented CLI 4 步（48 queries=3×16 组整除约束）CUDA 实测通过 + 导出。⑤ `tests/test_gtr_obb_train.py` ×5（长边转换不变量、matcher 恰配语义、criterion 管件与权重、CDN 掩码/角度不动、CUDA 闭环）。**S3b 剩余**：DOTA 本地数据的端到端 AP50 复现（数据到位后；退出判据已入档）。
 
+- **S5b 实施记录（2026-10-16，pose 训练面闭环）**：① re-port 两件：`shared/gtr/pose_criterion.py`（OKS 损失表与线性损失、VFL/MAL 类损失（OKS 软目标）、keypoints 损失（L1×可视 + OKS）、FGL/DDF 分支、`GTRPoseHungarianMatcher`（类/关键点 L1/OKS 成本）、完整 criterion forward（aux/pre/interm/dn 四路展开、DN 正样本索引））与 `shared/gtr/pose_dn.py`（DETRPose CDN：逐关键点噪声半径、非可见关键点零噪声、组内对比掩码；含上游两处修正注记）。② 集成面：`GTRPoseTransformer.forward` 训练分支原生调用 CDN 并产出上游完整训练字典（**flatten→split 顺序与上游一致**——首次装配顺序错误被闭环测试抓住并修正）；家族 `tasks/pose_estimation/gtr/train_model.py`（官方 losses `['vfl','keypoints']` 与权重、mean-OKS 验证指标（匹配后 OKS 均值，越高越好）、backbone lr×0.05=官方 2.5e-5/5e-4）。③ **单元对拍（同输入同种子 vs 官方实现）**：matcher 赋值一致；**VFL / keypoints-L1 / OKS 损失值逐比特一致（BIT-EQUAL）**；姿态 CDN（label 嵌入/pose unact/attn 掩码/meta）**逐比特一致**。④ 训练闭环：合成 batch 手动 3 步（CDN + VFL/keypoint 损失 + 参数实际更新）+ mean-OKS 验证 CUDA 实测通过；`tests/test_gtr_pose_train.py` ×4（OKS 语义（完美=1/退化/不可见归零）、matcher 命中、CDN 形状/掩码、CUDA 闭环）。**S5b 剩余（数据门）**：COCO kp 数据集面 + 官方 AP 度量 + `train-pose-estimation` CLI。
+
 ## 8. 验收 gate
 
 | # | 判据 | 证据物 |
@@ -250,7 +252,7 @@ README 口径（S 档）：det 53.6 AP → seg 45.0 mask AP → pose 70.1 kp AP 
 | **S3b obb 训练面** | ~~criterion/matcher/CDN 移植 + 训练/CLI 接线~~ | **已交付（2026-10-16）**：三件同种子逐比特对拍 + CUDA 训练闭环；DOTA AP50 复现待数据 | **已交付**，见 §7 记录 |
 | **S4 depth** | ~~DPT 头 + SiLog + 新家族~~ | **已交付（2026-10-16）**：pred_depth 逐比特对拍 + 132 张量覆盖率 1.0 + SiLog/度量单元 + 训练闭环（CUDA）；NYU 协议复现待数据 | **已交付（S 档）**，见 §7 记录 |
 | **S5a pose 推理/装载** | ~~独立 decoder 全栈（自包含逐字移植，含本线版 weighting_function 陷阱修正）~~ | **已交付（2026-10-16）**：logits + keypoints 逐比特对拍、239 张量覆盖率 1.0、predict COCO 三元组；见 §7 记录 | **已交付（S 档）** |
-| **S5b pose 训练面** | CDN + 关键点损失/匹配 + COCO kp 数据 + OKS 度量 + CLI | kp AP 对齐 70.1（±0.5） | 计划（清单见 §7 S5a 记录） |
+| **S5b pose 训练面** | ~~CDN + 关键点损失/匹配 + 训练接线~~ | **已交付（2026-10-16）**：四件同种子逐比特对拍 + CUDA 训练闭环（mean-OKS 验证）；COCO kp AP 复现与 CLI 待数据 | **已交付**，见 §7 记录 |
 
 依赖：S2/S3 均可独立先行（S2 有本地数据 vs S3 键集直通）；S4/S5 需先补度量/数据模块。obj365 四档任何时候可作为 backbone-init 资产（`resolve_gtr_asset("gtr_s_obj365")`）。
 

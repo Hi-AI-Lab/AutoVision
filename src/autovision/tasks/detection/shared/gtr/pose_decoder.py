@@ -681,13 +681,14 @@ class GTRPoseTransformer(nn.Module):
     def forward(self, feats, targets=None, samples=None):
         memory, spatial_shapes, split_sizes = self._get_encoder_input(feats)
         if self.training:
-            # CDN + keypoint loss/matcher are roadmap doc 31 §11 S5b.
-            raise NotImplementedError(
-                "GTR pose training (CDN, keypoint loss/matcher) is roadmap "
-                "doc 31 §11 S5b; the delivered slice is load + inference."
+            output_proposals, valid_mask = self._generate_anchors(
+                spatial_shapes, memory.device
             )
-        output_proposals = self.anchors.repeat(memory.size(0), 1, 1)
-        output_memory = memory.masked_fill(self.valid_mask, float(0))
+            output_memory = memory.masked_fill(valid_mask, float(0))
+            output_proposals = output_proposals.repeat(memory.size(0), 1, 1)
+        else:
+            output_proposals = self.anchors.repeat(memory.size(0), 1, 1)
+            output_memory = memory.masked_fill(self.valid_mask, float(0))
 
         output_memory = self.enc_output_norm(self.enc_output(output_memory))
         topk = self.num_queries
@@ -735,6 +736,41 @@ class GTRPoseTransformer(nn.Module):
         )
         tgt_pose = torch.cat([tgt_global, tgt_pose], dim=2)
 
+        interm_class = (
+            torch.gather(
+                enc_outputs_class_unselected,
+                1,
+                topk_idx.unsqueeze(-1).repeat(
+                    1, 1, enc_outputs_class_unselected.shape[-1]
+                ),
+            )
+            if self.training
+            else None
+        )
+
+        # Denoising (training): DETRPose-style CDN group prepended to the queries.
+        if self.training and targets is not None:
+            from autovision.tasks.detection.shared.gtr.pose_dn import prepare_for_cdn
+
+            input_query_label, input_query_pose, attn_mask, dn_meta = prepare_for_cdn(
+                dn_args=(targets, 20, 0.5),
+                training=True,
+                num_queries=self.num_queries,
+                hidden_dim=self.hidden_dim,
+                num_classes=80,
+                label_enc=self.label_enc,
+                pose_enc=self.pose_enc,
+                num_keypoints=self.num_body_points,
+                img_dim=samples.shape[-2:],
+                device=feats[0].device,
+            )
+            tgt_pose = torch.cat([input_query_label, tgt_pose], dim=1)
+            refpoint_pose_sigmoid = torch.cat(
+                [input_query_pose.sigmoid(), refpoint_pose_sigmoid], dim=1
+            )
+        else:
+            input_query_label = input_query_pose = attn_mask = dn_meta = None
+
         # MSDeformAttn value: per-level [bs*n_heads, d/head, hw] tuple.
         value = memory.unflatten(2, (self.nhead, -1))
         value = value.permute(0, 2, 3, 1).flatten(0, 1).split(split_sizes, dim=-1)
@@ -756,7 +792,7 @@ class GTRPoseTransformer(nn.Module):
             memory=value,
             refpoints_sigmoid=refpoint_pose_sigmoid,
             spatial_shapes=spatial_shapes,
-            attn_mask=None,
+            attn_mask=attn_mask,
             pre_pose_head=self.pre_pose_embed,
             pose_head=self.pose_embed,
             class_head=self.class_embed,
@@ -770,9 +806,86 @@ class GTRPoseTransformer(nn.Module):
             eval_aux=self.eval_aux,
         )
         if not self.deploy:
+            # Upstream flattens the pose dim BEFORE the DN split, so both the
+            # matched segment and the reconstruction segment are (…, 2K).
             out_poses = out_poses.flatten(-2)
+        if self.training and dn_meta is not None:
+            out_pre_poses = _out_pre_poses.flatten(-2)
+            dn_out_poses, out_poses = torch.split(
+                out_poses, [dn_meta["pad_size"], self.num_queries], dim=2
+            )
+            dn_out_logits, out_logits = torch.split(
+                out_logits, [dn_meta["pad_size"], self.num_queries], dim=2
+            )
+            dn_out_corners, out_corners = torch.split(
+                _out_corners, [dn_meta["pad_size"], self.num_queries], dim=2
+            )
+            dn_out_refs, out_refs = torch.split(
+                _out_references, [dn_meta["pad_size"], self.num_queries], dim=2
+            )
+            dn_out_pre_poses, out_pre_poses = torch.split(
+                out_pre_poses, [dn_meta["pad_size"], self.num_queries], dim=1
+            )
+            dn_out_pre_scores, out_pre_scores = torch.split(
+                _out_pre_scores, [dn_meta["pad_size"], self.num_queries], dim=1
+            )
+
         out = {"pred_logits": out_logits[-1], "pred_keypoints": out_poses[-1]}
+        if self.training:
+            # Upstream picks the SPLIT tensors everywhere once DN ran: the
+            # aux/pre outputs carry only the matched query segment, while
+            # the dn_* outputs carry the reconstruction segment.
+            out.update(
+                {
+                    "pred_corners": out_corners[-1] if dn_meta is not None else _out_corners[-1],
+                    "ref_points": out_refs[-1] if dn_meta is not None else _out_references[-1],
+                    "up": self.up,
+                    "reg_scale": self.reg_scale,
+                    "reg_max": self.reg_max,
+                }
+            )
+            out["aux_outputs"] = self._set_aux_loss2(
+                out_logits[:-1],
+                out_poses[:-1],
+                out_corners[:-1] if dn_meta is not None else _out_corners[:-1],
+                out_refs[:-1] if dn_meta is not None else _out_references[:-1],
+            )
+            out["aux_interm_outputs"] = [
+                {
+                    "pred_logits": interm_class,
+                    "pred_keypoints": enc_outputs_pose_coord[:, :, 1:].flatten(-2),
+                }
+            ]
+            out["aux_pre_outputs"] = {
+                "pred_logits": out_pre_scores if dn_meta is not None else _out_pre_scores,
+                "pred_keypoints": out_pre_poses,
+            }
+            if dn_meta is not None:
+                out["dn_aux_outputs"] = self._set_aux_loss2(
+                    dn_out_logits, dn_out_poses, dn_out_corners, dn_out_refs
+                )
+                out["dn_aux_pre_outputs"] = {
+                    "pred_logits": dn_out_pre_scores,
+                    "pred_keypoints": dn_out_pre_poses,
+                }
+                out["dn_meta"] = dn_meta
         return out
+
+    @torch.jit.unused
+    def _set_aux_loss2(
+        self, outputs_class, outputs_keypoints, outputs_corners, outputs_ref
+    ):
+        return [
+            {
+                "pred_logits": a,
+                "pred_keypoints": b,
+                "pred_corners": c,
+                "ref_points": d,
+            }
+            for a, b, c, d in zip(
+                outputs_class, outputs_keypoints, outputs_corners, outputs_ref
+            )
+        ]
 
 
 def weighting_function(reg_max, up, reg_scale, deploy=False):

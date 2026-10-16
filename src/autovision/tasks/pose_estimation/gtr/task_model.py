@@ -212,9 +212,14 @@ class GTRPoseEstimation(ONNXExportMixin, TaskNetwork):
         std = torch.tensor(self.normalize.std, device=batch.device).view(-1, 1, 1)
         return (batch - mean) / std
 
-    def forward_backend(self, x: torch.Tensor):
+    def _forward_train(self, x: torch.Tensor, targets=None) -> dict:
+        """Full forward; in training mode the decoder runs the pose CDN
+        internally (upstream passes the image for the DN noise scaling)."""
         feats = self.encoder(self.backbone(x))
-        out = self.decoder(feats)
+        return self.decoder(feats, targets=targets, samples=x if self.training else None)
+
+    def forward_backend(self, x: torch.Tensor):
+        out = self._forward_train(x)
         return out["pred_logits"], out["pred_keypoints"]
 
     def forward(self, x: torch.Tensor):
