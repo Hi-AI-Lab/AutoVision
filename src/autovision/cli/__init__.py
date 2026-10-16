@@ -4,6 +4,7 @@
 from autovision.cli.train import PretrainConfig, PretrainResult, pretrain
 from autovision.cli.train_task import (
     TaskTrainResult,
+    train_depth_estimation,
     train_image_classification,
     train_instance_segmentation,
     train_object_detection,
@@ -23,4 +24,5 @@ __all__ = [
     "train_oriented_object_detection",
     "train_panoptic_segmentation",
     "train_semantic_segmentation",
+    "train_depth_estimation",
 ]

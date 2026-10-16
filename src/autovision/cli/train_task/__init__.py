@@ -1,6 +1,9 @@
 # Copyright (c) 2026 Autovision contributors. Apache-2.0.
 """Task training commands: detection, classification, segmentation finetuning."""
 
+from autovision.cli.train_task.depth_estimation import (
+    train_depth_estimation,
+)
 from autovision.cli.train_task.image_classification import (
     train_image_classification,
 )
@@ -27,4 +30,5 @@ __all__ = [
     "train_oriented_object_detection",
     "train_panoptic_segmentation",
     "train_semantic_segmentation",
+    "train_depth_estimation",
 ]

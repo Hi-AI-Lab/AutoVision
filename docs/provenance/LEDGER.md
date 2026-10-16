@@ -111,3 +111,10 @@
   | `tasks/detection/shared/matcher.py`（`_batch_sigmoid_ce_loss`/`_batch_dice_loss`） | `engine/gtr/box_ops.py` | 逐行 re-port（对拍逐比特一致，同种子） |
   | `tasks/detection/shared/dfine_criterion.py`（`mask_point_losses`/`_mask_dice`/`_mask_sigmoid_ce`） | `engine/gtr/det/criterion.py`（`loss_masks`/`dice_loss`/`sigmoid_ce_loss`/`calculate_uncertainty`） | re-port（同种子对拍 BIT-EQUAL） |
   集成面：decoder mask 路径（`mask_downsample_ratio`，head 单次注册于 inner decoder，官方键序 `decoder.decoder.segmentation_head.*`）；criterion mask 分支（main/aux/pre/dn 四路 + weight 后缀展开）；matcher mask 代价（共享随机点网格、对角线块提取）；家族 `tasks/instance_segmentation/gtr/` + CLI `gtr/s`。
+
+- 2026-10-16（**GTR 多任务集成 S4 登记，roadmap 分册 31 §11**）：度量深度 re-port（来源 `Intellindust-AI-Lab/GTR` `engine/gtr/depth/gtrdepth.py`，MIT；该文件自 Depth-Anything-V2 metric-depth DPT 移植，Apache-2.0）：
+  | 本文件 | GTR 源 | 处置 |
+  |---|---|---|
+  | `tasks/depth_estimation/gtr/dpt_head.py` | `engine/gtr/depth/gtrdepth.py`（ResidualConvUnit/FeatureFusionBlock/DPTDepthHead） | re-port，模块名逐字保留（`layer_rn`/`refinenet*`/`output_conv*`），`log_depth` 解码（exp(clamp(-4,5))）与官方一致 |
+  | `tasks/depth_estimation/gtr/train_model.py::_silog` | `engine/gtr/depth/criterion.py`（SiLog） | 逐式 re-port（valid 掩码按深度域，lambd 0.5） |
+  集成面：新任务家族四模块 + `data/depth_estimation_dataset.py`（成对 image/depth，.npy 米或 16-bit PNG）+ `metrics/depth_estimation.py`（AbsRel/RMSE/δ，支持 none/median/log-affine 对齐）+ CLI `train-depth-estimation`（`gtr/<s|m|l|x>`）；编码器 `force_contiguous=False`（官方 depth 训练口径，2026-10-16 实测逐比特）。

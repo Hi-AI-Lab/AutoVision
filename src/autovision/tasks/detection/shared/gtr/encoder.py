@@ -245,6 +245,8 @@ class GTREncoder(nn.Module):
             f"len(scale_factors)={len(scale_factors)} != len(feat_strides)={len(feat_strides)}"
 
         self.in_channels = in_channels
+        #: Kept for introspection (see the ctor docstring for the depth-task caveat).
+        self.force_contiguous = bool(force_contiguous)
         self.hidden_dim = hidden_dim
         self.scale_factors = scale_factors
         self.feat_strides = feat_strides

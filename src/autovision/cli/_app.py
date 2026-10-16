@@ -81,6 +81,14 @@ def train_image_classification_command(arguments: list[str] = typer.Argument(Non
     _run(train_image_classification, list(arguments or []))
 
 
+@app.command("train-depth-estimation")
+def train_depth_estimation_command(arguments: list[str] = typer.Argument(None)) -> None:
+    """Metric depth estimation finetuning (GTR depth family)."""
+    from autovision import train_depth_estimation
+
+    _run(train_depth_estimation, list(arguments or []))
+
+
 @app.command("train-semantic-segmentation")
 def train_semantic_segmentation_command(arguments: list[str] = typer.Argument(None)) -> None:
     """Semantic segmentation finetuning (linear head, image/mask dirs)."""

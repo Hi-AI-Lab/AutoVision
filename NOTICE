@@ -56,8 +56,11 @@ remediation plan: docs/design/28-clean-provenance-refactor.md):
   the instance-segmentation mask head + PointRend point sampling
   (GTR's engine/gtr/det/segmentation_head.py, itself RF-DETR/PointRend
   derived) in src/autovision/tasks/detection/shared/gtr/segmentation_head.py,
-  and the pairwise mask CE/Dice cost helpers (GTR's engine/gtr/box_ops.py,
-  RF-DETR derived) in src/autovision/tasks/detection/shared/matcher.py.
+  the pairwise mask CE/Dice cost helpers (GTR's engine/gtr/box_ops.py,
+  RF-DETR derived) in src/autovision/tasks/detection/shared/matcher.py,
+  and the DPT-style metric-depth head (GTR's engine/gtr/depth/gtrdepth.py,
+  itself ported from Depth-Anything-V2) in
+  src/autovision/tasks/depth_estimation/gtr/dpt_head.py.
   Runtime dependency (optional extra ``gtr``): flash-linear-attention
   0.5.0 (MIT).
 
