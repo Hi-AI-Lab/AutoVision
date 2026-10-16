@@ -930,20 +930,26 @@ class OBBGTRTransformer(nn.Module):
     def _split(x, dim, s_idx):
         return torch.split(x, s_idx, dim=dim) if x is not None else (None, None)
 
-    def forward(self, feats, targets=None, dn_group=None):
-        """``feats``: encoder pyramid (level 0 highest resolution).
-
-        ``dn_group`` (training only, S3b) carries the oriented CDN group
-        produced by the OBB denoising component; eval passes ``None``.
-        """
+    def forward(self, feats, targets=None):
+        """``feats``: encoder pyramid (level 0 highest resolution)."""
         memory, spatial_shapes, _ = self._get_encoder_input(feats)
         if self.training and self.num_denoising > 0:
-            if dn_group is None:
-                raise ValueError(
-                    "OBB training requires the oriented contrastive-denoising "
-                    "group (S3b); the eval path passes dn_group=None."
+            from autovision.tasks.detection.shared.gtr.obb_denoising import (
+                get_obb_contrastive_denoising_training_group,
+            )
+
+            denoising_logits, denoising_bbox_unact, attn_mask, dn_meta = (
+                get_obb_contrastive_denoising_training_group(
+                    targets,
+                    self.num_classes,
+                    self.num_queries,
+                    self.denoising_class_embed,
+                    num_denoising=self.num_denoising,
+                    label_noise_ratio=self.label_noise_ratio,
+                    box_noise_scale=self.box_noise_scale,
+                    group_detr=self.group_detr if self.training else 1,
                 )
-            denoising_logits, denoising_bbox_unact, attn_mask, dn_meta = dn_group
+            )
         else:
             denoising_logits = denoising_bbox_unact = attn_mask = dn_meta = None
 

@@ -131,3 +131,10 @@
   |---|---|---|
   | `tasks/detection/shared/gtr/pose_decoder.py` | `engine/gtr/pose/decoder.py` + `ms_deform_attn.py` + `utils.py`（MLP/activation/inverse_sigmoid） | **自包含逐字 re-port**（本线自带 relu-only MLP、Gate/Integral/LQE、tuple-value 的 MSDeformAttn 核、`inverse_sigmoid(eps=1e-3)`、以及**与共享 D-FINE 版不同的 `weighting_function`（实测差 9.5e-07，必须用本线版本）**；硬编码常量（81 行 label_enc、256 宽 LQE）逐字保留）；训练分支以 S5b 指针显式拒绝 |
   集成面：家族 `tasks/pose_estimation/gtr/`（task_model + 官方装载：backbone strict + encoder/decoder 覆盖率门禁 1.0，陈旧 anchors/valid_mask 跳过；postprocess 为官方 `GTRPosePostProcessor` 移植——flattened 分数 top-k、关键点缩放至原图、COCO `[x,y,v]` 三元组）。**训练（CDN + 关键点损失/匹配）为 §11 S5b**。
+
+- 2026-10-16（**GTR 多任务集成 S3b 登记，roadmap 分册 31 §11**）：定向检测训练面 re-port（来源 `Intellindust-AI-Lab/GTR`，MIT）：
+  | 本文件 | GTR 源 | 处置 |
+  |---|---|---|
+  | `tasks/detection/shared/gtr/obb_criterion.py` | `engine/gtr/obb/criterion.py` + `matcher.py`（含 box_ops 的 paired_box_iou/paired hbox IoU） | 逐段 re-port（MAL + L1/KLD + FGL/DDF 分支、union 匹配、aux/pre/enc/dn 权重展开、CDN 匹配索引；focal 损失走 torchvision） |
+  | `tasks/detection/shared/gtr/obb_denoising.py` | `engine/gtr/obb/denoising.py` | 逐行 re-port（OCD box-noise 模式、组内对比掩码、Per-Group DETR 掩码） |
+  集成面：`OBBGTRTransformer.forward` 训练分支内部原生调用 CDN（与上游一致）；家族 `tasks/oriented_detection/gtr/train_model.py`（官方权重 losses/matcher costs 默认、角点→长边 rbox 目标转换、oriented mAP 验证、backbone lr ×0.36）；CLI `gtr/<s|x>`（`train_oriented_object_detection`）。**验证**：criterion 全 forward/ matcher / CDN 同输入同种子**逐比特一致**（12 loss 键 BIT-EQUAL；g=1/g=3 CDN 全输出 BIT-EQUAL）；CUDA 训练闭环（合成 YOLO-OBB 树）通过。

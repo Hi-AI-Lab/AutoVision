@@ -221,9 +221,14 @@ class GTRROBBOrientedDetection(ONNXExportMixin, TaskNetwork):
         std = torch.tensor(self.normalize.std, device=batch.device).view(-1, 1, 1)
         return (batch - mean) / std
 
-    def forward_backend(self, x: torch.Tensor):
+    def _forward_train(self, x: torch.Tensor, targets=None) -> dict:
+        """Full forward; in training mode the OBB decoder runs the oriented
+        CDN internally and emits the criterion-ready dict (upstream layout)."""
         feats = self.encoder(self.backbone(x))
-        out = self.decoder(feats)
+        return self.decoder(feats, targets=targets)
+
+    def forward_backend(self, x: torch.Tensor):
+        out = self._forward_train(x)
         return out["pred_logits"], out["pred_boxes"]
 
     def forward(self, x: torch.Tensor):

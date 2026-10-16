@@ -107,19 +107,39 @@ def train_oriented_object_detection(
     num_classes = len(classes)
 
     # 2. model args (num_classes inferred from the data).
-    if not (isinstance(model, str) and model.startswith("rtdetr-obb/")):
+    is_gtr = isinstance(model, str) and model.startswith("gtr/")
+    if is_gtr:
+        from autovision.tasks.oriented_detection.gtr import (
+            GTRROBBTrain as train_cls,
+        )
+        from autovision.tasks.oriented_detection.gtr import (
+            GTRROBBTrainArgs as args_cls,
+        )
+
+        resolved_model_args = pydantic_model_validate(
+            args_cls,
+            {
+                "num_classes": num_classes,
+                "variant": model.split("/", 1)[1],
+                **(model_args or {}),
+            },
+        )
+    elif isinstance(model, str) and model.startswith("rtdetr-obb/"):
+        train_cls = RTDETROrientedObjectDetectionTrain
+        args_cls = RTDETROrientedObjectDetectionTrainArgs
+        resolved_model_args = pydantic_model_validate(
+            args_cls,
+            {
+                "num_classes": num_classes,
+                "backbone": model.split("/", 1)[1],
+                **(model_args or {}),
+            },
+        )
+    else:
         raise ValueError(
             f"Unsupported oriented detection model '{model}'; supported: "
-            f"'rtdetr-obb/<backbone>'."
+            f"'rtdetr-obb/<backbone>', 'gtr/<s|x>'."
         )
-    resolved_model_args = pydantic_model_validate(
-        RTDETROrientedObjectDetectionTrainArgs,
-        {
-            "num_classes": num_classes,
-            "backbone": model.split("/", 1)[1],
-            **(model_args or {}),
-        },
-    )
     default_image_size = resolved_model_args.image_size
 
     # 3. save args
@@ -194,7 +214,7 @@ def train_oriented_object_detection(
         val_loader.collate_fn = val_collate
 
         # 7. model
-        train_model = RTDETROrientedObjectDetectionTrain(resolved_model_args)
+        train_model = train_cls(resolved_model_args)
         train_model.set_categories(classes)
 
         # 8. fit
