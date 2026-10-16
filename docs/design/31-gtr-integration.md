@@ -174,6 +174,8 @@ RF-DETR / LW-DETR 风格的 MultiScaleProjector：对每个目标尺度独立做
 
 - **S4 实施记录（2026-10-16，度量深度；按工程成本先于 S3 OBB）**：① re-port 两件：`tasks/depth_estimation/gtr/dpt_head.py`（DPT 头，模块名逐字；`log_depth=True` 的 exp(clamp) 解码）与 `_silog`（官方 SiLog，valid 掩码按深度域）。② **新任务面**（depth_estimation 此前为空目录）：家族四模块 + `data/depth_estimation_dataset.py`（.npy 米 / 16-bit PNG）+ `metrics/depth_estimation.py`（AbsRel/RMSE/δ1-3，none/median/log-affine 对齐）+ CLI `train-depth-estimation`（`gtr/<s|m|l|x>`；`autovision.train_depth_estimation` 公共入口）。③ **金标准对拍（RTX 4090D）**：官方 `GTRDepth`（其引擎/pretrain-S 配置/官方 EMA 权重）与家族网络同输入 **`pred_depth` 逐比特一致（0.0；随机 640 + 真实图 640）**；官方权重 132 张量/覆盖率 1.0/零跳过；`predict()` 返回原图尺寸深度（真实图值域 [1.20, 8.38] m，合理）。④ 编码器 `force_contiguous=False` 实测钉住（官方 depth 训练口径；True 会引入数值差）。⑤ 训练闭环（`gtr/s`、合成对 4 步、SiLog + δ1 验证 + 导出）CUDA 实测通过；`tests/test_gtr_depth.py` ×7（含 SiLog 解析解校验、度量对齐语义、数据集 .npy/PNG 双读、predict 原图尺寸）。**S4 剩余**：m/l/x 档复验（宽度表已带）、NYU 六视图 + log-affine 协议复现（数据到位后）。
 
+- **S3a 实施记录（2026-10-16，定向检测推理/装载切片）**：① re-port 两件：`shared/gtr/rbox_ops.py`（旋转框数学全量：canonical/long-edge 规范化、extbox 编解码、`distance2rbox`、KLD/Chamfer——后二者供 S3b 训练用）与 `shared/gtr/obb_decoder.py`（`OBBGTRTransformer` 全栈：旋转感知可变形注意力、6 分布 ADR、5 参选择头）。② 集成面：家族 `tasks/oriented_detection/gtr/`（20 行薄包装 + 官方装载器；postprocess 复用现有 oriented 解码路径，默认 **NMS 关闭**对齐官方 NMS-free 协议）。③ **金标准对拍（RTX 4090D）**：官方 `GTR`+`OBBGTRTransformer`（其引擎/OBB-S 配置/官方 EMA 权重，陈旧 anchors 按官方约定跳过）与家族网络同输入 **`pred_logits` 与 5 参旋转框 (cx,cy,w,h,a) 逐比特一致（0.0；随机 1024 + 真实图 1024）**；官方权重 **274 张量/覆盖率 1.0/零跳过**；`predict()` 输出 300 个旋转多边形（角点 (300,4,2)）。④ **过程中修正两处移植偏差**（均被装载门禁/对拍抓住）：decoder 注意力头数应为官方默认 **8**（独立于 backbone 的 3；`sampling_offsets` 形状 192=8×12×2 实证）、`value_op` 需返回本项目共享核的展平布局（官方元组布局同数据同采样）。⑤ `tests/test_gtr_obb.py` ×6（装载覆盖含 norm2/anchors 断言、rbox 规范化/往返/包围盒/解码单元、CUDA forward+predict）。**S3b（训练面，未交付）**：`OBBGTRCriterion`（KLD/GDL 损失组）+ 定向 Hungarian matcher + 定向 CDN（`obb/denoising.py`）+ 训练/CLI 接线 + DOTA 数据面；退出判据沿用：合成旋转框自检 + 无标签对拍 +（数据到位后）test-server 口径另议。
+
 ## 8. 验收 gate
 
 | # | 判据 | 证据物 |
@@ -240,7 +242,8 @@ README 口径（S 档）：det 53.6 AP → seg 45.0 mask AP → pose 70.1 kp AP 
 |---|---|---|---|
 | **S1 semseg** | head re-port（8 键）+ 家族四模块（`gtr/s\|m\|l\|x`）+ 官方装载器（覆盖率 1.0 门禁）+ CLI dispatch | 键形状核对 + **金标准对拍逐比特（maxdiff 0.0）**+ CUDA 训练闭环 | **已交付（2026-10-16）**，见 §7 记录 |
 | **S2 seg** | ~~mask 头 + decoder mask 路径 + mask CE/Dice + matcher mask 代价 + mask 后处理~~ | **已交付（2026-10-16）**：逐比特对拍（logits/boxes/masks）+ 单元对拍 BIT-EQUAL + val500 mask AP 47.60；det 回归全绿；m/l/x 档注册与全程复现待续 | **已交付（S 档）**，见 §7 记录 |
-| **S3 obb** | 侦察细化（2026-10-16）：官方 `OBBGTRTransformer` 为独立 decoder 类（**42 键形状差**：anchors (1,21504,5) 含角度、`enc_bbox_head` 出 5 参、`lqe/dec_bbox_head` 6 分布 ADR、类数 15）；移植面 = `rbox_ops` 243 行 + **旋转感知可变形注意力核** + OBB criterion 468 行 + OBB matcher/denoising/postproc | 无标签对拍（同输入 vs 官方 net，logits/boxes(rotated)）+ 角度周期/边界合成自检；若获 DOTA 则 test-server 口径另议 | 详细计划就绪（下一片） |
+| **S3a obb 推理/装载** | ~~rbox_ops + 旋转可变形核 + OBB decoder 全栈~~ | **已交付（2026-10-16）**：logits + 5 参旋转框逐比特对拍、274 张量覆盖率 1.0、rbox 单元 + CUDA forward/predict；见 §7 记录 | **已交付（S 档）** |
+| **S3b obb 训练面** | `OBBGTRCriterion`（KLD/GDL）+ 定向 matcher + 定向 CDN + 训练/CLI + DOTA 数据面 | 合成旋转框自检 + 无标签对拍；test-server 口径待数据 | 计划（精确清单见 §7 S3a 记录） |
 | **S4 depth** | ~~DPT 头 + SiLog + 新家族~~ | **已交付（2026-10-16）**：pred_depth 逐比特对拍 + 132 张量覆盖率 1.0 + SiLog/度量单元 + 训练闭环（CUDA）；NYU 协议复现待数据 | **已交付（S 档）**，见 §7 记录 |
 | **S5 pose** | 独立 decoder（833 行）+ kp 损失/matcher/dn/postproc + COCO kp 数据面 + OKS 度量 + CLI | kp AP 对齐 70.1（±0.5） | 计划（最大切片，最后做） |
 

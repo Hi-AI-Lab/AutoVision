@@ -58,9 +58,13 @@ remediation plan: docs/design/28-clean-provenance-refactor.md):
   derived) in src/autovision/tasks/detection/shared/gtr/segmentation_head.py,
   the pairwise mask CE/Dice cost helpers (GTR's engine/gtr/box_ops.py,
   RF-DETR derived) in src/autovision/tasks/detection/shared/matcher.py,
-  and the DPT-style metric-depth head (GTR's engine/gtr/depth/gtrdepth.py,
+  the DPT-style metric-depth head (GTR's engine/gtr/depth/gtrdepth.py,
   itself ported from Depth-Anything-V2) in
-  src/autovision/tasks/depth_estimation/gtr/dpt_head.py.
+  src/autovision/tasks/depth_estimation/gtr/dpt_head.py, and the oriented
+  detection line (GTR's engine/gtr/obb/rbox_ops.py rotated-box math and
+  engine/gtr/obb/decoder.py OBBGTRTransformer) in
+  src/autovision/tasks/detection/shared/gtr/rbox_ops.py and
+  src/autovision/tasks/detection/shared/gtr/obb_decoder.py.
   Runtime dependency (optional extra ``gtr``): flash-linear-attention
   0.5.0 (MIT).
 

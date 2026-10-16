@@ -118,3 +118,10 @@
   | `tasks/depth_estimation/gtr/dpt_head.py` | `engine/gtr/depth/gtrdepth.py`（ResidualConvUnit/FeatureFusionBlock/DPTDepthHead） | re-port，模块名逐字保留（`layer_rn`/`refinenet*`/`output_conv*`），`log_depth` 解码（exp(clamp(-4,5))）与官方一致 |
   | `tasks/depth_estimation/gtr/train_model.py::_silog` | `engine/gtr/depth/criterion.py`（SiLog） | 逐式 re-port（valid 掩码按深度域，lambd 0.5） |
   集成面：新任务家族四模块 + `data/depth_estimation_dataset.py`（成对 image/depth，.npy 米或 16-bit PNG）+ `metrics/depth_estimation.py`（AbsRel/RMSE/δ，支持 none/median/log-affine 对齐）+ CLI `train-depth-estimation`（`gtr/<s|m|l|x>`）；编码器 `force_contiguous=False`（官方 depth 训练口径，2026-10-16 实测逐比特）。
+
+- 2026-10-16（**GTR 多任务集成 S3a 登记，roadmap 分册 31 §11**）：定向检测（OBB）re-port（来源 `Intellindust-AI-Lab/GTR`，MIT）：
+  | 本文件 | GTR 源 | 处置 |
+  |---|---|---|
+  | `tasks/detection/shared/gtr/rbox_ops.py` | `engine/gtr/obb/rbox_ops.py` | 逐段 re-port（旋转框数学/ADR 编解码/KLD/Chamfer，含 S3b 训练将用到的编码与代价件） |
+  | `tasks/detection/shared/gtr/obb_decoder.py` | `engine/gtr/obb/decoder.py`（OBBIntegral/OBBLQE/OBBMSDeformableAttention/OBBTransformerDecoderLayer/OBBTransformerDecoder/OBBGTRTransformer） | re-port（注册器清理、typing、部署路径裁剪为用到的部分）；`value_op` 改为本项目共享可变形核的展平布局（与官方元组布局同数据同采样；det/seg 由逐比特对拍背书）。**注意**：OBB 层后置 norm 名为 `norm2`（无 norm3 重命名），解码器注意力头数为官方默认 8（独立于 backbone 头数） |
+  集成面：家族 `tasks/oriented_detection/gtr/`（task_model + 官方装载：backbone strict + encoder/decoder 覆盖率门禁 1.0，**检查点内陈旧 anchors 按官方 solver 约定跳过**；postprocess 复用 `decode_oriented_detection_outputs`，默认 NMS 关闭 = 官方 NMS-free 协议）。**训练（定向 criterion/matcher/定向 CDN）为 §11 S3b**，本轮不交付以避免半成品。
