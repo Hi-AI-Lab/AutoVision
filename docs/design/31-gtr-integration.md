@@ -176,6 +176,8 @@ RF-DETR / LW-DETR 风格的 MultiScaleProjector：对每个目标尺度独立做
 
 - **S3a 实施记录（2026-10-16，定向检测推理/装载切片）**：① re-port 两件：`shared/gtr/rbox_ops.py`（旋转框数学全量：canonical/long-edge 规范化、extbox 编解码、`distance2rbox`、KLD/Chamfer——后二者供 S3b 训练用）与 `shared/gtr/obb_decoder.py`（`OBBGTRTransformer` 全栈：旋转感知可变形注意力、6 分布 ADR、5 参选择头）。② 集成面：家族 `tasks/oriented_detection/gtr/`（20 行薄包装 + 官方装载器；postprocess 复用现有 oriented 解码路径，默认 **NMS 关闭**对齐官方 NMS-free 协议）。③ **金标准对拍（RTX 4090D）**：官方 `GTR`+`OBBGTRTransformer`（其引擎/OBB-S 配置/官方 EMA 权重，陈旧 anchors 按官方约定跳过）与家族网络同输入 **`pred_logits` 与 5 参旋转框 (cx,cy,w,h,a) 逐比特一致（0.0；随机 1024 + 真实图 1024）**；官方权重 **274 张量/覆盖率 1.0/零跳过**；`predict()` 输出 300 个旋转多边形（角点 (300,4,2)）。④ **过程中修正两处移植偏差**（均被装载门禁/对拍抓住）：decoder 注意力头数应为官方默认 **8**（独立于 backbone 的 3；`sampling_offsets` 形状 192=8×12×2 实证）、`value_op` 需返回本项目共享核的展平布局（官方元组布局同数据同采样）。⑤ `tests/test_gtr_obb.py` ×6（装载覆盖含 norm2/anchors 断言、rbox 规范化/往返/包围盒/解码单元、CUDA forward+predict）。**S3b（训练面，未交付）**：`OBBGTRCriterion`（KLD/GDL 损失组）+ 定向 Hungarian matcher + 定向 CDN（`obb/denoising.py`）+ 训练/CLI 接线 + DOTA 数据面；退出判据沿用：合成旋转框自检 + 无标签对拍 +（数据到位后）test-server 口径另议。
 
+- **S5a 实施记录（2026-10-16，姿态估计推理/装载切片）**：① **自包含逐字 re-port**：`shared/gtr/pose_decoder.py`（GTRPoseTransformer 全栈：DETRPose 系 within/across-instance 自注意力 + tuple-value MSDeformAttn 核 + 逐关键点 FDR；本线自带 relu-only MLP、Gate/Integral/LQE）。**关键发现（对拍暴露并修正）**：本线的 `weighting_function` 与共享 D-FINE 版**不同**（实测差 9.5e-07，构造式差异）——首版适配共享版导致 logits 恒定 1.9e-6 偏差；改为逐字移植本线版本后归零。同理保留全部硬编码常量（`inverse_sigmoid eps=1e-3`、81 行 `label_enc`、256 宽 LQE）。② 集成面：家族 `tasks/pose_estimation/gtr/`（官方装载：backbone strict + 覆盖率门禁 1.0，陈旧 anchors 跳过并按 640 画布重生成 2 通道 proposals；postprocess 移植官方 `GTRPosePostProcessor`——flattened top-k、缩放回原图、COCO `[x,y,v]` 三元组）。③ **金标准对拍（RTX 4090D）**：官方 `GTRPose`（其引擎/pose-S 配置/官方 EMA 权重）与家族网络同输入 **`pred_logits`(1,60,2) 与 `pred_keypoints`(1,60,34) 逐比特一致（0.0；随机 640 + 真实图 640）**；官方权重 **239 张量/覆盖率 1.0/零跳过**；`predict()` 输出 COCO 关键点（真实图检出 2 人、scores 0.32–0.86）。④ `tests/test_gtr_pose.py` ×4（装载覆盖含 2 通道 anchors/81 行 label/256 宽 LQE/weighting 谱系守卫、CUDA forward + predict 帧尺寸与三元组格式）。**S5b（训练面，未交付）**：CDN（`pose/dn_component.py`）+ 关键点损失/匹配（`keypoint_loss.py`/`matcher.py`）+ COCO kp 数据面与 OKS 度量 + 训练/CLI；退出判据：合成关键点自检 + 无标签对拍 +（数据到位后）COCO kp AP 对齐 70.1。
+
 ## 8. 验收 gate
 
 | # | 判据 | 证据物 |
@@ -245,7 +247,8 @@ README 口径（S 档）：det 53.6 AP → seg 45.0 mask AP → pose 70.1 kp AP 
 | **S3a obb 推理/装载** | ~~rbox_ops + 旋转可变形核 + OBB decoder 全栈~~ | **已交付（2026-10-16）**：logits + 5 参旋转框逐比特对拍、274 张量覆盖率 1.0、rbox 单元 + CUDA forward/predict；见 §7 记录 | **已交付（S 档）** |
 | **S3b obb 训练面** | `OBBGTRCriterion`（KLD/GDL）+ 定向 matcher + 定向 CDN + 训练/CLI + DOTA 数据面 | 合成旋转框自检 + 无标签对拍；test-server 口径待数据 | 计划（精确清单见 §7 S3a 记录） |
 | **S4 depth** | ~~DPT 头 + SiLog + 新家族~~ | **已交付（2026-10-16）**：pred_depth 逐比特对拍 + 132 张量覆盖率 1.0 + SiLog/度量单元 + 训练闭环（CUDA）；NYU 协议复现待数据 | **已交付（S 档）**，见 §7 记录 |
-| **S5 pose** | 独立 decoder（833 行）+ kp 损失/matcher/dn/postproc + COCO kp 数据面 + OKS 度量 + CLI | kp AP 对齐 70.1（±0.5） | 计划（最大切片，最后做） |
+| **S5a pose 推理/装载** | ~~独立 decoder 全栈（自包含逐字移植，含本线版 weighting_function 陷阱修正）~~ | **已交付（2026-10-16）**：logits + keypoints 逐比特对拍、239 张量覆盖率 1.0、predict COCO 三元组；见 §7 记录 | **已交付（S 档）** |
+| **S5b pose 训练面** | CDN + 关键点损失/匹配 + COCO kp 数据 + OKS 度量 + CLI | kp AP 对齐 70.1（±0.5） | 计划（清单见 §7 S5a 记录） |
 
 依赖：S2/S3 均可独立先行（S2 有本地数据 vs S3 键集直通）；S4/S5 需先补度量/数据模块。obj365 四档任何时候可作为 backbone-init 资产（`resolve_gtr_asset("gtr_s_obj365")`）。
 

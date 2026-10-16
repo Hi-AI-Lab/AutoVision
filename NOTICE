@@ -64,7 +64,10 @@ remediation plan: docs/design/28-clean-provenance-refactor.md):
   detection line (GTR's engine/gtr/obb/rbox_ops.py rotated-box math and
   engine/gtr/obb/decoder.py OBBGTRTransformer) in
   src/autovision/tasks/detection/shared/gtr/rbox_ops.py and
-  src/autovision/tasks/detection/shared/gtr/obb_decoder.py.
+  src/autovision/tasks/detection/shared/gtr/obb_decoder.py, and the pose
+  line (GTR's engine/gtr/pose/{decoder,ms_deform_attn,utils}.py, itself
+  DETRPose derived) in
+  src/autovision/tasks/detection/shared/gtr/pose_decoder.py.
   Runtime dependency (optional extra ``gtr``): flash-linear-attention
   0.5.0 (MIT).
 

@@ -125,3 +125,9 @@
   | `tasks/detection/shared/gtr/rbox_ops.py` | `engine/gtr/obb/rbox_ops.py` | 逐段 re-port（旋转框数学/ADR 编解码/KLD/Chamfer，含 S3b 训练将用到的编码与代价件） |
   | `tasks/detection/shared/gtr/obb_decoder.py` | `engine/gtr/obb/decoder.py`（OBBIntegral/OBBLQE/OBBMSDeformableAttention/OBBTransformerDecoderLayer/OBBTransformerDecoder/OBBGTRTransformer） | re-port（注册器清理、typing、部署路径裁剪为用到的部分）；`value_op` 改为本项目共享可变形核的展平布局（与官方元组布局同数据同采样；det/seg 由逐比特对拍背书）。**注意**：OBB 层后置 norm 名为 `norm2`（无 norm3 重命名），解码器注意力头数为官方默认 8（独立于 backbone 头数） |
   集成面：家族 `tasks/oriented_detection/gtr/`（task_model + 官方装载：backbone strict + encoder/decoder 覆盖率门禁 1.0，**检查点内陈旧 anchors 按官方 solver 约定跳过**；postprocess 复用 `decode_oriented_detection_outputs`，默认 NMS 关闭 = 官方 NMS-free 协议）。**训练（定向 criterion/matcher/定向 CDN）为 §11 S3b**，本轮不交付以避免半成品。
+
+- 2026-10-16（**GTR 多任务集成 S5a 登记，roadmap 分册 31 §11**）：姿态估计 re-port（来源 `Intellindust-AI-Lab/GTR`，MIT；`engine/gtr/pose/*` 自 DETRPose（MIT/Apache 混合）移植，DETRPose 又源自 Conditional DETR/DETR）：
+  | 本文件 | GTR 源 | 处置 |
+  |---|---|---|
+  | `tasks/detection/shared/gtr/pose_decoder.py` | `engine/gtr/pose/decoder.py` + `ms_deform_attn.py` + `utils.py`（MLP/activation/inverse_sigmoid） | **自包含逐字 re-port**（本线自带 relu-only MLP、Gate/Integral/LQE、tuple-value 的 MSDeformAttn 核、`inverse_sigmoid(eps=1e-3)`、以及**与共享 D-FINE 版不同的 `weighting_function`（实测差 9.5e-07，必须用本线版本）**；硬编码常量（81 行 label_enc、256 宽 LQE）逐字保留）；训练分支以 S5b 指针显式拒绝 |
+  集成面：家族 `tasks/pose_estimation/gtr/`（task_model + 官方装载：backbone strict + encoder/decoder 覆盖率门禁 1.0，陈旧 anchors/valid_mask 跳过；postprocess 为官方 `GTRPosePostProcessor` 移植——flattened 分数 top-k、关键点缩放至原图、COCO `[x,y,v]` 三元组）。**训练（CDN + 关键点损失/匹配）为 §11 S5b**。
