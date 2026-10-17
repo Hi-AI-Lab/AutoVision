@@ -1,6 +1,12 @@
 # Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """VisDrone LT-DETR at 1280x1280 — DINOv3 ViT-S/16, COCO-full warm start.
 
+ARCHIVED (2026-10): the referenced checkpoint is STA-era
+(``backbone.sta.*``). The DEIMv2-derived spatial prior was removed for
+licensing, so the no-STA ViT adapter rejects this checkpoint. The recipe
+becomes runnable again only after a no-STA checkpoint is trained/exported
+or a different DETECTOR_CHECKPOINT is supplied.
+
 ViT-family twin of ``visdrone_ltdetr_1280_convnextb_baseline_coco.py`` (NO
 box-aware eraser). Same resolution / batch / schedule / aug recipe; the
 BACKBONE FAMILY is the variable (ConvNeXt-base -> DINOv3 ViT-S/16).
@@ -12,9 +18,6 @@ lighter head than the ConvNeXt checkpoints (verified from its tensors):
   (self_attn in_proj (672, 224), ffn (1792, 224)) — the ViT recipe keeps
   the two SHARED, unlike the ConvNeXt baseline's 384/256 split;
 - 4 decoder layers (0..3) instead of ConvNeXt's 6;
-- ViT backbone goes through the STA wrapper (windowed attention +
-  conv_inplane=32 channel budget): 42 extras tensors (backbone.convs /
-  backbone.norms) load beside the 188 raw ViT tensors;
 - 3-level pyramid from interaction_indexes (5, 8, 11) — the ViT layers
   are grouped into thirds, one per stride (8/16/32);
 - image_size 1280 is divisible by the 2 x patch divisor (2 x 16 = 32).
@@ -49,7 +52,8 @@ DATA_ARGS = {
             "images": str(VISDRONE / "VisDrone2019-DET-val/images")},
 }
 #: The SHA256-verified published DINOv3 ViT-S/16 detector checkpoint
-#: (backbone + STA extras + encoder + decoder, 80 COCO classes).
+#: (backbone + STA extras + encoder + decoder, 80 COCO classes). STA-era:
+#: rejected by the current loader (spatial prior removed for licensing).
 DETECTOR_CHECKPOINT = Path(
     "/home/hdjs/Research/Project/Dino-Dome-Research/weight/dinov3"
     "/dinov3_vits16_ltdetr_coco_251218_4812416b.pt"

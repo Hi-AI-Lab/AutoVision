@@ -5,26 +5,23 @@ Ports the baseline detector backbone adapters:
 
 - :class:`ViTDetectionBackbone` (baseline ViT adapter): semantic features
   from intermediate ViT blocks, bilinearly resized into a stride-8/16/32
-  pyramid, optionally fused channel-wise with a CNN spatial prior (STA)
-  and projected to a shared ``hidden_dim`` via 1x1 convs. Only the
-  pretrained ViT counts as "backbone" for LR grouping — the STA and the
-  projection layers are randomly initialized and train at detector LR.
+  pyramid and projected to a shared ``hidden_dim`` via 1x1 convs. Only the
+  pretrained ViT counts as "backbone" for LR grouping — the projection
+  layers are randomly initialized and train at detector LR. The DEIMv2-
+  derived spatial prior (STA) was removed for licensing; DINOv3 ViT uses
+  this no-STA adapter.
 - :class:`ConvNeXtDetectionBackbone`: taps the last three ConvNeXt
   stages (strides 8/16/32); the whole backbone counts as "backbone".
 """
 
 from __future__ import annotations
 
-import torch
 import torch.nn.functional as F
 from torch import Tensor
 from torch.nn import (
-    GELU,
     Conv2d,
-    MaxPool2d,
     Module,
     ModuleList,
-    Sequential,
     SyncBatchNorm,
 )
 
@@ -35,7 +32,6 @@ __all__ = [
     "CONVNEXT_DETECTION_PATCH_SIZE",
     "ConvNeXtDetectionBackbone",
     "GTRViTBackbone",
-    "SpatialPriorModule",
     "TimmCNNBackbone",
     "ViTDetectionBackbone",
 ]
@@ -52,60 +48,20 @@ def _ceil_half(value: int) -> int:
     return -(-value // 2)
 
 
-class SpatialPriorModule(Module):
-    """CNN detail pyramid at strides 8/16/32.
-
-    Re-port of the DEIMv2 ``SpatialPriorModulev2`` (Apache-2.0,
-    Copyright (c) 2025 The DEIMv2 Authors; the same design the baseline
-    port traces to). Modification per Apache-2.0 §4b: the stages are built
-    from a small helper instead of hand-unrolled ``Sequential`` literals —
-    layer order, channel widths and state-dict keys (``stem``/``conv2``/
-    ``conv3``/``conv4``) are unchanged so existing checkpoints stay
-    loadable. Ledger: (P1-1).
-    """
-
-    def __init__(self, inplanes: int = 16) -> None:
-        super().__init__()
-        # 1/4
-        self.stem = Sequential(
-            Conv2d(3, inplanes, kernel_size=3, stride=2, padding=1, bias=False),
-            SyncBatchNorm(inplanes),
-            GELU(),
-            MaxPool2d(kernel_size=3, stride=2, padding=1),
-        )
-        # 1/8, 1/16, 1/32
-        self.conv2 = self._downsample_stage(inplanes, 2 * inplanes, leading_act=False)
-        self.conv3 = self._downsample_stage(2 * inplanes, 4 * inplanes, leading_act=True)
-        self.conv4 = self._downsample_stage(4 * inplanes, 4 * inplanes, leading_act=True)
-
-    @staticmethod
-    def _downsample_stage(ch_in: int, ch_out: int, leading_act: bool) -> Sequential:
-        """Strided 3x3 conv + norm, optionally preceded by a GELU."""
-        layers: list[Module] = [GELU()] if leading_act else []
-        layers.append(
-            Conv2d(ch_in, ch_out, kernel_size=3, stride=2, padding=1, bias=False)
-        )
-        layers.append(SyncBatchNorm(ch_out))
-        return Sequential(*layers)
-
-    def forward(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        quarter = self.stem(x)
-        eighth = self.conv2(quarter)  # 1/8
-        sixteenth = self.conv3(eighth)  # 1/16
-        thirty_second = self.conv4(sixteenth)  # 1/32
-        return eighth, sixteenth, thirty_second
-
-
 class ViTDetectionBackbone(Module):
-    """ViT -> stride-8/16/32 detection features (baseline ViT adapter)."""
+    """ViT -> stride-8/16/32 detection features (no-STA adapter).
+
+    The DEIMv2-derived spatial prior was removed for licensing reasons;
+    DINOv3 ViT variants now use the same no-STA adapter as DINOv2. Old
+    checkpoints containing ``backbone.sta.*`` are unsupported and rejected
+    by the loaders (see docs/provenance/LEDGER.md).
+    """
 
     def __init__(
         self,
         model_wrapper: TransformersDinov2Wrapper,
         interaction_indexes: tuple[int, int, int] = (5, 8, 11),
         finetune: bool = True,
-        use_sta: bool = True,
-        conv_inplane: int = 16,
         hidden_dim: int | None = None,
         project_features: bool = True,
         resize_features: bool = True,
@@ -123,18 +79,12 @@ class ViTDetectionBackbone(Module):
             model_wrapper.eval()
             model_wrapper.requires_grad_(False)
 
-        self.use_sta = use_sta
-        if use_sta:
-            self.sta = SpatialPriorModule(inplanes=conv_inplane)
-        else:
-            conv_inplane = 0
-
         self.project_features = project_features
         hidden_dim = hidden_dim if hidden_dim is not None else embed_dim
-        if not self.project_features and (use_sta or hidden_dim != embed_dim):
+        if not self.project_features and hidden_dim != embed_dim:
             raise ValueError(
-                "project_features=False requires use_sta=False and hidden_dim to "
-                f"match the backbone embed_dim ({embed_dim}), but got "
+                "project_features=False requires hidden_dim to match the "
+                f"backbone embed_dim ({embed_dim}), but got "
                 f"hidden_dim={hidden_dim}."
             )
         if not self.project_features:
@@ -142,15 +92,9 @@ class ViTDetectionBackbone(Module):
 
         self.convs = ModuleList(
             [
-                Conv2d(
-                    embed_dim + conv_inplane * 2, hidden_dim, kernel_size=1, bias=False
-                ),
-                Conv2d(
-                    embed_dim + conv_inplane * 4, hidden_dim, kernel_size=1, bias=False
-                ),
-                Conv2d(
-                    embed_dim + conv_inplane * 4, hidden_dim, kernel_size=1, bias=False
-                ),
+                Conv2d(embed_dim, hidden_dim, kernel_size=1, bias=False),
+                Conv2d(embed_dim, hidden_dim, kernel_size=1, bias=False),
+                Conv2d(embed_dim, hidden_dim, kernel_size=1, bias=False),
             ]
         )
         self.norms = ModuleList(
@@ -184,8 +128,8 @@ class ViTDetectionBackbone(Module):
             # In-backbone background token dropping (design doc 17): the
             # wrapper runs one encoder pass per image over its kept patch
             # tokens and zero-fills the dropped positions, so the taps keep
-            # the dense (B, D, H', W') shapes and everything below — STA
-            # fusion, pyramid resize, projection — is untouched.
+            # the dense (B, D, H', W') shapes and everything below — pyramid
+            # resize and projection — is untouched.
             sem_feats = self._model_wrapper.stage_feature_maps_masked(
                 x, self.interaction_indexes, window_keep_masks
             )
@@ -223,23 +167,7 @@ class ViTDetectionBackbone(Module):
             for sem_feat, size in zip(sem_feats, sizes)
         ]
 
-        if self.use_sta:
-            detail_feats = self.sta(x)
-            fused_feats = []
-            for semantic_feat, detail_feat, size in zip(
-                resized_feats, detail_feats, sizes
-            ):
-                detail_feat_interpolated = F.interpolate(
-                    detail_feat,
-                    size=list(size),
-                    mode="bilinear",
-                    align_corners=False,
-                )
-                fused_feats.append(
-                    torch.cat([semantic_feat, detail_feat_interpolated], dim=1)
-                )
-        else:
-            fused_feats = resized_feats
+        fused_feats = resized_feats
 
         if not self.project_features:
             return fused_feats[0], fused_feats[1], fused_feats[2]

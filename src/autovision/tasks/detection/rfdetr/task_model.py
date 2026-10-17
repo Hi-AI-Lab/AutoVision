@@ -66,6 +66,50 @@ _PRETRAINED_CONFIG_OVERRIDES: dict[str, dict[str, Any]] = {
             image_size=384,
         ),
     ),
+    "rf-detr-small": dict(
+        decoder_layers=3,
+        decoder_n_points=2,
+        decoder_cross_attention_heads=16,
+        backbone=dict(
+            hidden_size=384,
+            num_hidden_layers=12,
+            num_attention_heads=6,
+            image_size=512,
+        ),
+    ),
+    "rf-detr-medium": dict(
+        decoder_layers=4,
+        decoder_n_points=2,
+        decoder_cross_attention_heads=16,
+        backbone=dict(
+            hidden_size=384,
+            num_hidden_layers=12,
+            num_attention_heads=6,
+            image_size=576,
+        ),
+    ),
+    "rf-detr-base": dict(
+        decoder_layers=3,
+        decoder_n_points=2,
+        decoder_cross_attention_heads=16,
+        backbone=dict(
+            hidden_size=384,
+            num_hidden_layers=12,
+            num_attention_heads=6,
+            image_size=518,
+        ),
+    ),
+    "rf-detr-large": dict(
+        decoder_layers=4,
+        decoder_n_points=2,
+        decoder_cross_attention_heads=16,
+        backbone=dict(
+            hidden_size=384,
+            num_hidden_layers=12,
+            num_attention_heads=6,
+            image_size=704,
+        ),
+    ),
 }
 
 
@@ -284,6 +328,9 @@ def _make_rfdetr_siou_detection_loss(siou_theta: float):
 
 class RFDETRObjectDetection(ONNXExportMixin, TaskNetwork):
     """RF-DETR detector (HF transformers) in the AutoVision task contract."""
+
+    #: Export-side postprocess contract marker (see export/postprocess.py).
+    postprocess_spec_family = "detr"
 
     def __init__(
         self,

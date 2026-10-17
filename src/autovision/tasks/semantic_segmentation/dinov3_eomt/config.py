@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 
 from autovision.tasks.semantic_segmentation.dinov2_eomt.config import (
     Dinov2EomtSemanticSegmentationTrainArgs,
@@ -20,9 +20,14 @@ class Dinov3EomtSemanticSegmentationTrainArgs(Dinov2EomtSemanticSegmentationTrai
     (RoPE position encoding, storage tokens, gated-MLP option). ``mlp_ratio``
     maps to the DINOv3 ``intermediate_size`` (= ratio x hidden_size), while
     ``use_swiglu_ffn`` has no DINOv3 counterpart and must stay False.
+
+    ``layer_norm_eps`` is applied to the backbone and the scale-block
+    LayerNorm2d; DINOv3 EoMT checkpoints trained with ``layernormbf16`` use
+    1e-5, while HF's config defaults to 1e-6.
     """
 
     use_gated_mlp: bool = False
+    layer_norm_eps: float = Field(default=1e-6, gt=0)
 
     @field_validator("use_swiglu_ffn")
     @classmethod

@@ -51,19 +51,61 @@ def seg_checkpoint() -> Path:
 
 
 class TestGtrSegLoad:
-    def test_variant_table_and_guard(self):
+    def test_variant_table_and_args(self):
         assert GTR_SEG_VARIANTS == {
             "s": (192, 3, 4.0),
             "m": (256, 4, 4.0),
             "l": (384, 6, 4.0),
             "x": (384, 6, 6.0),
         }
+        from autovision.tasks.instance_segmentation.gtr.config import (
+            GTRSegTrainArgs,
+        )
+
+        for variant in ("s", "m", "l", "x"):
+            args = GTRSegTrainArgs(
+                num_classes=80, variant=variant, load_checkpoint=False
+            )
+            assert args.variant == variant
+        with pytest.raises(ValueError):
+            GTRSegTrainArgs(
+                num_classes=80, variant="unknown", load_checkpoint=False
+            )
+
+    @requires_gla
+    def test_m_l_x_task_models_build(self):
         from autovision.tasks.instance_segmentation.gtr import (
             GTRSegObjectDetection,
         )
 
-        with pytest.raises(NotImplementedError, match="not registered"):
-            GTRSegObjectDetection(num_classes=80, variant="m", load_checkpoint=False)
+        for variant in ("m", "l", "x"):
+            net = GTRSegObjectDetection(
+                num_classes=80, variant=variant, load_checkpoint=False
+            )
+            assert net.variant == variant
+
+    @requires_gla
+    @pytest.mark.parametrize("variant", ["m", "l", "x"])
+    def test_variant_official_checkpoint_loads_completely(self, variant):
+        try:
+            resolve_gtr_asset(f"gtrseg_{variant}_coco")
+        except Exception:  # noqa: BLE001 - absent local weights keep fresh checkouts green
+            pytest.skip("local GTR seg M/L/X weights not present")
+        from autovision.tasks.instance_segmentation.gtr import (
+            GTRSegObjectDetection,
+        )
+
+        net = GTRSegObjectDetection(
+            num_classes=80,
+            variant=variant,
+            image_size=(640, 640),
+            checkpoint=f"gtrseg_{variant}_coco",
+        )
+        assert net.load_report is not None
+        assert net.load_report["encoder_decoder_coverage"] == 1.0
+        assert net.load_report["skipped_shape"] == 0
+        assert net.load_report["unexpected"] == 0
+        assert net.load_report["transferred"] == 309
 
     def test_official_checkpoint_loads_completely(self, seg_checkpoint):
         """Backbone strict + encoder/decoder with the norm rename; the

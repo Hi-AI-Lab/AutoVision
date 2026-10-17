@@ -119,6 +119,8 @@ class DETRObjectDetection(ONNXExportMixin, TaskNetwork):
     onnx_export_precision_policy = ONNXExportPrecisionPolicy(
         fp32_onnx_op_types=("Softmax", "MatMul")
     )
+    #: Export-side postprocess contract marker (see export/postprocess.py).
+    postprocess_spec_family = "detr"
 
     def __init__(
         self,
@@ -347,8 +349,6 @@ class DETRObjectDetection(ONNXExportMixin, TaskNetwork):
                 backbone_wrapper,
                 interaction_indexes=spec.interaction_indexes,
                 finetune=True,
-                use_sta=spec.use_sta,
-                conv_inplane=spec.conv_inplane,
                 hidden_dim=hidden_dim,
                 project_features=spec.project_features,
                 resize_features=True,
@@ -361,13 +361,18 @@ class DETRObjectDetection(ONNXExportMixin, TaskNetwork):
                 num_stages=pyramid_levels,
             )
         elif spec.family == "gtr":
+            # The GTR L/X checkpoints keep a 384-wide ViT while the
+            # encoder/decoder stack runs at 256; ``backbone_embed_dim``
+            # separates the two widths (None keeps the shared width).
+            backbone_embed_dim = spec.backbone_embed_dim or spec.hidden_dim
             self.backbone = GTRViTBackbone(
-                embed_dim=spec.hidden_dim,
+                embed_dim=backbone_embed_dim,
                 # GTR head convention: dim/64 (192->3, 256->4, 384->6).
-                num_heads=max(1, spec.hidden_dim // 64),
+                num_heads=max(1, backbone_embed_dim // 64),
                 interaction_indexes=spec.interaction_indexes,
                 patch_size=spec.patch_size,
                 finetune=True,
+                ffn_ratio=spec.backbone_ffn_ratio,
             )
         else:
             self.backbone = ConvNeXtDetectionBackbone(
@@ -880,6 +885,16 @@ def load_warm_start_into_network(
             f"AVWarmStart '{warm_start}' dec_lineage '{recorded_lineage}' "
             f"does not match '{network.variant_spec.dec_lineage}' — the two "
             "lineages decode with different selection-stage semantics."
+        )
+
+    sta_keys = sorted(k for k in payload.model if k.startswith("backbone.sta."))
+    if sta_keys:
+        raise ValueError(
+            f"AVWarmStart '{warm_start}' contains {len(sta_keys)} "
+            "backbone.sta.* tensor(s) from the DEIMv2-derived spatial prior, "
+            "which was removed for licensing. The no-STA ViT adapter cannot "
+            "load this checkpoint faithfully; retrain/export a no-STA "
+            "checkpoint or use a ConvNeXt asset."
         )
 
     target = network.state_dict()

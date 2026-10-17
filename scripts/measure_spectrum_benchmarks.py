@@ -2,7 +2,7 @@
 """Reproduce the spectrum cost/latency numbers in docs/benchmarks.md §2 / §2.1.
 
 Cost (parameters + FLOPs) and latency for the P1 spectrum models
-(``detr/n``, ``detr/s``, ``detr/gtr-s``, ``detr/gtrvit-s``) plus the
+(``detr/n``, ``detr/s``, ``detr/gtrvit-s``) plus the
 ``rtdetr/resnet18`` reference. Model weights are NOT required: cost and
 latency are architecture-level (random init), matching the §2 table's
 "装配变体" rows.
@@ -76,7 +76,6 @@ def _builders() -> dict[str, tuple[str, Callable[[str], Any]]]:
     return {
         "detr/n": ("cuda", lambda device: _detr("n", device)),
         "detr/s": ("cuda", lambda device: _detr("s", device)),
-        "detr/gtr-s": ("cuda", lambda device: _detr("gtr-s", device)),
         # GLA backbone: forward needs CUDA (Triton); export is blocked (G2).
         "detr/gtrvit-s": ("cuda", lambda device: _detr("gtrvit-s", device)),
         "rtdetr/resnet18": ("cuda", resnet18),

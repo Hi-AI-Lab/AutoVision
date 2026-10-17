@@ -39,11 +39,16 @@ ViT (``backbone.dinov3.*``)
     module's ``inv_freq`` after the strict load (see
     ``_VIT_ROPE_INV_FREQ_KEY``).
 
-Wrapper extras (``backbone.sta/convs/norms.*``, ViT checkpoints only)
-    The baseline ViT wrapper's randomly-initialized STA spatial prior, 1x1
-    projections, and output norms — trained during the COCO run, so they
-    are loaded too, strictly, into the target's identically-named
-    ``ViTDetectionBackbone`` submodules.
+Wrapper extras (``backbone.convs/norms.*``, ConvNeXt checkpoints only)
+    The baseline ConvNeXt wrapper's 1x1 projections and output norms —
+    trained during the COCO run, so they are loaded strictly into the
+    target's identically-named ``ConvNeXtDetectionBackbone`` submodules.
+
+STA-era ViT checkpoints (``backbone.sta.*``) are NOT supported: the
+DEIMv2-derived spatial prior was removed for licensing. The loader
+rejects them with an explicit error instead of silently dropping the
+tensors; DINOv3 ViT targets use the no-STA adapter and require a
+retrained/exported checkpoint.
 
 Width and depth contract: the baseline couples a per-variant ENCODER width
 (ConvNeXt: 384; ViT: 224/192/256 — shared with the decoder) with a FIXED
@@ -277,8 +282,9 @@ def _partition_baseline_state(
 
     The raw-backbone prefix selects the family (``backbone.backbone`` =
     ConvNeXt, ``backbone.dinov3`` = ViT); every other
-    ``backbone.*`` key is a wrapper extra (sta/convs/norms) loaded by name
-    into the target's detection backbone wrapper.
+    ``backbone.*`` key is a wrapper extra (convs/norms for ConvNeXt;
+    ``sta.*`` keys mark an unsupported STA-era ViT checkpoint) loaded by
+    name into the target's detection backbone wrapper.
     """
     has_convnext = any(k.startswith(_CONVNEXT_RAW_PREFIX) for k in state)
     has_vit = any(k.startswith(_VIT_RAW_PREFIX) for k in state)
@@ -391,11 +397,12 @@ def load_baseline_coco_checkpoint(
 ) -> dict[str, int]:
     """Load a published baseline LT-DETR detector checkpoint in place.
 
-    Loads backbone (family-remapped), wrapper extras (ViT STA), encoder,
-    and decoder weights. Decoder tensors whose shape depends on the class
-    count are skipped when they do not match the target model (i.e.
-    warm-starting a non-COCO class count); every other tensor must match
-    exactly or the call raises.
+    Loads backbone (family-remapped), wrapper extras (ConvNeXt projections
+    and norms), encoder, and decoder weights. Decoder tensors whose shape
+    depends on the class count are skipped when they do not match the
+    target model (i.e. warm-starting a non-COCO class count); every other
+    tensor must match exactly or the call raises. STA-era ViT checkpoints
+    are rejected: the DEIMv2-derived spatial prior was removed.
     """
     payload = _load_payload(path)
     if isinstance(payload.get("model_class_path"), str):
@@ -409,6 +416,19 @@ def load_baseline_coco_checkpoint(
         _partition_baseline_state(state)
     )
 
+    # STA-era ViT checkpoints are refused before any model access: the
+    # DEIMv2-derived spatial prior was removed for licensing, and the
+    # no-STA adapter cannot reproduce its features.
+    sta_keys = sorted(k for k in extras_sd if k.startswith("sta."))
+    if sta_keys:
+        raise ValueError(
+            f"baseline checkpoint carries {len(sta_keys)} backbone.sta.* "
+            "tensor(s) from the DEIMv2-derived spatial prior, which was "
+            "removed for licensing. The no-STA ViT adapter cannot load "
+            "this checkpoint faithfully; retrain/export a no-STA checkpoint "
+            "or use a ConvNeXt checkpoint."
+        )
+
     summary: dict[str, int] = {}
 
     # 1) backbone — strict: the remapped set IS the HF model's key set.
@@ -418,10 +438,10 @@ def load_baseline_coco_checkpoint(
     if rope_periods:
         summary["backbone_rope_periods"] = 1
 
-    # 2) wrapper extras (ViT STA prior / projections / norms) — every
-    #    key must exist in the wrapper by name (they were trained
-    #    during the COCO run); the rest of the wrapper (the raw HF
-    #    model) was loaded in step 1.
+    # 2) wrapper extras (ConvNeXt 1x1 projections / output norms) — every
+    #    key must exist in the wrapper by name (they were trained during
+    #    the COCO run); the rest of the wrapper (the raw HF model) was
+    #    loaded in step 1.
     if extras_sd:
         wrapper = task_model.backbone
         wrapper_keys = set(wrapper.state_dict().keys())
@@ -431,8 +451,7 @@ def load_baseline_coco_checkpoint(
                 f"baseline checkpoint carries wrapper extras that the "
                 f"target backbone ({type(wrapper).__name__}) does not "
                 f"define (first keys: {unknown[:5]}) — build the model "
-                "with the checkpoint's wrapper recipe (STA fusion on, "
-                "matching conv_inplane/hidden_dim)."
+                "with the checkpoint's wrapper recipe."
             )
         wrapper.load_state_dict(extras_sd, strict=False)
         summary["backbone_extras"] = len(extras_sd)
@@ -537,6 +556,14 @@ def resolve_detector_checkpoint(source: str | Path) -> Path:
         return resolve_downloadable(name)
     user_held = USER_HELD_ASSETS.get(name)
     if user_held is not None:
+        if user_held.requires_removed_sta:
+            raise DownloadableModelError(
+                f"user-held detector checkpoint '{name}' contains "
+                "backbone.sta.* weights; the DEIMv2-derived spatial prior "
+                "was removed for licensing and the no-STA ViT adapter cannot "
+                "load it faithfully. Use a ConvNeXt asset or retrain/export "
+                "a no-STA checkpoint."
+            )
         weights = user_held.weights_path
         if not weights.is_file():
             raise DownloadableModelError(

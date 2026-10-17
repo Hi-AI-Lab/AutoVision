@@ -47,7 +47,18 @@ from autovision.encoders import list_models
 from autovision.errors import AutoVisionError
 from autovision.export import benchmark, measure_model_cost
 from autovision.features import embed
+from autovision.plugins import (
+    PluginInfo,
+    discover_plugins,
+    list_plugins,
+    register_plugin,
+)
 from autovision.pretext import list_methods
+from autovision.registry.catalog import (
+    describe_model,
+    get_model_entry,
+    list_task_models,
+)
 from autovision.runtime.checkpoint import CHECKPOINT_AUTOVISION_KEY
 from autovision.tasks.task_model_helpers import load_task_model
 
@@ -57,13 +68,20 @@ install_graphmodule_deepcopy_fix()
 __all__ = [
     "AutoVisionError",
     "DetectionModel",
+    "PluginInfo",
     "PretrainConfig",
     "PretrainResult",
     "__version__",
     "detection",
+    "describe_model",
+    "discover_plugins",
     "errors",
+    "get_model_entry",
     "list_methods",
     "list_models",
+    "list_plugins",
+    "list_task_models",
+    "register_plugin",
     "embed",
     "benchmark",
     "measure_model_cost",

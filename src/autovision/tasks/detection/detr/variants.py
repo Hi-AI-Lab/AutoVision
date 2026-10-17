@@ -14,7 +14,8 @@ the provenance ledger):
 - **DINOv2 ViT** (patch 14): NoSTA wrapper — no spatial-prior fusion, the
   semantic taps are projected straight to ``hidden_dim``.
 - **DINOv3 ViT** (patch 16, incl. the tiny ``vitt16``/``vitt16plus``
-  distillations): STA wrapper with ``conv_inplane = factor x patch_size``.
+  distillations): no-STA adapter (the DEIMv2-derived spatial prior was
+  removed for licensing; old STA checkpoints are unsupported).
 - **DINOv3 ConvNeXt**: last-three-stage taps, whole backbone at backbone LR.
   The published ``-eupe`` names are architecture aliases of these configs.
 
@@ -58,10 +59,6 @@ class DETRVariantSpec:
     patch_size: int
     #: 0-based ViT block taps; unused for convnext (stage taps).
     interaction_indexes: tuple[int, ...]
-    #: CNN spatial-prior fusion (baseline: on for DINOv3 ViT, off for DINOv2).
-    use_sta: bool
-    #: STA channel budget; baseline rule ``factor × patch_size``.
-    conv_inplane: int
     #: Shared projection target: encoder hidden, decoder hidden, and the
     #: backbone wrapper's 1x1 projection all run at this width.
     hidden_dim: int
@@ -93,48 +90,48 @@ class DETRVariantSpec:
     dec_lineage: Literal["dfine", "gtr"] = "dfine"
     #: Per-variant default for ``backbone_lr_factor`` ("auto" resolution).
     backbone_lr_factor: float = 0.05
+    #: GTR backbone width when it is wider than the shared encoder/decoder
+    #: width. The official GTR L/X detection checkpoints are 384-wide ViTs
+    #: with 256-wide encoder/decoder stacks; ``None`` keeps ``hidden_dim``.
+    backbone_embed_dim: int | None = None
+    #: GTR backbone FFN ratio (official X: 6.0; S/M/L: 4.0).
+    backbone_ffn_ratio: float = 4.0
 
 
-# Baseline ViT recipes. conv_inplane = factor × patch_size, per the
-# DETRRTDETRBackboneWrapperConfig table (ViTSmall factor 2, Base/Large/
-# Giant factor 4, ViTTiny(+Plus) factor 1).
+# the DEIMv2-derived spatial prior was removed, so the no-STA adapter ignores
+# it. DINOv2 uses the no-STA path; DINOv3 ViT now uses the same path.
 _VIT_SIZES: dict[str, dict[str, Any]] = {
     "vits14": dict(
         interaction_indexes=(5, 8, 11),
-        conv_inplane_factor=2,
         hidden_dim=224,
         enc_dim_feedforward=896,
         dec_dim_feedforward=1792,
     ),
     "vitb14": dict(
         interaction_indexes=(5, 8, 11),
-        conv_inplane_factor=4,
         hidden_dim=768,
         enc_dim_feedforward=3072,
         dec_dim_feedforward=6144,
     ),
     "vitl14": dict(
         interaction_indexes=(11, 17, 23),
-        conv_inplane_factor=4,
         hidden_dim=1024,
         enc_dim_feedforward=4096,
         dec_dim_feedforward=8192,
     ),
     "vitg14": dict(
         interaction_indexes=(19, 29, 39),
-        conv_inplane_factor=4,
         hidden_dim=1536,
         enc_dim_feedforward=6144,
         dec_dim_feedforward=12288,
     ),
 }
 
-# DINOv3 ViT recipes (STA wrapper, patch 16). vitt16/vitt16plus are the
+# DINOv3 ViT recipes (no-STA adapter, patch 16). vitt16/vitt16plus are the
 # tiny distillations: expansion/depth_mult shrink the HybridEncoder CNN.
 _DINOV3_VIT_SIZES: dict[str, dict[str, Any]] = {
     "vitt16": dict(
         interaction_indexes=(3, 7, 11),
-        conv_inplane_factor=1,
         hidden_dim=192,
         enc_dim_feedforward=512,
         enc_expansion=0.34,
@@ -143,7 +140,6 @@ _DINOV3_VIT_SIZES: dict[str, dict[str, Any]] = {
     ),
     "vitt16plus": dict(
         interaction_indexes=(3, 7, 11),
-        conv_inplane_factor=1,
         hidden_dim=256,
         enc_dim_feedforward=512,
         enc_expansion=0.67,
@@ -152,21 +148,18 @@ _DINOV3_VIT_SIZES: dict[str, dict[str, Any]] = {
     ),
     "vits16": dict(
         interaction_indexes=(5, 8, 11),
-        conv_inplane_factor=2,
         hidden_dim=224,
         enc_dim_feedforward=896,
         dec_dim_feedforward=1792,
     ),
     "vitb16": dict(
         interaction_indexes=(5, 8, 11),
-        conv_inplane_factor=4,
         hidden_dim=768,
         enc_dim_feedforward=3072,
         dec_dim_feedforward=6144,
     ),
     "vitl16": dict(
         interaction_indexes=(11, 17, 23),
-        conv_inplane_factor=4,
         hidden_dim=1024,
         enc_dim_feedforward=4096,
         dec_dim_feedforward=8192,
@@ -183,7 +176,7 @@ _CONVNEXT_SIZES: dict[str, dict[str, Any]] = {
     "convnext-large": dict(hidden_dim=384, dec_layers=6),
 }
 
-# Spectrum width recipes for the timm CNN line (HGNetV2), P1-frozen per
+# Spectrum width recipes for the timm CNN line (HGNetV2), spec-frozen per
 # roadmap design doc 29 §3.1 (D1/D1b) — the widths are NOT guesses: they
 # were read off the cached official D-FINE-S COCO checkpoint
 # (hidden 256, encoder FFN 1024, decoder 3 layers, 8 heads), so the
@@ -227,8 +220,6 @@ def _build_registry() -> dict[str, DETRVariantSpec]:
                 family="vit",
                 patch_size=14,
                 interaction_indexes=info["interaction_indexes"],
-                use_sta=False,
-                conv_inplane=info["conv_inplane_factor"] * 14,
                 hidden_dim=info["hidden_dim"],
                 enc_dim_feedforward=info["enc_dim_feedforward"],
                 enc_expansion=info.get("enc_expansion", 1.0),
@@ -236,23 +227,19 @@ def _build_registry() -> dict[str, DETRVariantSpec]:
                 dec_dim_feedforward=info["dec_dim_feedforward"],
             )
     # Tiny offline test variant (baseline ViTTest analogue): built directly
-    # from a local HF config, random init. Intentionally keeps the STA
-    # fusion ACTIVE (unlike every real DINOv2 variant) so the fusion code
-    # path stays covered by the offline test suite.
+    # from a local HF config, random init; exercises the no-STA ViT path.
     registry["dinov2-vittest-notpretrained"] = DETRVariantSpec(
         backbone_package="dinov2",
         backbone_name="vittest-notpretrained",
         family="vit",
         patch_size=14,
         interaction_indexes=(1, 2, 3),
-        use_sta=True,
-        conv_inplane=16,
         hidden_dim=64,
         enc_dim_feedforward=512,
         dec_layers=2,
         dec_dim_feedforward=512,
     )
-    # DINOv3 ViT variants (STA wrapper; usable once transformers ships
+    # DINOv3 ViT variants (no-STA adapter; usable once transformers ships
     # DINOv3). vitt16/vitt16plus have no public HF checkpoint: only their
     # -notpretrained builds resolve (see the dinov3 package).
     for size, info in _DINOV3_VIT_SIZES.items():
@@ -264,8 +251,6 @@ def _build_registry() -> dict[str, DETRVariantSpec]:
                 family="vit",
                 patch_size=16,
                 interaction_indexes=info["interaction_indexes"],
-                use_sta=True,
-                conv_inplane=info["conv_inplane_factor"] * 16,
                 hidden_dim=info["hidden_dim"],
                 enc_dim_feedforward=info["enc_dim_feedforward"],
                 enc_expansion=info.get("enc_expansion", 1.0),
@@ -281,8 +266,6 @@ def _build_registry() -> dict[str, DETRVariantSpec]:
             family="convnext",
             patch_size=16,
             interaction_indexes=(1, 2, 3),  # unused for convnext (stage taps)
-            use_sta=False,
-            conv_inplane=0,
             hidden_dim=info["hidden_dim"],
             enc_dim_feedforward=2048,
             dec_layers=info["dec_layers"],
@@ -300,8 +283,6 @@ def _build_registry() -> dict[str, DETRVariantSpec]:
             family="timm_cnn",
             patch_size=32,
             interaction_indexes=(),  # unused for CNN stage taps
-            use_sta=False,
-            conv_inplane=0,
             hidden_dim=_HGNETV2_RECIPE["hidden_dim"],
             enc_dim_feedforward=_HGNETV2_RECIPE["enc_dim_feedforward"],
             dec_layers=info["dec_layers"],
@@ -310,52 +291,25 @@ def _build_registry() -> dict[str, DETRVariantSpec]:
             decoder_default="dfine_official",
             backbone_lr_factor=_HGNETV2_RECIPE["backbone_lr_factor"],
         )
-    # GTR assembly-compatible recipe (roadmap design doc 31, G1): widths
-    # read off the gtr_s_coco EMA checkpoint (hidden 192, decoder FFN 512,
-    # 4 layers — 104 direct key matches, 12 residual mismatches ALL FFN
-    # width, resolved by this spec). Sampling points (3, 6, 3) per the
-    # official GTR config (gtr_base.yml:52) — the sum-only shape identity
-    # with (4,4,4) is exactly the trap this value must not fall into.
-    # Decoder assembles from the MIT GTR asset via
-    # dfine_official_warm_start(source_format="gtr"); the backbone stays
-    # on our timm HGNetV2 line (GTR's own backbone is a different GLA
-    # family — doc 31 G2).
-    registry["gtr-s"] = DETRVariantSpec(
-        backbone_package="timm",
-        backbone_name="hgnetv2_b1",
-        family="timm_cnn",
-        patch_size=32,
-        interaction_indexes=(),
-        use_sta=False,
-        conv_inplane=0,
-        hidden_dim=192,
-        enc_dim_feedforward=1024,
-        dec_layers=4,
-        dec_dim_feedforward=512,
-        dec_num_points=(3, 6, 3),
-        decoder_default="dfine_official",
-        dec_lineage="gtr",
-        backbone_lr_factor=0.1,
-    )
     # GTR GLA-backbone line (roadmap design doc 31 G2, MIT re-port under
     # tasks/detection/shared/gtr/): the REAL GTR backbone (Gated Linear
     # Attention + Spatial SwiGLU + bidirectional scan, DEIMv2-vit-tiny
     # lineage) + GTREncoder pyramid. Requires the "gtr" extra
     # (flash-linear-attention) at construction; Triton kernels need CUDA.
     # Widths from the official coco_finetune configs (S: 192/3 heads).
-    # NOT a frozen spectrum tier — G2 acceptance pending: COCO trend open,
+    # NOT a spec-frozen spectrum tier — G2 acceptance pending: COCO trend open,
     # and ONNX/TRT export is blocked on the GLA kernel lowering (see
-    # GTRViTBackbone.export_blocker); assembly variant "gtr-s" (HGNetV2
-    # backbone) stays the decoder-only path.
+    # GTRViTBackbone.export_blocker). This is the only GTR detection route:
+    # the former timm HGNetV2 ``gtr-*`` decoder-only targets were removed.
     registry["gtrvit-s"] = DETRVariantSpec(
         backbone_package="gtr",
         backbone_name="gtr_tiny_spatial_swiglu",
         family="gtr",
         patch_size=16,
         interaction_indexes=(3, 7, 11),
-        use_sta=False,
-        conv_inplane=0,
         hidden_dim=192,
+        backbone_embed_dim=192,
+        backbone_ffn_ratio=4.0,
         enc_dim_feedforward=1024,  # unused: GTREncoder has no AIFI FFN
         dec_layers=4,
         dec_dim_feedforward=512,
@@ -364,6 +318,32 @@ def _build_registry() -> dict[str, DETRVariantSpec]:
         dec_lineage="gtr",
         backbone_lr_factor=0.1,
     )
+    # GTR ViT M/L/X. Widths read off the official det/seg checkpoints:
+    # backbone 256/384/384 with FFN 4/4/6, shared encoder+decoder hidden
+    # 256, decoder FFN 1024/1024/2048, 4 layers. L/X keep the 256-wide
+    # encoder/decoder while the ViT is 384, hence ``backbone_embed_dim``.
+    for name, embed, ffn, dec_ffn in (
+        ("m", 256, 4.0, 1024),
+        ("l", 384, 4.0, 1024),
+        ("x", 384, 6.0, 2048),
+    ):
+        registry[f"gtrvit-{name}"] = DETRVariantSpec(
+            backbone_package="gtr",
+            backbone_name=f"gtr_{name}_spatial_swiglu",
+            family="gtr",
+            patch_size=16,
+            interaction_indexes=(3, 7, 11),
+            hidden_dim=256,
+            backbone_embed_dim=embed,
+            backbone_ffn_ratio=ffn,
+            enc_dim_feedforward=1024,  # unused: GTREncoder has no AIFI FFN
+            dec_layers=4,
+            dec_dim_feedforward=dec_ffn,
+            dec_num_points=(3, 6, 3),
+            decoder_default="dfine_official",
+            dec_lineage="gtr",
+            backbone_lr_factor=0.1,
+        )
     # Published "-eupe" names are architecture aliases (baseline registers
     # them against the same configs).
     aliases = {
@@ -386,35 +366,41 @@ DETR_MODEL_REGISTRY: dict[str, DETRVariantSpec] = _build_registry()
 class SpectrumTier:
     """One product tier of the DETR spectrum (roadmap doc 29 §3.1).
 
-    ``status`` carries the D10 freeze discipline: "frozen" tiers are
-    product commitments (components only change via a minor version plus
-    new weight entries); "planned" tiers are declared targets still
-    awaiting their family implementation.
+    ``status`` separates a specification promise from a shipped model:
+
+    - ``spec-frozen``: components and recipe are product commitments
+      (changes require a minor version + new weight entry), but weights,
+      full-COCO AP and latency are not published yet;
+    - ``released``: downloadable weights + model card + full-COCO AP +
+      reproducible latency are all present (the release gate in
+      ``registry/spectrum_release.py`` enforces this);
+    - ``planned``: declared target still awaiting implementation.
     """
 
     tier: str
     variant_key: str  # key into DETR_MODEL_REGISTRY ("" when planned)
     route: Literal["distill", "assembly-finetune"]
     benchmark_anchor: str
-    status: Literal["frozen", "planned"] = "planned"
+    status: Literal["planned", "spec-frozen", "released"] = "planned"
     note: str = ""
 
 
-#: Product spectrum, P1 state (design doc 29 §3.1, frozen 2026-10-15).
+#: Product spectrum, P1 state (design doc 29 §3.1, spec-frozen 2026-10-15).
 SPECTRUM: dict[str, SpectrumTier] = {
     "n": SpectrumTier(
         tier="n",
         variant_key="hgnetv2-b0",
         route="distill",
         benchmark_anchor="YOLOv8n / YOLO11n",
-        status="frozen",
+        status="spec-frozen",
         note=(
             "D1b: dfine_n official weights do not exist — N is the "
             "distillation-first tier (12ep). Teacher candidates: RF-DETR-n "
             "(Apache, HF), dfine_s decoder knowledge, or GTR-S COCO (MIT, "
             "user-held store — see registry/gtr_assets.py — Intellindust "
             "Gated-Token-Recurrence, decoder shape-compatible with "
-            "dfine_official at hidden 192)."
+            "dfine_official at hidden 192). Phase 0 (2026-10-17): "
+            "spec-frozen only — no pretrained weights or COCO AP yet."
         ),
     ),
     "s": SpectrumTier(
@@ -422,10 +408,11 @@ SPECTRUM: dict[str, SpectrumTier] = {
         variant_key="hgnetv2-b1",
         route="assembly-finetune",
         benchmark_anchor="YOLOv8s / YOLO11s",
-        status="frozen",
+        status="spec-frozen",
         note=(
             "Widths are dfine_s-assembly-compatible; warm-start from the "
-            "Apache-2.0 d-fine/dfine_s_coco asset."
+            "Apache-2.0 d-fine/dfine_s_coco asset. Phase 0 (2026-10-17): "
+            "spec-frozen only — no pretrained weights or COCO AP yet."
         ),
     ),
     "m": SpectrumTier(
@@ -458,21 +445,6 @@ SPECTRUM: dict[str, SpectrumTier] = {
         benchmark_anchor="RT-DETR-R50 / YOLOv8x",
         note="Optional tier on the same timm ConvNeXt line (see the M note).",
     ),
-    # Planned tier WITH a component key (unlike m/l/x): the gtr-s width
-    # recipe exists and assembles (doc 31 G1), but the tier freeze awaits
-    # the G1 acceptance review (D10: planned ≠ product commitment).
-    "gtr-s": SpectrumTier(
-        tier="gtr-s",
-        variant_key="gtr-s",
-        route="assembly-finetune",
-        benchmark_anchor="GTR-S COCO AP 53.6（MIT，官方口径）",
-        status="planned",
-        note=(
-            "Doc 31 G1: decoder assembles from gtr_s_coco EMA "
-            "(hidden 192/FFN 512); frozen pending assembly-coverage and "
-            "COCO trend review."
-        ),
-    ),
 }
 
 
@@ -480,11 +452,15 @@ def list_spectrum_tiers() -> list[str]:
     return sorted(SPECTRUM)
 
 
-#: D10 public model strings: frozen tiers become first-class registry keys
-#: so ``detr/{n,s}`` flow through the standard resolution/training/export
-#: plumbing unchanged. Planned tiers deliberately get NO registry entry.
+#: D10 public model strings: spec-frozen and released tiers become
+#: first-class registry keys so ``detr/{n,s}`` flow through the standard
+#: resolution/training/export plumbing unchanged. Planned tiers
+#: deliberately get NO registry entry.
 for _tier_key, _tier_entry in SPECTRUM.items():
-    if _tier_entry.status == "frozen" and _tier_entry.variant_key:
+    if (
+        _tier_entry.status in {"spec-frozen", "released"}
+        and _tier_entry.variant_key
+    ):
         DETR_MODEL_REGISTRY[_tier_key] = DETR_MODEL_REGISTRY[_tier_entry.variant_key]
 
 
@@ -546,7 +522,7 @@ def check_image_size(image_size: tuple[int, int], spec: DETRVariantSpec) -> None
 
     The detection pipeline is square-only end to end (the scale-jitter
     ladder and the batch resize are square), and the ViT patch grid plus
-    the STA/encoder pyramids assume the 2 × patch divisibility.
+    the encoder pyramid assume the 2 × patch divisibility.
     """
     divisor = detr_image_size_divisor(spec)
     height, width = image_size

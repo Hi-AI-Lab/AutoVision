@@ -80,12 +80,18 @@ class ErrorAnalysisReport:
     report_md: Path
     gallery: list[Path] = field(default_factory=list)
     summary: dict[str, Any] = field(default_factory=dict)
+    hard_examples_json: Path | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "out_dir": str(self.out_dir),
             "report_json": str(self.report_json),
             "report_md": str(self.report_md),
+            "hard_examples_json": (
+                str(self.hard_examples_json)
+                if self.hard_examples_json is not None
+                else None
+            ),
             "gallery": [str(path) for path in self.gallery],
             "summary": dict(self.summary),
         }
@@ -448,6 +454,7 @@ def analyze_detection_errors(
     top_k: int = 5,
     max_boxes_per_image: int = 60,
     area_ranges: Mapping[str, tuple[float, float]] | None = None,
+    split: str = "train",
 ) -> ErrorAnalysisReport:
     """Full error report: matching, slices, top-FP/FN gallery, md + json.
 
@@ -457,8 +464,11 @@ def analyze_detection_errors(
       score; FN tie-break: largest missed area);
     - per-class FP / FN: each class's single worst image (same ranking).
 
-    Files: ``report.json``, ``report.md``, ``gallery/{fp,fn}_all/`` and
-    ``gallery/{fp,fn}_<class>/`` overlays.
+    Files: ``report.json``, ``report.md``, ``hard_examples.json``,
+    ``gallery/{fp,fn}_all/`` and ``gallery/{fp,fn}_<class>/`` overlays.
+    The hard-example manifest records ``split``; the weighted sampler only
+    consumes ``split="train"`` entries, so a val audit cannot leak into
+    training.
     """
     # Internal label ids are the rank in ``sorted(categories)`` BY KEY —
     # the convention of predictions_to_coco / the data loaders / the
@@ -620,10 +630,64 @@ def analyze_detection_errors(
             indent=2,
         )
     )
+    hard_examples: list[dict[str, Any]] = []
+    for image_index, image_path in enumerate(image_paths):
+        image_matches = by_image.get(image_index, [])
+        tp = sum(1 for match in image_matches if match.kind == "tp")
+        fp = sum(1 for match in image_matches if match.kind == "fp")
+        fn = sum(1 for match in image_matches if match.kind == "fn")
+        if not (fp or fn):
+            continue
+        hard_examples.append(
+            {
+                "image": str(Path(image_path).resolve()),
+                "split": split,
+                "tp": tp,
+                "fp": fp,
+                "fn": fn,
+                "fp_reasons": dict(
+                    Counter(
+                        match.fp_reason
+                        for match in image_matches
+                        if match.kind == "fp" and match.fp_reason
+                    )
+                ),
+                "max_fn_area": max(
+                    (
+                        match.area
+                        for match in image_matches
+                        if match.kind == "fn"
+                    ),
+                    default=0.0,
+                ),
+                "classes_fn": sorted(
+                    {
+                        match.class_id
+                        for match in image_matches
+                        if match.kind == "fn"
+                    }
+                ),
+            }
+        )
+    hard_examples_json = out_dir / "hard_examples.json"
+    hard_examples_json.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "source_run": str(out_dir),
+                "split": split,
+                "iou_threshold": float(iou_threshold),
+                "score_threshold": float(score_threshold),
+                "images": hard_examples,
+            },
+            indent=2,
+        )
+    )
     return ErrorAnalysisReport(
         out_dir=out_dir,
         report_json=report_json,
         report_md=report_md,
         gallery=written,
         summary=summary,
+        hard_examples_json=hard_examples_json,
     )

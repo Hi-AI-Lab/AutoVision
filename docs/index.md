@@ -1,19 +1,33 @@
 # AutoVision
 
 企业级视觉模型训练框架：**自监督预训练 / 蒸馏 → 微调 → 评测 → 导出**一条链走完。
-Python API 与 `autovision-cli`（25 条命令）共享同一套 Pydantic 严格校验，覆盖
+Python API 与 `autovision-cli`（30 条命令）共享同一套 Pydantic 严格校验，覆盖
 检测、旋转框、实例 / 全景 / 语义分割、姿态、深度、分类的完整任务面。
 
 框架的三条差异化主线：
 
 - **许可干净**：Apache-2.0；全仓溯源门禁与权重许可门控（受限许可权重默认
   不下载，AGPL 组件仅 extras 隔离），模型库页面对每个权重给出许可与 sha256。
-- **可验证一致性**：ONNX / TensorRT 导出默认执行数值对拍门禁；官方权重加载
-  与前向对拍（含 bit-equal）；金标准 loss 轨迹快照。
+- **可验证一致性**：ONNX / TensorRT / OpenVINO 导出默认执行数值对拍门禁，
+  并输出可移植的后处理规格；官方权重加载与前向对拍（含 bit-equal）；
+  金标准 loss 轨迹快照。
 - **协议化基准**：[基准表](benchmarks.md)只引官方发表值、自家数字必附复现
   脚本、只增不改 + 勘误节。
 
 ## 快速开始
+
+不训练，直接加载发布权重并预测：
+
+```python
+import autovision
+
+model = autovision.detection("rfdetr/rf-detr-small", pretrained=True)
+result = model.predict("image.jpg")   # {'bboxes': ..., 'scores': ..., 'labels': ...}
+model.export("model.onnx")            # parity 门禁 + postprocess 规格
+```
+
+可用模型与导出边界：`autovision-cli list-models --task detection --pretrained`、
+`autovision-cli model-info rfdetr/rf-detr-small`。
 
 目标检测，训练 → 验证 → 预测 → 导出：
 
@@ -35,23 +49,27 @@ model.export("model.onnx")    # 按 .onnx / .engine / .pt 后缀分发
 autovision-cli train-object-detection out=runs/det1 data=data.yaml steps=2000
 autovision-cli val     model=runs/det1/exported_models/exported_best.pt data=coco8
 autovision-cli export  model=runs/det1/exported_models/exported_best.pt out=model.onnx precision=fp16
-autovision-cli predict model=model.pt source=clip.mp4 out=preds/ batch_size=4
+autovision-cli predict model=runs/det1/exported_models/exported_best.pt source=clip.mp4 out=preds/ batch_size=4
 ```
 
 ## 安装
 
-Python ≥ 3.10；模型包按 extras 惰性加载，缺失时对应清单为空而不是报错：
+Python ≥ 3.10。当前尚未上传 PyPI；使用源码安装（模型包按 extras 惰性加载，缺失时
+对应清单为空而不是报错）：
 
 ```bash
-pip install -e .                                # 核心框架(不含第三方模型包)
 pip install -e ".[transformers,timm,export]"    # 常用: HF 骨干 + timm + ONNX 导出
+pip install -e ".[rfdetr,export]"               # 预训练 RF-DETR 直接推理
 pip install -e ".[video]"                       # 参考推理运行时(视频/RTSP, OpenCV)
 pip install -e ".[dev]"                         # 开发(pytest / ruff, CI 同款)
 ```
 
+PyPI 发行名 `autovision-framework` 已预留，首次发布后可用。
+
 GTR 全族（MIT）需要 `gtr` extra；完整 extras 表见仓库 README。预训练权重从
 HuggingFace 下载，受限网络可设镜像；**受限许可权重默认不下载**（DINOv2
 CC-BY-NC 4.0 / DINOv3 License 需显式自证接受条款），许可边界见仓库 `NOTICE`。
+各类权重的下载命令、缓存与镜像配置见[权重下载](download_weights.md)。
 
 ## 能力速览
 
@@ -73,9 +91,20 @@ CC-BY-NC 4.0 / DINOv3 License 需显式自证接受条款），许可边界见�
 |---|---|
 | [模型库](model_zoo.md) | 每模型：许可 / sha256 / 官方指标 / 加载代码（机器生成） |
 | [基准](benchmarks.md) | 精度与延迟基准（不可变协议 + 勘误节） |
+| [导出与部署](export.md) | 动态 H/W / int8 / TensorRT 11 / parity / GTR 部署注记 |
+| [插件协议](plugins.md) | entry-point 插件、API 版本、model_source 接入与模板 |
+| [私有注册表](registry.md) | current / rollback / audit / 部署门禁 |
+| [合规报告](compliance.md) | 依赖许可 / 模型卡 / 数据快照证据包 |
+| [硬件伙伴包](hardware_packs.md) | 一伙伴一包、转换与目标端 parity 契约 |
+| [LTS 政策](lts_policy.md) | LTS 节奏、支持窗口、安全 backport |
+| [支持政策](support_policy.md) | 社区/企业支持、P1–P3 SLA、支持矩阵 |
+| [用户自持权重](user_held_weights.md) | 仓库外 DINOv3 检测器的加载路线与许可边界 |
+| [已知限制](known_limits.md) | 定位、适配缺口、谱系状态、导出边界 |
 | [架构总览](framework_design.md) | as-built 分层契约 / 模块地图 / 质量门禁 |
 | [贡献指南](contributing.md) | 开发环境 / 提交前门禁 / 许可与溯源红线 |
 | [发布流程](release_process.md) | 版本政策 / 发布清单 / 权重发布政策 |
+| [PyPI 发布](pypi_publish.md) | 发行名 / TestPyPI / PyPI / trusted publishing / 排错 |
+| [模型发布](model_publish.md) | 许可审计 / 模型卡 / HF 上传 / 注册表 / 发布门禁 |
 | [变更日志](changelog.md) | Keep a Changelog 格式的对外变更记录 |
 
 ## 许可

@@ -44,13 +44,28 @@ markdown_extensions:
 nav:
   - 首页: index.md
   - 模型库: model_zoo.md
+  - 权重下载: download_weights.md
   - 基准: benchmarks.md
+  - 导出与部署: export.md
+  - 插件协议: plugins.md
+  - 私有注册表: registry.md
+  - 合规报告: compliance.md
+  - 溯源台账: provenance/LEDGER.md
+  - 硬件伙伴包: hardware_packs.md
+  - 用户自持权重: user_held_weights.md
+  - 导入 EoMT 权重: import_eomt.md
+  - 已知限制: known_limits.md
   - 架构总览: framework_design.md
   - 贡献指南: contributing.md
   - 发布流程: release_process.md
+  - PyPI 发布: pypi_publish.md
+  - 模型发布: model_publish.md
+  - LTS 政策: lts_policy.md
+  - 支持政策: support_policy.md
   - 变更日志: changelog.md
 
 # 内部分析稿（决策依据，非对外发布产物）不进入站点；
 # 对应文档自带的「非对外发布产物」状态即此处置的依据。
 exclude_docs: |
   strategy/gap-analysis.md
+  strategy/roadmap_90d_design.md

@@ -166,3 +166,43 @@ class TestSelfTrainingLoop:
         assert Path(report["exported_model"]).exists()
         assert (out_dir / "pseudo" / "train.json").exists()
         assert "[model] 可评测模型:" in result.stdout
+
+    def test_script_multi_round_summary(self, labeled, teacher, tmp_path):
+        """Two rounds: per-round artifacts, promotion, summary + stop reason."""
+        train_json, val_json, images_dir = labeled
+        data_path = tmp_path / "data.json"
+        data_path.write_text(json.dumps(_data_config(train_json, val_json, images_dir)))
+        out_dir = tmp_path / "multi"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts" / "self_train_detect.py"),
+                "--teacher", str(teacher),
+                "--images", str(images_dir),
+                "--val-data", str(data_path),
+                "--out", str(out_dir),
+                "--student", "rtdetr/resnet18",
+                "--steps", "1",
+                "--batch-size", "2",
+                "--devices", "cpu",
+                "--threshold", "0.0",
+                "--pseudo-batch-size", "2",
+                "--rounds", "2",
+                "--model-args", json.dumps(MODEL_ARGS),
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=1800,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        summary = json.loads((out_dir / "summary.json").read_text())
+        assert len(summary["rounds"]) == 2
+        assert summary["stop_reason"] in {"completed", "no_improvement"}
+        assert summary["best_model"] and Path(summary["best_model"]).exists()
+        for index in range(2):
+            round_dir = out_dir / "rounds" / f"r{index}"
+            assert (round_dir / "report.json").is_file()
+            assert (round_dir / "pseudo" / "train.json").is_file()
+        assert (out_dir / "summary.md").is_file()
+        assert "[promote] next teacher:" in result.stdout

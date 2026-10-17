@@ -45,6 +45,8 @@ class PicoDetObjectDetection(ONNXExportMixin, TaskNetwork):
     onnx_export_precision_policy = ONNXExportPrecisionPolicy(
         fp32_onnx_op_types=("Softmax",)
     )
+    #: Export-side postprocess contract marker (see export/postprocess.py).
+    postprocess_spec_family = "picodet"
 
     def __init__(
         self,

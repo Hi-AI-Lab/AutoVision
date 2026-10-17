@@ -36,11 +36,13 @@ from autovision.tasks.task_model import TaskNetwork
 
 __all__ = ["GTRROBBOrientedDetection", "GTR_OBB_VARIANTS"]
 
-#: variant -> (embed_dim, num_heads, ffn_ratio, dim_feedforward); DOTA
-#: finetune configs (S 192/3/4.0/512; the decoder FFN follows the S width).
-GTR_OBB_VARIANTS: dict[str, tuple[int, int, float, int]] = {
-    "s": (192, 3, 4.0, 512),
-    "x": (384, 6, 6.0, 1024),
+#: variant -> (embed_dim, num_heads, ffn_ratio, hidden, dim_feedforward,
+#: num_layers). The decoder runs at ``hidden`` (not the ViT width): the
+#: official X checkpoint is a 384-wide ViT with a 256-wide encoder/decoder,
+#: a 2048 FFN and 4 layers; S coincides at 192 with FFN 512.
+GTR_OBB_VARIANTS: dict[str, tuple[int, int, float, int, int, int]] = {
+    "s": (192, 3, 4.0, 192, 512, 4),
+    "x": (384, 6, 6.0, 256, 2048, 4),
 }
 
 
@@ -69,7 +71,9 @@ class GTRROBBOrientedDetection(ONNXExportMixin, TaskNetwork):
                 f"Unknown GTR OBB variant '{variant}'; expected one of "
                 f"{sorted(GTR_OBB_VARIANTS)}."
             )
-        embed_dim, num_heads, ffn_ratio, dim_feedforward = GTR_OBB_VARIANTS[variant]
+        embed_dim, num_heads, ffn_ratio, hidden, dim_feedforward, num_layers = (
+            GTR_OBB_VARIANTS[variant]
+        )
         self.num_classes = num_classes
         self.variant = variant
         self.image_size = tuple(image_size)
@@ -84,7 +88,7 @@ class GTRROBBOrientedDetection(ONNXExportMixin, TaskNetwork):
         )
         self.encoder = GTREncoder(
             in_channels=[embed_dim] * 3,
-            hidden_dim=embed_dim,
+            hidden_dim=hidden,
             scale_factors=[2.0, 1.0, 0.5],
             feat_strides=[8, 16, 32],
             num_blocks=3,
@@ -93,9 +97,9 @@ class GTRROBBOrientedDetection(ONNXExportMixin, TaskNetwork):
         )
         self.decoder = OBBGTRTransformer(
             num_classes=num_classes,
-            hidden_dim=embed_dim,
+            hidden_dim=hidden,
             num_queries=num_queries,
-            feat_channels=[embed_dim] * 3,
+            feat_channels=[hidden] * 3,
             feat_strides=[8, 16, 32],
             num_levels=3,
             num_points=[3, 6, 3],
@@ -103,7 +107,7 @@ class GTRROBBOrientedDetection(ONNXExportMixin, TaskNetwork):
             # INDEPENDENT of the backbone's head count (measured: the S
             # checkpoint's sampling_offsets are 8 x sum(points) wide).
             nhead=8,
-            num_layers=4,
+            num_layers=num_layers,
             dim_feedforward=dim_feedforward,
             activation="silu",
             num_denoising=num_denoising,

@@ -172,12 +172,228 @@ def extract_video_frames_command(arguments: list[str] = typer.Argument(None)) ->
 
 
 @app.command("list-models")
-def list_models_command() -> None:
-    """Print all available model names."""
-    from autovision import list_models
+def list_models_command(
+    task: str | None = typer.Option(
+        None, "--task", help="Filter the task catalog (e.g. detection)."
+    ),
+    pretrained: bool = typer.Option(
+        False, "--pretrained", help="Only models with full task weights."
+    ),
+    planned: bool = typer.Option(
+        False, "--planned", help="Include planned catalog entries."
+    ),
+    format: str = typer.Option(
+        "names", "--format", help="names | table | json (catalog views)."
+    ),
+) -> None:
+    """Print available models.
 
-    for name in list_models():
-        typer.echo(name)
+    Without catalog flags this keeps the historical encoder-name listing.
+    With ``--task`` / ``--pretrained`` / ``--format`` it prints the curated
+    task catalog (roadmap phase 1).
+    """
+    if task is None and not pretrained and format == "names":
+        from autovision import list_models
+
+        for name in list_models():
+            typer.echo(name)
+        return
+
+    from autovision.registry.catalog import (
+        format_model_table,
+        list_task_models,
+    )
+
+    entries = list_task_models(
+        task=task, pretrained_only=pretrained, include_planned=planned
+    )
+    if format == "names":
+        for entry in entries:
+            typer.echo(entry.key)
+    elif format == "json":
+        typer.echo(
+            json.dumps([entry.to_dict() for entry in entries], indent=2)
+        )
+    elif format == "table":
+        typer.echo(format_model_table(entries))
+    else:
+        raise typer.BadParameter(
+            "--format must be one of names/table/json (catalog views)."
+        )
+
+
+@app.command("model-info")
+def model_info_command(
+    key: str = typer.Argument(..., help="Task model key, e.g. rfdetr/rf-detr-small.")
+) -> None:
+    """Print license, weights, metrics and export surface for one model."""
+    from autovision.registry.catalog import describe_model
+
+    try:
+        typer.echo(describe_model(key))
+    except KeyError as error:
+        raise typer.BadParameter(str(error)) from error
+
+
+@app.command("data-check")
+def data_check_command(arguments: list[str] = typer.Argument(None)) -> None:
+    """Audit a detection dataset (images / boxes / duplicates / leakage).
+
+        autovision-cli data-check data=coco.yaml out=qa/ [near_duplicate=true]
+        autovision-cli data-check data=coco.yaml out=qa/ fail_on=warning
+    """
+    from autovision.cli.data_check import data_check
+
+    kwargs = _parse_kwargs(list(arguments or []))
+    out = kwargs.pop("out", None)
+    if out is None:
+        raise typer.BadParameter("data-check needs out=<directory>.")
+    if "data" not in kwargs:
+        raise typer.BadParameter("data-check needs data=<yaml|dict|coco8>.")
+    fail_on = str(kwargs.pop("fail_on", "error"))
+    if fail_on not in {"error", "warning", "none"}:
+        raise typer.BadParameter("fail_on must be error | warning | none.")
+    report = data_check(out=out, **kwargs)
+    typer.echo(report.summary_text())
+    typer.echo(f"report: {report.report_md}")
+    if report.has_errors and fail_on in {"error", "warning"}:
+        raise typer.Exit(code=1)
+    if report.has_warnings and fail_on == "warning":
+        raise typer.Exit(code=1)
+
+
+@app.command("plugins")
+def plugins_command(arguments: list[str] = typer.Argument(None)) -> None:
+    """Discover and inspect ``autovision.plugins`` entry points.
+
+        autovision-cli plugins action=list
+        autovision-cli plugins action=check
+    """
+    from autovision.plugins import discover_plugins, list_plugins
+
+    kwargs = _parse_kwargs(list(arguments or []))
+    action = str(kwargs.pop("action", "list"))
+    if kwargs:
+        raise typer.BadParameter(
+            f"Unknown plugins key(s) {sorted(kwargs)}; accepted: action."
+        )
+    if action not in {"list", "check"}:
+        raise typer.BadParameter("plugins action must be list | check.")
+    result = discover_plugins()
+    for error in result.errors:
+        typer.echo(f"error {error.entry_point}: {error.error}", err=True)
+    if action == "check":
+        if result.errors:
+            raise typer.Exit(code=1)
+        typer.echo(f"plugins ok ({len(result.loaded)} loaded)")
+        return
+    for plugin in list_plugins():
+        typer.echo(
+            f"{plugin.kind}\t{plugin.name}\t{plugin.version}\t"
+            f"api={plugin.api_version}\t{plugin.description}"
+        )
+
+
+@app.command("compliance-report")
+def compliance_report_command(arguments: list[str] = typer.Argument(None)) -> None:
+    """Enterprise compliance pack (dependency licenses / model / dataset).
+
+        autovision-cli compliance-report model=best.pt snapshot=qa/data.snap.json out=compliance/
+        autovision-cli compliance-report model=best.pt out=compliance/ include_dependencies=false
+    """
+    from autovision.cli.compliance_report import compliance_report
+
+    kwargs = _parse_kwargs(list(arguments or []))
+    strict = bool(kwargs.pop("strict", False))
+    report = compliance_report(**kwargs)
+    typer.echo(report.summary_text())
+    typer.echo(f"json: {report.report_json}")
+    typer.echo(f"markdown: {report.report_md}")
+    if strict and report.errors:
+        raise typer.Exit(code=1)
+
+
+@app.command("registry")
+def registry_command(arguments: list[str] = typer.Argument(None)) -> None:
+    """Private model registry: register / promote / rollback / current / audit.
+
+        autovision-cli registry action=register file=best.pt name=det v=1.0.0
+        autovision-cli registry action=promote name=det v=1.0.0 to=staging gates=all
+        autovision-cli registry action=rollback name=det stage=prod to=0.9.0 reason="regression"
+        autovision-cli registry action=current name=det stage=prod
+    """
+    import os
+
+    from autovision.registry import ModelRegistry, default_gates
+
+    kwargs = _parse_kwargs(list(arguments or []))
+    action = str(kwargs.pop("action", ""))
+    root = kwargs.pop("root", os.environ.get("AUTOVISION_REGISTRY_ROOT", "runs/registry"))
+    actor = kwargs.pop("actor", None)
+    registry = ModelRegistry(root)
+    if action == "register":
+        file = kwargs.pop("file", None)
+        name = kwargs.pop("name", None)
+        version = kwargs.pop("v", kwargs.pop("version", None))
+        if file is None or name is None or version is None:
+            raise typer.BadParameter("register needs file= name= v=")
+        entry = registry.register(
+            file, name=str(name), version=str(version),
+            stage=str(kwargs.pop("stage", "dev")),
+            metadata=kwargs.pop("metadata", None),
+            actor=actor,
+        )
+        typer.echo(json.dumps(entry.to_manifest(), indent=2, sort_keys=True))
+    elif action == "promote":
+        name = kwargs.pop("name", None)
+        version = kwargs.pop("v", kwargs.pop("version", None))
+        if name is None or version is None:
+            raise typer.BadParameter("promote needs name= v=")
+        gates_arg = str(kwargs.pop("gates", "all"))
+        if gates_arg == "none":
+            gates = []
+        elif gates_arg == "all":
+            gates = default_gates()
+        else:
+            raise typer.BadParameter("gates must be all | none.")
+        entry = registry.promote(
+            name=str(name), version=str(version),
+            to_stage=str(kwargs.pop("to", "staging")),
+            gates=gates, actor=actor, reason=kwargs.pop("reason", None),
+        )
+        typer.echo(json.dumps(entry.to_manifest(), indent=2, sort_keys=True))
+    elif action == "rollback":
+        name = kwargs.pop("name", None)
+        to_version = kwargs.pop("to", None)
+        if name is None or to_version is None:
+            raise typer.BadParameter("rollback needs name= to=<version>")
+        entry = registry.rollback(
+            name=str(name), stage=str(kwargs.pop("stage", "prod")),
+            to_version=str(to_version), reason=kwargs.pop("reason", None),
+            actor=actor,
+        )
+        typer.echo(json.dumps(entry.to_manifest(), indent=2, sort_keys=True))
+    elif action == "current":
+        name = kwargs.pop("name", None)
+        if name is None:
+            raise typer.BadParameter("current needs name=")
+        entry = registry.current(name=str(name), stage=str(kwargs.pop("stage", "prod")))
+        typer.echo(json.dumps(entry.to_manifest(), indent=2, sort_keys=True))
+    elif action == "list":
+        stage = kwargs.pop("stage", None)
+        for entry in registry.list_entries(stage=stage):
+            typer.echo(
+                f"{entry.stage}\t{entry.name}\t{entry.version}\t{entry.sha256[:12]}"
+            )
+    elif action == "audit":
+        for record in registry.audit_log():
+            typer.echo(json.dumps(record, sort_keys=True))
+    else:
+        raise typer.BadParameter(
+            "registry action must be register | promote | rollback | current | list | audit."
+        )
+    if kwargs:
+        raise typer.BadParameter(f"Unknown registry key(s): {sorted(kwargs)}")
 
 
 @app.command("list-methods")
@@ -213,10 +429,18 @@ def predict_command(arguments: list[str] = typer.Argument(None)) -> None:
         autovision-cli predict model=model.pt images=dir/ out=preds/ threshold=0.5
         autovision-cli predict model=model.pt source=clip.mp4 out=preds/ batch_size=4
         autovision-cli predict model=model.pt source=rtsp://host/live out=preds/ backend=onnx artifact=model.onnx
+        autovision-cli predict model=model.pt sources=rtsp://a,rtsp://b out=preds/ batch_size=4
     """
     kwargs = _parse_kwargs(list(arguments or []))
     if "out" in kwargs:
         kwargs["out_dir"] = kwargs.pop("out")
+    if "sources" in kwargs:
+        if "out_dir" not in kwargs:
+            raise typer.BadParameter("sources= requires out=<directory>")
+        from autovision.inference import run_multi_stream
+
+        typer.echo(run_multi_stream(**kwargs).summary())
+        return
     if "source" in kwargs:
         if "out_dir" not in kwargs:
             raise typer.BadParameter("source= requires out=<directory>")
@@ -255,6 +479,8 @@ def analyze_errors_command(arguments: list[str] = typer.Argument(None)) -> None:
     typer.echo(json.dumps(report.summary["totals"], indent=2))
     typer.echo(f"report: {report.report_md}")
     typer.echo(f"gallery: {len(report.gallery)} images under {report.out_dir / 'gallery'}")
+    if report.hard_examples_json is not None:
+        typer.echo(f"hard examples: {report.hard_examples_json}")
 
 
 @app.command("export")
@@ -479,6 +705,8 @@ def convert_data_command(arguments: list[str] = typer.Argument(None)) -> None:
         autovision-cli convert-data from=voc voc-root=VOC2007/ out=voc_train.json imagesets=train
         autovision-cli convert-data from=yolo-pose images=img/ names=person.yaml out=pose.json
         autovision-cli convert-data from=yolo-seg images=img/ names=a.yaml out=seg.json
+        autovision-cli convert-data from=cvat cvat-xml=annotations.xml images=img/ out=train.json
+        autovision-cli convert-data from=label-studio ls-json=export.json images=img/ out=train.json
         autovision-cli convert-data from=merge parts=a.json,b.json out=merged.json
     """
     from autovision.data.convert import (
@@ -489,6 +717,7 @@ def convert_data_command(arguments: list[str] = typer.Argument(None)) -> None:
         yolo_seg_to_coco,
         yolo_to_coco,
     )
+    from autovision.data.interchange import cvat_to_coco, label_studio_to_coco
 
     kwargs = _parse_kwargs(list(arguments or []))
     source = str(kwargs.pop("from", ""))
@@ -533,10 +762,20 @@ def convert_data_command(arguments: list[str] = typer.Argument(None)) -> None:
         if isinstance(parts, str):
             parts = [part for part in parts.split(",") if part]
         typer.echo(str(merge_coco(parts, **kwargs)))
+    elif source == "cvat":
+        xml_path = kwargs.pop("cvat_xml", None) or kwargs.pop("xml", None)
+        if xml_path is None:
+            raise typer.BadParameter("from=cvat requires cvat-xml=<annotations.xml>")
+        typer.echo(str(cvat_to_coco(xml_path=xml_path, **kwargs)))
+    elif source == "label-studio":
+        json_path = kwargs.pop("ls_json", None) or kwargs.pop("json", None)
+        if json_path is None:
+            raise typer.BadParameter("from=label-studio requires ls-json=<export.json>")
+        typer.echo(str(label_studio_to_coco(json_path=json_path, **kwargs)))
     else:
         raise typer.BadParameter(
             "from= must be one of 'yolo', 'coco', 'voc', 'yolo-pose', "
-            "'yolo-seg', 'merge'"
+            "'yolo-seg', 'cvat', 'label-studio', 'merge'"
         )
 
 

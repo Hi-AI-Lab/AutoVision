@@ -1,12 +1,13 @@
 # Copyright (c) 2026 AutoVision contributors. Apache-2.0.
-"""GTR assets: local MIT checkpoints for every GTR task surface (doc 31).
+"""GTR assets: upstream MIT checkpoints for every GTR task surface (doc 31).
 
 The Intellindust GTR checkpoints ({model, ema, last_epoch} payloads) are
 registered here with pinned sha256 digests so consumption is verifiable
 end to end (``verify_gtr_asset``). Checkpoints are MIT-licensed
-(HuggingFace ``Phoenix8125/GTR`` front matter); the files stay in the
-user-held store (:data:`GTR_ASSET_ROOT`: ``AUTOVISION_GTR_ROOT`` override,
-else the first existing known location) — this registry pins identity, not
+(HuggingFace ``Phoenix8125/GTR`` front matter); the binary files are
+fetched on demand from the upstream repo into the GTR store
+(:data:`GTR_ASSET_ROOT`: ``AUTOVISION_GTR_ROOT`` override) by
+``scripts/download_gtr_assets.py`` — this registry pins identity, not
 distribution.
 
 Task groups (roadmap doc 31 §11): the whole family shares one backbone
@@ -29,6 +30,8 @@ __all__ = [
     "GTRAsset",
     "GTR_ASSET_ROOT",
     "GTR_ASSETS",
+    "GTR_HF_REPO",
+    "GTR_HF_REVISION",
     "GTR_SEG_VARIANTS",
     "GTR_SEMSEG_VARIANTS",
     "gtr_assets_for_task",
@@ -57,7 +60,13 @@ def _resolve_asset_root() -> Path:
 
 
 GTR_ASSET_ROOT = _resolve_asset_root()
-_GTR_HF = "https://huggingface.co/Phoenix8125/GTR"
+GTR_HF_REPO = "Phoenix8125/GTR"
+#: Upstream HF commit for the GTR family. ``None`` means the downloader
+#: resolves the current ``main`` commit (and prints it); pin the printed
+#: commit here after the first download for a reproducible URL. Every
+#: asset's sha256 is the byte-level identity and is always enforced.
+GTR_HF_REVISION: str | None = None
+_GTR_HF = f"https://huggingface.co/{GTR_HF_REPO}"
 
 
 @dataclass(frozen=True)
@@ -72,11 +81,31 @@ class GTRAsset:
     num_classes: int = 80
     num_keypoints: int | None = None
     source: str = _GTR_HF
+    #: HF revision (commit hash) for this checkpoint; ``None`` lets the
+    #: downloader resolve and print the current upstream commit.
+    revision: str | None = None
     #: Benchmark value from the GTR README for this checkpoint.
     metric_name: str | None = None
     metric_value: float | None = None
     #: Detection-AP alias kept for the pre-multi-task consumers.
     coco_ap: float | None = None
+
+    @property
+    def hf_filename(self) -> str:
+        """Path of this checkpoint inside the upstream HF repository."""
+        return self.path.relative_to(GTR_ASSET_ROOT).as_posix()
+
+    @property
+    def model_num_classes(self) -> int:
+        """Class-head width the checkpoint expects.
+
+        The det-obj365 checkpoints ship 365 dataset classes plus a
+        no-object slot (366-wide score heads, 367-wide denoising embed);
+        building the detection target with 365 silently drops the
+        class-dependent tensors (coverage 0.8281). Other GTR tasks use
+        ``num_classes`` directly.
+        """
+        return self.num_classes + 1 if self.task == "det-obj365" else self.num_classes
 
 
 #: Semantic-segmentation widths (configs/semseg/cityscapes_finetune +
@@ -97,9 +126,11 @@ GTR_SEMSEG_VARIANTS: dict[str, tuple[int, int, float, int]] = {
 
 #: Instance-segmentation backbone widths (configs/seg/coco_seg_finetune +
 #: checkpoint shapes, 2026-10-16): variant -> (embed_dim, num_heads,
-#: ffn_ratio); decoder hidden/FFN width follows the same table as
-#: detection (S: 192/512, M: 256/1024, L: 384/1024, X: 384/1024 — only S
-#: is registered as a task variant today, see the S2 record).
+#: ffn_ratio). The encoder/decoder hidden width follows the detection
+#: stack (S 192/512; M 256/1024; L/X 256/1024/2048) and is carried by the
+#: ``gtrvit-*`` detection specs (``backbone_embed_dim`` keeps the L/X
+#: 384-wide ViT separate). All four variants are registered as task
+#: variants now.
 GTR_SEG_VARIANTS: dict[str, tuple[int, int, float]] = {
     "s": (192, 3, 4.0),
     "m": (256, 4, 4.0),
@@ -114,6 +145,7 @@ def _asset(relative: str, sha256: str, *, task: str = "det", **kwargs) -> GTRAss
         path=GTR_ASSET_ROOT / relative,
         sha256=sha256,
         task=task,
+        revision=GTR_HF_REVISION,
         **kwargs,
     )
 

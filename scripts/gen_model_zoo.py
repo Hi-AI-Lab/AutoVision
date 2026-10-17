@@ -47,6 +47,10 @@ from autovision.encoders.weight_hashes import WEIGHT_MANIFEST  # noqa: E402
 from autovision.registry.apache_assets import register_apache_assets  # noqa: E402
 from autovision.registry.downloadable import ASSET_MANIFEST  # noqa: E402
 from autovision.registry.gtr_assets import GTR_ASSETS  # noqa: E402
+from autovision.registry.model_cards import rfdetr_model_cards  # noqa: E402
+from autovision.registry.spectrum_release import (  # noqa: E402
+    validate_spectrum_release,
+)
 from autovision.registry.user_held_assets import USER_HELD_ASSETS  # noqa: E402
 from autovision.tasks.detection.detr.variants import SPECTRUM  # noqa: E402
 from autovision.tasks.detection.shared.open_vocab import (  # noqa: E402
@@ -54,6 +58,17 @@ from autovision.tasks.detection.shared.open_vocab import (  # noqa: E402
 )
 
 register_apache_assets()
+
+#: RF-DETR official cards (license / sha256 / COCO AP / params / input).
+_RF_DETR_CARDS = rfdetr_model_cards(WEIGHT_MANIFEST)
+
+#: Fail closed: a tier marked released without its asset/card/AP/latency
+#: must not be rendered as a public model.
+_RELEASE_PROBLEMS = validate_spectrum_release(SPECTRUM)
+if _RELEASE_PROBLEMS:
+    raise SystemExit(
+        "spectrum release gate failed:\n  - " + "\n  - ".join(_RELEASE_PROBLEMS)
+    )
 
 #: Official published latency for the GTR detection tiers — GTR paper
 #: table (RTX 4090 / FP16 / batch 1 / torch.compile + CUDA Graphs,
@@ -67,8 +82,9 @@ _GTR_DET_LATENCY_MS: dict[str, float] = {
 }
 
 #: One-line role for every WEIGHT_MANIFEST entry: repo_id -> (接入键, 说明).
-#: "预备资产" means the pin exists (license cleared, sha256 verified) but no
-#: public model key consumes it yet — verified by grepping the tree.
+#: "未接线" means the pin exists (sha256 verified) but no public model key
+#: consumes it yet; external converted weights may still need a per-card
+#: license review (DEIMv2 upstream is non-commercial).
 _HF_ROLES: dict[str, tuple[str, str]] = {
     "Roboflow/rf-detr-nano": ("rfdetr/rf-detr-nano", "检测变体（HF transformers 路径；`-notpretrained` 可离线构建）"),
     "Roboflow/rf-detr-small": ("rfdetr/rf-detr-small", "同上"),
@@ -76,9 +92,9 @@ _HF_ROLES: dict[str, tuple[str, str]] = {
     "Roboflow/rf-detr-base": ("rfdetr/rf-detr-base", "同上"),
     "Roboflow/rf-detr-large": ("rfdetr/rf-detr-large", "同上"),
     "google/siglip-base-patch16-224": ('open_vocab.text_encoder="siglip-base"', "开放词表文本塔（SigLIP）"),
-    "harshaljanjani/DEIMv2_HGNetv2_N_COCO_Transformers": ("（未接线）", "预备资产：检测谱系蒸馏/装配路线候选"),
-    "harshaljanjani/DEIMv2_HGNetv2_PICO_COCO_Transformers": ("（未接线）", "预备资产：同上（PICO 档）"),
-    "harshaljanjani/DEIMv2_DINOv3_S_COCO_Transformers": ("（未接线）", "预备资产：同上（DINOv3 骨干）"),
+    "harshaljanjani/DEIMv2_HGNetv2_N_COCO_Transformers": ("（未接线）", "外部转换权重；DEIMv2 上游非商用，许可需按卡复核"),
+    "harshaljanjani/DEIMv2_HGNetv2_PICO_COCO_Transformers": ("（未接线）", "外部转换权重（PICO 档）；许可需按卡复核"),
+    "harshaljanjani/DEIMv2_DINOv3_S_COCO_Transformers": ("（未接线）", "外部转换权重（DINOv3 骨干）；DINOv3/DEIMv2 条款需按卡复核"),
     "openai/clip-vit-base-patch32": ('open_vocab.text_encoder="clip-b32"', "开放词表文本塔（CLIP）"),
     "openai/clip-vit-base-patch16": ('open_vocab.text_encoder="clip-b16"', "开放词表文本塔（CLIP）"),
     "facebook/dinov2-small": ("dinov2/vits14-noreg", "骨干（不带 register）"),
@@ -226,7 +242,8 @@ def _render() -> str:
     add("|---|---|---|---|---|")
     add(
         f"| GTR 官方家族 | {len(GTR_ASSETS)} | MIT | 来源 HF `Phoenix8125/GTR`，"
-        "存本地目录（`AUTOVISION_GTR_ROOT`） | `src/autovision/registry/gtr_assets.py` |"
+        "按需下载到 `AUTOVISION_GTR_ROOT`（仓库不携带二进制） "
+        "| `src/autovision/registry/gtr_assets.py` |"
     )
     add(
         f"| HF 权重清单 | {len(WEIGHT_MANIFEST)} | Apache-2.0 / MIT / CC-BY-NC-4.0 / "
@@ -251,6 +268,13 @@ def _render() -> str:
     add(
         "整族共享一套 GLA 骨干（`ViTAdapterSpatialSwiGLU`）+ `GTREncoder`，"
         "各任务只换头 / 解码器；权重为官方 **EMA 口径**（官方所有发表数字均用 EMA）。\n"
+    )
+    add(
+        "权重二进制不随仓库分发：用 `scripts/download_gtr_assets.py` 从上游 HF "
+        "`Phoenix8125/GTR` 按需下载到 `AUTOVISION_GTR_ROOT`（默认 "
+        "`~/Research/Model/gtr`），逐文件核验 sha256；上游 revision 可钉住"
+        "（下载器会在首次解析后打印实际 commit）。上游若为 gated，先 "
+        "`hf auth login`；区域镜像用 `HF_ENDPOINT`。\n"
     )
     add("| 任务 | 变体 | 资产 | 官方指标 | 官方延迟 (ms) | sha256 |")
     add("|---|---|---|---|---|---|")
@@ -302,7 +326,7 @@ def _render() -> str:
         'resolve_gtr_asset("gtrpose_s_coco")   # 文件不存在 / sha256 不符即抛 GTRAssetError'
     )
     add("```\n")
-    add("### 2.2 检测线（`detr/gtr-s` / `detr/gtrvit-s`）\n")
+    add("### 2.2 检测线（`detr/gtrvit-s`）\n")
     add(
         "检测的官方权重经一步**装配**（`build_dfine_official_warm_start`，"
         "EMA 口径 + 解码器覆盖率门）后以 `model_args.warm_start` 注入；"
@@ -320,12 +344,6 @@ def _render() -> str:
     )
     add("")
     add('asset = resolve_gtr_asset("gtr_s_coco")            # MIT；sha256 核验')
-    add('build_dfine_official_warm_start("gtr-s", out="ws_gtr_s.pt", checkpoint=asset.path,')
-    add('    backbone_pretrained=False, license_id="MIT", origin=asset.source,')
-    add('    source_format="gtr")')
-    add('autovision.train_object_detection(out="runs/gtr-s", data="coco.yaml", model="detr/gtr-s",')
-    add('    model_args={"warm_start": "ws_gtr_s.pt"})')
-    add("")
     add("# `detr/gtrvit-s`（GLA 骨干线，需 `gtr` extra + CUDA）：装配 encoder+decoder，")
     add("# 骨干状态单独提取")
     add("import torch")
@@ -342,19 +360,35 @@ def _render() -> str:
     add('    model="detr/gtrvit-s", model_args={"warm_start": "ws_gtrvit_s.pt",')
     add('    "backbone_weights": "gtr_s_backbone.pth"})')
     add("```\n")
+    add("GTR 变体补充（2026-10-17）：\n")
+    add(
+        "- `gtrvit-{s,m,l,x}`：完整 GTR ViT 检测目标；M/L/X 已注册，装配后 "
+        "encoder/decoder coverage 1.0（L/X 的 ViT 384 宽，encoder/decoder 256 宽，"
+        "由 `backbone_embed_dim` 区分）。推理应走这一线。"
+    )
+    add(
+        "- Objects365 检测头是 **366** 类（365 数据集类 + no-object）；装配时用 "
+        "`GTRAsset.model_num_classes`，不要传 365（会丢掉 class-dependent tensors）。"
+    )
+    add("- `gtr/*` 实例分割任务族现支持 `s/m/l/x`（此前只注册了 `s`）。\n")
 
     # ── §3 spectrum ────────────────────────────────────────────────────
     add("## 3. 检测档位谱系（`detr/n` … `detr/x`）\n")
     add(
         "产品档位的冻结状态与骨干线方向记录在 `tasks/detection/detr/variants.py` "
-        "的 `SPECTRUM` 表（机器可读）：`frozen` 为产品承诺档，`planned` 为方向已定、"
-        "实现待落地。\n"
+        "的 `SPECTRUM` 表（机器可读）：`released` 为已发布档（权重 + 模型卡 + "
+        "全量 AP + 延迟齐备），`spec-frozen` 为规格冻结档（组件与配方已承诺，"
+        "预训练权重 / AP 待发布），`planned` 为方向已定、实现待落地。\n"
     )
     add("| 档位 | 变体键 | 路线 | 状态 | 基准锚点 |")
     add("|---|---|---|---|---|")
     _ROUTE = {"distill": "蒸馏", "assembly-finetune": "装配微调"}
-    _STATUS = {"frozen": "**frozen**（公开档位）", "planned": "planned"}
-    for tier in ("n", "s", "m", "l", "x", "gtr-s"):
+    _STATUS = {
+        "released": "**released**（已发布）",
+        "spec-frozen": "**spec-frozen**（规格冻结，权重/AP 待发布）",
+        "planned": "planned",
+    }
+    for tier in ("n", "s", "m", "l", "x"):
         entry = SPECTRUM[tier]
         key = f"`{entry.variant_key}`" if entry.variant_key else "—"
         add(
@@ -362,37 +396,60 @@ def _render() -> str:
             f"| {entry.benchmark_anchor} |"
         )
     add("")
+    add(
+        "`released` 是唯一带预训练权重的状态，由 "
+        "`autovision.registry.spectrum_release` 的发布门禁校验；当前 `n/s` 为 "
+        "`spec-frozen`，需用 `scripts/train_spectrum.py` 自行训练、"
+        "`scripts/eval_spectrum_coco.py` 产出全量 AP。\n"
+    )
     add("```python")
     add(
-        'model = autovision.detection("detr/s")   # 冻结档位；n/s 已冻结，'
-        "m/l/x 方向 = timm ConvNeXt 线（实现中）"
+        'model = autovision.detection("detr/s")   # 规格冻结档；n/s 权重/AP 待发布，'
+        "m/l/x 为 planned"
     )
     add("```\n")
 
     # ── §4 HF manifest ─────────────────────────────────────────────────
     add("## 4. HF 权重清单（revision + sha256 钉住）\n")
     add(
-        "预训练骨干与开放词表文本塔，按许可分组。CC-BY-NC / DINOv3 License 默认"
+        "预训练骨干、RF-DETR 检测权重与开放词表文本塔，按许可分组。CC-BY-NC / DINOv3 License 默认"
         "**不下载**：设 `AUTOVISION_DINOV2_WEIGHTS=1` / `AUTOVISION_DINOV3_WEIGHTS=1` "
         "表示已自行接受对应条款。sha256 列为该资产按文件名排序的首个权重文件"
         "（双格式资产另有 `pytorch_model.bin`、多分片资产另有其余分片，完整清单见注册表）。"
         "`revision` 为 8 位短哈希，完整值见注册表。\n"
     )
-    add("| 资产（HF repo） | 许可 | 接入键 / 角色 | revision | sha256 |")
-    add("|---|---|---|---|---|")
+    add("| 资产（HF repo） | 许可 | 接入键 / 角色 | 官方指标 | revision | sha256 |")
+    add("|---|---|---|---|---|---|")
     for license_id, label in _LICENSE_GROUPS:
-        add(f"| **{label}** | | | | |")
+        add(f"| **{label}** | | | | | |")
         for repo_id in WEIGHT_MANIFEST:
             artifact = WEIGHT_MANIFEST[repo_id]
             if artifact.license != license_id:
                 continue
             key, role = _HF_ROLES[repo_id]
+            card = _RF_DETR_CARDS.get(key)
+            if card is None:
+                metrics_cell = "—"
+            elif card.metrics:
+                values = card.metrics
+                metrics_cell = (
+                    f"AP {values['coco_map']:.1f} / {values['coco_map50']:.1f} · "
+                    f"{values['params_m']:.1f}M · {int(values['input_px'])}²"
+                )
+            else:
+                metrics_cell = "—（上游弃用）"
             file_name = _hf_main_file(artifact)
             add(
                 f"| `{repo_id}` | {license_id} | `{key}`（{role}） "
+                f"| {metrics_cell} "
                 f"| `{artifact.revision[:8]}` | `{artifact.sha256[file_name][:12]}` |"
             )
     add("")
+    add(
+        "RF-DETR 行官方指标为 COCO val2017 AP / AP50、Params（M）与输入尺寸，"
+        "来源为 Roboflow 官方口径；T4 / TensorRT 延迟与许可说明见"
+        "[基准](benchmarks.md) §3.1。Base 上游已弃用，当前官方表不再发布指标。\n"
+    )
     add("一行加载（骨干走模型键；开放词表文本塔经 `model_args` 接线）：\n")
     add("```python")
     add(
@@ -435,13 +492,17 @@ def _render() -> str:
         "7 个第三方训练的 COCO 检测器（DINOv3 骨干 + 第三方检测头）经合规重打包，"
         "逐位忠实性对拍后存于**仓库之外**（默认 `~/Research/Model/AutoVision`，"
         "`AUTOVISION_USER_HELD_ROOT` 覆盖）；不进可下载清单、不随仓库或导出产物分发。"
-        "**禁再分发、禁商用**，使用即视为已自行接受相应条款。\n"
+        "**禁再分发、禁商用**，使用即视为已自行接受相应条款。其中 3 个 ViT 资产为 "
+        "STA-era（含 `backbone.sta.*`），DEIMv2 派生 spatial prior 删除后不再受支持；"
+        "4 个 ConvNeXt 资产不受影响。\n"
     )
     add("| 资产 | 加载 model 键 | 构建覆盖（加载必需） | weights sha256 |")
     add("|---|---|---|---|")
     for name in USER_HELD_ASSETS:
         asset = USER_HELD_ASSETS[name]
-        if asset.dec_layers is not None:
+        if asset.requires_removed_sta:
+            override = "不可用（STA 已删除；需重训 no-STA 检查点）"
+        elif asset.dec_layers is not None:
             override = f"`dec_layers={asset.dec_layers}` + `decoder_hidden_dim={asset.decoder_hidden_dim}`"
         else:
             override = "无（变体规格配方）"
@@ -466,7 +527,7 @@ def _render() -> str:
     add("|---|---|")
     add("| `AUTOVISION_DINOV2_WEIGHTS=1` | 显式接受 DINOv2 权重条款（CC-BY-NC）后允许下载 |")
     add("| `AUTOVISION_DINOV3_WEIGHTS=1` | 显式接受 DINOv3 License 后允许下载 |")
-    add("| `AUTOVISION_GTR_ROOT` | GTR 检查点目录（默认 `~/Research/Model/gtr`） |")
+    add("| `AUTOVISION_GTR_ROOT` | GTR 检查点目录（`scripts/download_gtr_assets.py` 写入；默认 `~/Research/Model/gtr`） |")
     add("| `AUTOVISION_USER_HELD_ROOT` | 用户自持库目录（默认 `~/Research/Model/AutoVision`） |")
     add("| `AUTOVISION_OFFLINE=1` | 禁止联网（只用本地资产） |")
     add("| `AUTOVISION_MIRROR_URL` / `HF_ENDPOINT` | 下载镜像端点 |")

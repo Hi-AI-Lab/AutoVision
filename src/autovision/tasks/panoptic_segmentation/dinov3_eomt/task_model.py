@@ -12,12 +12,15 @@ from autovision.tasks.panoptic_segmentation.dinov2_eomt.task_model import (
 )
 from autovision.tasks.semantic_segmentation.dinov3_eomt.task_model import (
     Dinov3EomtSemanticSegmentation,
+    _Dinov3EomtCheckpointMixin,
 )
 
 __all__ = ["Dinov3EomtPanopticSegmentation"]
 
 
-class Dinov3EomtPanopticSegmentation(Dinov2EomtPanopticSegmentation):
+class Dinov3EomtPanopticSegmentation(
+    _Dinov3EomtCheckpointMixin, Dinov2EomtPanopticSegmentation
+):
     """DINOv3 backbone/head with the panoptic decode: queries become a
     per-pixel (class, segment) map plus per-segment scores."""
 

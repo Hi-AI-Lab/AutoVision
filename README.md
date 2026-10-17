@@ -1,73 +1,435 @@
 # AutoVision
 
-企业级视觉模型训练框架:自监督预训练 → 蒸馏 → 微调 → 评测 → 导出。
-同一套 Pydantic 严格校验驱动 Python API 与 `autovision-cli`,覆盖检测、旋转框、
-实例/全景/语义分割、姿态、深度、分类等任务面。
+企业级视觉模型训练框架：自监督预训练 / 蒸馏 → 微调 → 评测 → 导出与部署。
+Python API 与 `autovision-cli`（30 条命令）共享同一套 Pydantic 严格校验，覆盖检测、旋转框、实例 / 全景 / 语义分割、姿态、深度、分类。
+
+当前版本 **0.3.0（Beta）**。适合需要自托管训练、评测、导出和私有部署的团队；不提供托管 API，也不替代生产网关。核心代码 Apache-2.0，受限许可权重默认不下载。
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-Apache--2.0-green)
+![Status](https://img.shields.io/badge/status-beta-yellow)
+
+- **许可边界清晰**：核心代码 Apache-2.0；DINOv2 / DINOv3 等受限权重默认不下载，AGPL 组件仅通过 extras 隔离；[模型库](docs/model_zoo.md)逐资产给出许可与 sha256。
+- **可验证一致性**：导出默认数值对拍门禁；已接入的官方权重加载 / 前向逐位对拍；金标准 loss 轨迹快照。
+- **协议化基准**：[基准表](docs/benchmarks.md)只引官方发表值；自家数字必附复现脚本；只增不改并附勘误节。
+
+文档：[模型库](docs/model_zoo.md) · [权重下载](docs/download_weights.md) · [基准](docs/benchmarks.md) ·
+[架构总览](docs/framework_design.md) · [导出与部署](docs/export.md) ·
+[插件协议](docs/plugins.md) · [私有注册表](docs/registry.md) ·
+[合规报告](docs/compliance.md) · [硬件伙伴包](docs/hardware_packs.md) ·
+[用户自持权重](docs/user_held_weights.md) · [LTS 政策](docs/lts_policy.md) ·
+[支持政策](docs/support_policy.md) · [已知限制](docs/known_limits.md) ·
+[贡献](CONTRIBUTING.md)
+
+**目录**：[安装](#安装) · [快速开始](#快速开始) · [任务入口](#任务入口) ·
+[能力与子系统](#能力与子系统) · [模型与指标](#模型与指标) ·
+[导出与部署](#导出与部署) · [推理运行时与服务](#推理运行时与服务) ·
+[进阶功能](#进阶功能) · [致谢](#致谢acknowledgements) · [开发](#开发) ·
+[已知限制](#已知限制) · [许可与溯源](#许可与溯源)
 
 ## 安装
 
-Python ≥ 3.10。模型包按 extras 惰性加载,缺失时对应清单为空而不是报错:
+Python ≥ 3.10。当前尚未上传 PyPI；以下源码安装是可用路径。PyPI 发行名
+`autovision-framework` 已预留（import 名仍是 `autovision`），首次发布后下述 PyPI
+命令才会生效。
+
+从源码安装（在仓库根目录执行）：
 
 ```bash
-pip install -e .                                # 核心框架(不含第三方模型包)
-pip install -e ".[transformers,timm,export]"    # 常用:HF 骨干 + timm + ONNX 导出
-pip install -e ".[dev]"                         # 开发(pytest / ruff,CI 同款)
+# 常用：HF 骨干 + timm + ONNX 导出
+pip install -e ".[transformers,timm,export]"
+
+# 预训练 RF-DETR 直接推理
+pip install -e ".[rfdetr,export]"
+
+# 开发：pytest / ruff（CI 同款）
+pip install -e ".[dev]"
 ```
+
+```bash
+# PyPI 首发后可用（当前包尚未上传）
+pip install "autovision-framework[transformers,timm,export]"
+```
+
+> PyPI 上另有一个无关的 `autovision` 0.0.1 包；`pip install autovision` 不会安装本项目。
+
+<details>
+<summary>extras 一览（模型包 / 运行时 / 记录器 / 开发）</summary>
 
 | extras | 能力 |
 |---|---|
-| `transformers` | `dinov2/*`、`dinov3/*` 骨干(HuggingFace 权重) |
-| `timm` | timm 注册表全量模型(任意输入通道数) |
-| `super-gradients` | CustomizableDetector 检测家族(分割 wrapper 未接入) |
-| `ultralytics`(AGPL) | YOLOv5/6/8/11/12/26、RT-DETR(隔离加载) |
-| `rfdetr` | `rf-detr-{base,nano,small,medium,large}`(需较新 transformers) |
-| `gtr` | GTR GLA 骨干(`detr/gtrvit-s`);Triton 前向需 CUDA |
-| `export` | ONNX 导出管线(onnx / onnxruntime / onnxslim) |
-| `video` | 参考推理运行时的视频/流 I/O(OpenCV,文件 + RTSP/HTTP) |
-| `openvino` | OpenVINO IR 导出 + 运行时后端(CPU 优先,可切 GPU/AUTO) |
-| `serving` | 参考推理 serving(FastAPI + uvicorn;`/predict` 批处理 + `/metrics`) |
-| `lsap` | 检测匹配器批量线性分配求解(CUDA;自动回退 scipy) |
-| `tensorboard` / `mlflow` / `wandb` | 训练记录器,缺失时惰性降级 |
+| `transformers` | `dinov2/*`、`dinov3/*` 骨干（HuggingFace 权重） |
+| `timm` | timm 注册表全量模型（任意输入通道数） |
+| `rfdetr` | `rfdetr/rf-detr-{base,nano,small,medium,large}`（需较新 transformers） |
+| `super-gradients` | CustomizableDetector 检测家族（分割 wrapper 未接入） |
+| `ultralytics`（AGPL） | YOLOv5/6/8/11/12/26、RT-DETR（隔离加载） |
+| `gtr` | GTR GLA 骨干（`detr/gtrvit-*`）；Triton 前向需 CUDA |
+| `download` | GTR 上游权重按需下载（`huggingface_hub`） |
+| `export` | ONNX 导出管线（onnx / onnxruntime / onnxslim） |
+| `openvino` | OpenVINO IR 导出 + 运行时后端（CPU 优先，可切 GPU/AUTO） |
+| `video` | 参考推理运行时的视频 / 流 I/O（OpenCV，文件 + RTSP/HTTP） |
+| `serving` | 参考 serving（FastAPI + uvicorn；`/predict` 批处理 + `/metrics`） |
+| `lsap` | 检测匹配器批量线性分配求解（CUDA；自动回退 scipy） |
+| `tensorboard` / `mlflow` / `wandb` | 训练记录器，缺失时惰性降级 |
 | `bitsandbytes` | 8-bit AdamW |
+| `dev` | pytest / ruff（CI 同款） |
+| `docs` | MkDocs Material（`mkdocs build --strict`） |
 
-预训练权重从 HuggingFace 下载;受限网络设镜像 `HF_ENDPOINT=https://hf-mirror.com`
-(框架侧开关:`AUTOVISION_MIRROR_URL` / `AUTOVISION_OFFLINE`)。`-notpretrained`
-变体离线本地构建。**权重许可**:dinov2 权重 CC-BY-NC 4.0、dinov3 权重 DINOv3
-License,默认均不下载——需分别设 `AUTOVISION_DINOV2_WEIGHTS=1` /
-`AUTOVISION_DINOV3_WEIGHTS=1` 自证已接受对应条款;不受限的干净路径是
-`-notpretrained` + 本框架自监督预训练(政策见 [NOTICE](NOTICE))。
+</details>
+
+注：`super-gradients` 与 `export` / `transformers` / `rfdetr` / `video` 互斥
+（上游钉死 onnxruntime / protobuf / numpy 版本；同时安装会由 pip/uv 报错）。
+
+可选系统依赖：`ffmpeg`（`extract-video-frames`）、`matplotlib`（`plot-curves`）、
+CUDA / Triton（GTR 前向）、TensorRT（TensorRT 引擎导出）。
+
+预训练权重从 HuggingFace 下载；受限网络设镜像 `HF_ENDPOINT=https://hf-mirror.com`
+（框架侧开关：`AUTOVISION_MIRROR_URL` / `AUTOVISION_OFFLINE`）。`-notpretrained`
+变体离线本地构建。**权重许可**：DINOv2 权重 CC-BY-NC 4.0、DINOv3 权重 DINOv3
+License，默认均不下载——需分别设 `AUTOVISION_DINOV2_WEIGHTS=1` /
+`AUTOVISION_DINOV3_WEIGHTS=1` 自证已接受对应条款；不受限的干净路径是
+`-notpretrained` + 本框架自监督预训练（政策见 [NOTICE](NOTICE)）。完整下载命令、
+缓存位置与镜像配置见[权重下载](docs/download_weights.md)。
 
 ## 快速开始
 
-目标检测,训练 → 验证 → 预测 → 导出:
+以下示例依赖 `rfdetr` + `export` extra：
+
+```bash
+pip install -e ".[rfdetr,export]"
+```
+
+不训练，直接加载发布权重并预测：
 
 ```python
 import autovision
 
-data = autovision.ensure_coco8()   # 合成冒烟数据集;换 COCO/YOLO 配置、YAML 路径或字面量 "coco8"
+model = autovision.detection("rfdetr/rf-detr-small", pretrained=True)
+result = model.predict("image.jpg")   # {'bboxes': ..., 'scores': ..., 'labels': ...}
+model.export("model.onnx")            # 默认 parity 门禁 + postprocess 规格
+```
+
+可用模型、许可与导出边界：
+
+```bash
+autovision-cli list-models --task detection --pretrained
+autovision-cli model-info rfdetr/rf-detr-small
+```
+
+目标检测，训练 → 验证 → 预测 → 导出：
+
+```python
+import autovision
+
+data = autovision.ensure_coco8()   # 本地生成的 8 张冒烟数据集；可换 COCO/YOLO 配置
 model = autovision.detection("rtdetr/resnet18").train(
     out="runs/det1", data=data, steps=2000, batch_size="auto",
 )
 model.val(data=data)          # {'map': ..., 'map_50': ...}
 model.predict("image.jpg")    # {'bboxes': ..., 'scores': ..., 'labels': ...}
-model.export("model.onnx")    # 按 .onnx / .engine / .pt 后缀分发
+model.export("model.onnx")    # 按 .onnx / .engine / .xml / .pt 后缀分发
 ```
 
-等价命令行(同一套 Pydantic 校验):
+等价命令行（同一套 Pydantic 校验）：
 
 ```bash
 autovision-cli train-object-detection out=runs/det1 data=data.yaml steps=2000
 autovision-cli val     model=runs/det1/exported_models/exported_best.pt data=coco8
-autovision-cli predict model=model.pt images=dir/ out=preds/ threshold=0.5
+autovision-cli predict model=runs/det1/exported_models/exported_best.pt images=dir/ out=preds/ threshold=0.5
 ```
 
-<details>
-<summary>更多用法:自监督预训练 / 分类 / 分割 / 函数式 API / 大图切片 / 全部命令</summary>
+## 任务入口
 
-自监督预训练与蒸馏:
+所有任务共用同一套 API / CLI 形式；主要差异在 `data` 结构与必填参数。
+
+| 任务 | Python API / CLI | 默认 model | `data` 结构 | 额外要求 |
+|---|---|---|---|---|
+| 检测 | `train_object_detection` / `train-object-detection` | `rtdetr/resnet18` | COCO / YOLO；VOC 先 `convert-data`；`coco8` 可冒烟 | — |
+| 旋转框 | `train_oriented_object_detection` / `train-oriented-object-detection` | `rtdetr-obb/resnet18` | YOLO-OBB（8 点角点） | — |
+| 实例分割 | `train_instance_segmentation` / `train-instance-segmentation` | `dinov2/eomt` | COCO instances JSON + images | `transformers` extra；必填 `num_classes` |
+| 全景分割 | `train_panoptic_segmentation` / `train-panoptic-segmentation` | `dinov2/eomt` | images + masks PNG + segments JSON | `transformers` extra |
+| 语义分割 | `train_semantic_segmentation` / `train-semantic-segmentation` | `torchvision/resnet18` | images + masks PNG | 必填 `num_classes` |
+| 姿态 | `train_pose_estimation` / `train-pose-estimation` | `gtr/s` | COCO `person_keypoints` JSON + images | `gtr` extra；官方权重需 `download` |
+| 深度 | `train_depth_estimation` / `train-depth-estimation` | `gtr/s` | images + depths（`.npy` 米或 16-bit PNG） | `gtr` extra；官方权重需 `download` |
+| 分类 | `train_image_classification` / `train-image-classification` | `torchvision/resnet18` | ImageFolder `train/`、`val/` | — |
+
+`dinov2/eomt` 与 GTR 模型分别依赖 DINOv2 权重与 GTR 官方权重；离线或受限网络
+环境请使用 `-notpretrained` 变体、本地 checkpoint，或先按许可说明设置权重门控。
+GTR 官方权重可用 `scripts/download_gtr_assets.py` 下载。
+
+<details>
+<summary>最小示例：旋转框 / 实例分割 / 姿态 / 分类 / 语义分割</summary>
+
+```python
+import autovision
+
+# 旋转框：data.yaml 使用 YOLO-OBB 布局
+autovision.train_oriented_object_detection(
+    out="runs/obb",
+    data="obb.yaml",
+    model="rtdetr-obb/resnet18",
+)
+
+# 实例分割：COCO instances JSON
+autovision.train_instance_segmentation(
+    out="runs/ins",
+    data={
+        "train": {"annotations": "instances_train.json", "images": "train2017"},
+        "val": {"annotations": "instances_val.json", "images": "val2017"},
+    },
+    num_classes=80,
+    model="dinov2/eomt",
+)
+
+# 姿态：COCO person_keypoints；官方权重直载
+autovision.train_pose_estimation(
+    out="runs/pose",
+    data={
+        "train": {
+            "annotations": "person_keypoints_train2017.json",
+            "images": "train2017",
+        },
+        "val": {
+            "annotations": "person_keypoints_val2017.json",
+            "images": "val2017",
+        },
+    },
+    model="gtr/s",
+    model_args={"checkpoint": "gtrpose_s_coco"},
+)
+
+# 分类：ImageFolder（每个子目录一个类别）
+autovision.train_image_classification(
+    out="runs/cls",
+    data={"train": "data/train/", "val": "data/val/"},
+    model="torchvision/resnet18",
+)
+
+# 语义分割：成对 images / masks，255 为忽略标签
+autovision.train_semantic_segmentation(
+    out="runs/seg",
+    data={"train": {"images": "images/", "masks": "masks/"}},
+    num_classes=3,
+    model="torchvision/resnet18",
+)
+```
+
+</details>
+
+## 能力与子系统
+
+- **一套校验、两个入口**：Python API 与 `autovision-cli`（30 条命令）共享 Pydantic
+  严格校验；拼错或越界直接报错（did-you-mean）。
+- **模型面**：7 个注册源（torchvision、timm、super-gradients、ultralytics（AGPL
+  隔离）、dinov2、dinov3、rfdetr）+ 树内 `rtdetr/*`、`detr/*`、`dfine/*`、
+  `picodet/*`、`rfdetr/*`、`gtr/*` 装配，覆盖检测、分割、姿态、深度、分类。
+- **训练与数据**：自监督预训练（DINO / DINOv2 / DINOv3、SimCLR、DetCon 等）、
+  蒸馏、DDP / 混合精度 / 原子 checkpoint + resume；mmap 文件清单与 VOC / YOLO
+  转换。
+- **部署与闭环**：ONNX / TensorRT / OpenVINO + 数值对拍；伪标注、误差分析、HPO、
+  内容寻址快照，均带 CLI。
+
+<details>
+<summary>子系统总览（配置 / 数据 / 方法 / 运行时 / 任务 / 部署）</summary>
+
+| 子系统 | 能力 |
+|---|---|
+| 配置 / 注册 | Pydantic 严格校验 + did-you-mean 报错 + Registry；CLI 与 API 同一套校验 |
+| 模型来源 | 7 个注册源：`torchvision`、`timm`、`super_gradients`、`ultralytics`（AGPL 隔离）、`dinov2`、`dinov3`、`rfdetr`；`custom` 兜底；`arch_traits()` → `weight_decay="auto"` 按架构解析；树内 `rtdetr/*` 无第三方包 |
+| 数据 / 变换 | 图像、ImageFolder 分类、成对分割、COCO 关键点、深度图；mmap 文件清单（引用计数 / 原子发布 / 碰撞守卫 / 数据指纹）；ViewTransform 管线 + MethodTransform 多视图协议；VOC / YOLO-pose / YOLO-seg 转换与 COCO 合并 |
+| 预训练方法 | DistillationV3（全规格）、SimCLR（NT-Xent）、DINO（EMA 教师 + 中心化损失 + 多裁剪 + 动量/温度/权重衰减三调度）、DINOv2 / DINOv3、DenseCL / DetCon B/S、训练中 kNN 探针 |
+| 运行时 | step 循环、预训练与任务训练双 DDP、混合精度、原子 checkpoint + resume、`on_before_optimizer_step` 钩子、自描述 checkpoint 格式 |
+| 任务层 | 检测：`rtdetr/*`、`detr/*`、`dfine/*`、`picodet/*`、`rfdetr/*`；旋转框：`rtdetr-obb/*`、`gtr/*`；分割：实例 / 全景 / 语义；姿态、深度、分类；任务指标支持跨 rank 状态汇聚（DDP 验证）；误差分析（FP 归因 + 面积/类别切片 + top-FP/FN 画廊）与伪标注/自训练闭环 |
+| 部署 | ONNX（FP16 黑名单 + 数值对拍门禁）、TensorRT（batch-only profile、attention FP32）、benchmark（torch / ONNX / TensorRT + parity 门禁，报告携带参数量/FLOPs）、模型成本（`measure_model_cost`）、`export` CLI（导出件后缀分发）、参考推理运行时（视频/RTSP + batch，torch/ONNX/TRT 同源前后处理） |
+
+</details>
+
+## 模型与指标
+
+41 个已注册检测键（39 个规格变体 + 2 个产品档位别名）、26 个 GTR 官方权重、
+7 个用户自持检测器（其中 3 个 STA-era 当前不可加载）。许可、sha256、官方指标与
+加载代码见[模型库](docs/model_zoo.md)。
+
+<details>
+<summary>检测谱系 <code>detr/*</code>（41 个注册键）</summary>
+
+| 骨干族 | 变体 | 数量 |
+|---|---|---|
+| DINOv2 ViT（patch 14） | `vits14` / `vitb14` / `vitl14` / `vitg14`，各带 `-noreg` 与 `-notpretrained`；`vittest-notpretrained` 为离线测试变体 | 13 |
+| DINOv3 ViT（patch 16） | `vits16` / `vitb16` / `vitl16` / `vitt16` / `vitt16plus`；`-eupe` 架构别名，各档带 `-notpretrained` | 13 |
+| DINOv3 ConvNeXt | `tiny` / `small` / `base` / `large`；`-eupe` 架构别名 | 7 |
+| GTR GLA 骨干 | `gtrvit-s` / `gtrvit-m` / `gtrvit-l` / `gtrvit-x`（需 `gtr` extra） | 4 |
+| timm HGNetV2 | `hgnetv2-b0` / `hgnetv2-b1` | 2 |
+| **规格小计** | | **39** |
+| 产品档位别名 | `detr/n` → `hgnetv2-b0`，`detr/s` → `hgnetv2-b1` | 2 |
+| **注册键总计** | | **41** |
+
+DINOv2 与 DINOv3 ViT 均使用 no-STA adapter（语义 tap 直投 `hidden_dim`）；DINOv3
+ViT 保留，但含 `backbone.sta.*` 的旧检查点会被加载器拒绝。DINOv3 ConvNeXt 末三段
+stage tap，整骨干走 backbone LR。
+
+`detr/n` / `detr/s` 为 spec-frozen（规格冻结，预训练权重 / AP 待发布）；
+`detr/m/l/x` 为 planned，尚未注册。编码器 / 解码器配方逐变体携带，不共享单一全局默认。
+
+</details>
+
+<details>
+<summary>GTR 多任务家族（26 个官方权重，MIT）</summary>
+
+Intellindust GTR（MIT）整族 26 个官方权重已在 `autovision.registry.gtr_assets`
+注册（sha256 全钉住、上游 revision 可钉住，`resolve_gtr_asset` 解析、
+`verify_gtr_asset` 离线核验）。二进制不随仓库分发；用
+`python scripts/download_gtr_assets.py --all` 从上游 HF `Phoenix8125/GTR`
+按需下载到 `AUTOVISION_GTR_ROOT`（默认 `~/Research/Model/gtr`；需
+`pip install -e ".[download]"`；上游 gated 时先 `hf auth login`）。
+整族共享一套 GLA 骨干（`ViTAdapterSpatialSwiGLU`）+ `GTREncoder`，各任务只换
+头 / 解码器。
+
+| 任务 | model 键 | 变体 | 官方指标 | 权重资产 |
+|---|---|---|---|---|
+| 检测 COCO | `detr/gtrvit-<s\|m\|l\|x>` | s/m/l/x | AP 53.6 / 57.3 / 58.9 / 59.4 | `gtr_{s,m,l,x}_coco` |
+| 检测 Obj365 预训练 | —（作检测初始化权重） | s/m/l/x | — | `gtr_{s,m,l,x}_obj365` |
+| 实例分割 COCO | `gtr/<s\|m\|l\|x>` | s/m/l/x | mask AP 45.0 / 47.7 / 49.5 / 49.8 | `gtrseg_{s,m,l,x}_coco` |
+| 语义分割 Cityscapes | `gtr/<s\|m\|l\|x>` | s/m/l/x | mIoU 81.5 / 83.0 / 83.2 / 83.3 | `gtrsemseg_{s,m,l,x}_cityscapes` |
+| 深度 NYU | `gtr/<s\|m\|l\|x>` | s/m/l/x | absRel 0.074 / 0.069 / 0.069 / 0.067 | `gtrdepth_{s,m,l,x}` |
+| 旋转框 DOTA | `gtr/<s\|x>` | s/x | AP50 80.0 / 81.3 | `gtrobb_{s,x}_dota` |
+| 姿态 COCO | `gtr/<s\|m\|l\|x>` | s/m/l/x | kp AP 70.1 / 74.1 / 74.7 / 75.5 | `gtrpose_{s,m,l,x}_coco` |
+
+`gtr/*` 任务族用 `model_args={"checkpoint": "<注册资产名或路径>"}` 直载官方权重
+后微调，不传即随机初始化。上述任务组的权重加载与前向数值对拍已打通（检测解码器
+谱系金标准见 `tests/test_gtr_integration.py`；姿态全链读数与 delta 见
+[docs/benchmarks.md](docs/benchmarks.md)）。GTR 前向依赖 Triton（CUDA，`gtr` extra），
+且不可导出 ONNX / TensorRT。
+
+</details>
+
+### 用户自持权重库（仓库外，不可再分发）
+
+7 个第三方训练的 COCO 检测器（DINOv3 骨干 + 第三方检测头）经合规重打包——张量
+逐位不变，容器与元数据换为框架格式并携带一等许可块，逐位忠实性对拍（logits /
+boxes 逐位相等）——存于**仓库之外**（默认 `~/Research/Model/AutoVision`，
+`AUTOVISION_USER_HELD_ROOT` 覆盖）。资产表与 sha256 见[模型库](docs/model_zoo.md)；
+两条加载路线与离线核验见[用户自持权重指南](docs/user_held_weights.md)。
+
+其中 `dinov3-vitt16` / `dinov3-vitt16plus` / `dinov3-vits16` 为 STA-era
+（含 `backbone.sta.*`），STA 删除后加载器会明确拒绝；4 个 ConvNeXt 资产仍可加载。
+
+**许可边界**（`DINOv3-License+NOASSERTION`）：骨干继承 DINOv3 License 义务，检测头
+无许可声明（默认保留全部权利）。**禁再分发、禁商用**；不随仓库或导出产物分发，
+不注册可下载资产清单（`ASSET_MANIFEST`）。使用即视为已自行接受相应条款。
+
+## 导出与部署
+
+需要 `export` extra；导出 OpenVINO `.xml` 另需 `openvino` extra，TensorRT 引擎需
+自行安装 `tensorrt`。
+
+```python
+result = autovision.train_object_detection(out="runs/det1", data="coco8", steps=2000)
+model = autovision.load_task_model(result.best_exported_model_path)   # 导出件 → 任务模型
+model.export_onnx("model.onnx", precision="fp16")                     # FP16 + 数值对拍门禁
+model.export_tensorrt("model.engine", precision="fp16")               # 需自行安装 tensorrt
+
+autovision.benchmark("rtdetr/resnet18", out="bench/", num_classes=2,
+                     backends={"torch": {}, "onnx": {"provider": "cpu"}},
+                     verify_parity=True)
+
+autovision.measure_model_cost(model)   # 参数量 / FLOPs（含 MACs；benchmark 报告内同样携带）
+```
+
+等价命令行（导出件后缀分发 `.onnx` / `.engine` / `.xml`）：
+
+```bash
+autovision-cli export model=runs/det1/exported_models/exported_best.pt out=model.onnx precision=fp16
+autovision-cli export model=runs/det1/exported_models/exported_best.pt out=model.onnx dynamic_spatial=true
+autovision-cli export model=runs/det1/exported_models/exported_best.pt out=model.xml        # OpenVINO IR（对拍门禁）
+autovision-cli export model=runs/det1/exported_models/exported_best.pt out=model.engine precision=int8 calibration_data=calib_images/
+```
+
+检测任务的 ONNX / OpenVINO / TensorRT 导出件旁会写 `<artifact>.postprocess.json`：
+记录 top-k、分数阈值、原图映射与预处理（resize / mean / std）；DETR 家族走 top-k，
+PicoDet 额外带 class-offset NMS。设备侧可用
+`autovision.export.decode_detections_numpy` 复现最终框；
+`autovision.export.verify_end_to_end_parity` 比较最终框 / 分数 / 类别，而不是
+张量求和，适合作为跨后端发布门禁。
+
+int8 全量 AP 报告（同 split / 同前后处理，默认 AP 下降 ≤ 1.0）：
+
+```bash
+python scripts/measure_int8_accuracy.py --model best.pt --data coco.yaml \
+    --calibration-images calib/ --out bench/int8 --max-images 5000
+```
+
+设备侧最小 C++ 参考实现见 `examples/cpp/`（ONNX Runtime + OpenCV；host-only
+后处理测试只需 g++）。
+
+动态 H/W 支持面、int8 首层 fp32 配方、TensorRT 11 适配与 parity 跳过条件见
+[导出与部署细节](docs/export.md)。
+
+## 推理运行时与服务
+
+视频 / RTSP 参考推理（`autovision.inference`，需 `.[video]`；后端换 `onnx` /
+`tensorrt` / `openvino` 时附 `artifact=` 编译产物，前后处理与评测同源）：
+
+```bash
+autovision-cli predict model=exported_best.pt source=clip.mp4 out=preds/ batch_size=4
+autovision-cli predict model=exported_best.pt source=rtsp://camera/live out=preds/ backend=onnx artifact=model.onnx
+autovision-cli predict model=exported_best.pt source=clip.mp4 out=preds/ backend=openvino artifact=model.xml openvino_device=CPU
+```
+
+输出 `out_dir/predictions.jsonl`（逐帧框，原始像素）+ `out_dir/annotated.mp4`（渲染画面）。
+
+多路视频 / RTSP（共享批处理、每路独立产物、断流重连、队列背压）：
+
+```bash
+autovision-cli predict model=exported_best.pt sources=rtsp://cam1/live,rtsp://cam2/live \
+    out=preds/ batch_size=4 queue_size=8 drop_policy=drop_oldest
+```
+
+每路输出 `out/<source>/predictions.jsonl` 与 `annotated.mp4`，汇总
+`out/summary.json`（帧数 / 丢弃 / 重连 / 错误）。`drop_policy` 可选
+`drop_oldest`（实时优先）或 `block`（离线批处理）；`max_frames_per_source` /
+`max_seconds` 可限制运行。v1 不做跨路跟踪 / ReID。
+
+<details>
+<summary>ByteTrack 跟踪（class-aware，官方门限语义）</summary>
+
+卡尔曼运动模型 + 三阶段 IoU 关联，class-aware，官方门限：新轨迹需
+`score ≥ track_thresh + 0.1` 且连续两帧命中才发布（首帧例外）、低分框 `>0.1`
+只维持轨迹不新建。`age` 是轨迹创建以来的帧数；tracker 接收源视频的真实帧率，
+`track_buffer` 按该帧率折算丢失窗口。
+
+```bash
+autovision-cli predict model=exported_best.pt source=clip.mp4 out=preds/ track=true
+```
+
+JSONL 逐帧增加 `tracks`（`track_id` / `bbox` / `score` / `class_id` / `age`），
+渲染画面标注 `#id 类别 分数`，汇总带唯一 id 数；API 侧 `run_stream(..., track=True)`。
+
+</details>
+
+<details>
+<summary>参考 serving（FastAPI：/predict、/healthz、/metrics）</summary>
+
+需要 `.[serving]`，属参考实现而非生产网关：
+
+```bash
+autovision-cli serve model=exported_best.pt port=8000
+```
+
+- `POST /predict`：`{"images": ["<base64>", ...]}`（或单张 `{"image": ...}`），
+  批处理按输入顺序返回，前后处理与评测同源；
+- `GET /healthz`：后端 / 模型 / threshold；
+- `GET /metrics`：Prometheus 文本（请求数 / 错误数 / 图片数 / 延迟 summary）。
+
+</details>
+
+**边界**：不提供鉴权、TLS、多进程编排；漂移检测 / A-B / 金丝雀不在范围内——
+`/metrics` 是它们的起点，按产品需求在其上构建。
+
+## 进阶功能
+
+<details>
+<summary>自监督预训练与蒸馏</summary>
 
 ```python
 result = autovision.pretrain(
@@ -81,186 +443,40 @@ result = autovision.pretrain(
 print(result.exported_model_path, result.metrics)
 ```
 
-分类 / 语义分割微调:
+</details>
 
-```python
-autovision.train_image_classification(
-    out="runs/cls1",
-    data={"train": "data/train/", "val": "data/val/"},
-    model="torchvision/resnet18",
-)
-autovision.train_semantic_segmentation(
-    out="runs/seg1",
-    data={"train": {"images": "images/", "masks": "masks/"}},
-    num_classes=3,
-    model="torchvision/resnet18",
-)
-```
+<details>
+<summary>大图切片推理（SAHI）</summary>
 
-函数式 API 与检测 handle 同源(`.train()` 是它的薄包装),另有
-`train_oriented_object_detection` / `train_instance_segmentation` /
-`train_panoptic_segmentation` / `train_pose_estimation` /
-`train_depth_estimation`,均带同名 CLI 命令。
-GTR 权重直载示例:`model_args={"checkpoint": "gtrpose_s_coco"}`。
-
-大图切片推理(SAHI):`autovision.tasks.shared.sahi` 的 `tile_image` +
-`combine_object_detection_tiles`;检测模型另有
-`predict_sahi(image, tile_size, overlap, threshold, ...)`(默认 tile 取模型
-输入尺寸,全图 resize 视图作全局瓦片一并推理)。
-
-命令行全表:`pretrain`、`train-object-detection`、
-`train-oriented-object-detection`、`train-image-classification`、
-`train-instance-segmentation`、`train-panoptic-segmentation`、
-`train-semantic-segmentation`、`train-pose-estimation`、
-`train-depth-estimation`、`val`、`predict`、`export`、`benchmark`、`embed`、
-`download`、`convert-data`、`plot-curves`(需 `pip install matplotlib`)、
-`extract-video-frames`、`list-models`、`list-methods`、
-`pseudo-label`、`analyze-errors`、`hpo`、`serve`、`data-snapshot`。
+`autovision.tasks.shared.sahi` 提供 `tile_image` + `combine_object_detection_tiles`；
+检测模型另有 `predict_sahi(image, tile_size, overlap, threshold, ...)`（默认 tile
+取模型输入尺寸，全图 resize 视图作全局瓦片一并推理）。
 
 </details>
 
-## 能力总览
+<details>
+<summary>数据版本化（内容寻址快照）</summary>
 
-| 子系统 | 能力 |
-|---|---|
-| 配置 / 注册 | Pydantic 严格校验 + did-you-mean 报错 + Registry;CLI 与 API 同一套校验 |
-| 模型来源 | 7 个注册源:`torchvision`、`timm`、`super_gradients`、`ultralytics`(AGPL 隔离)、`dinov2`、`dinov3`、`rfdetr`;`custom` 兜底;`arch_traits()` → `weight_decay="auto"` 按架构解析;树内 `rtdetr/*` 无第三方包 |
-| 数据 / 变换 | 图像、ImageFolder 分类、成对分割、COCO 关键点、深度图;mmap 文件清单(引用计数 / 原子发布 / 碰撞守卫 / 数据指纹);ViewTransform 管线 + MethodTransform 多视图协议;VOC / YOLO-pose / YOLO-seg 转换与 COCO 合并 |
-| 预训练方法 | DistillationV3(全规格)、SimCLR(NT-Xent)、DINO(EMA 教师 + 中心化损失 + 多裁剪 + 动量/温度/权重衰减三调度)、DINOv2 / DINOv3、DenseCL / DetCon B/S、训练中 kNN 探针 |
-| 运行时 | step 循环、预训练与任务训练双 DDP、混合精度、原子 checkpoint + resume、`on_before_optimizer_step` 钩子、自描述 checkpoint 格式 |
-| 任务层 | 检测:`rtdetr/*`、`detr/*`、`dfine/*`、`picodet/*`、`rfdetr/*`;旋转框:`rtdetr-obb/*`、`gtr/*`;分割:实例 / 全景 / 语义;姿态、深度、分类;任务指标支持跨 rank 状态汇聚(DDP 验证);误差分析(FP 归因 + 面积/类别切片 + top-FP/FN 画廊)与伪标注/自训练闭环 |
-| 部署 | ONNX(FP16 黑名单 + 数值对拍门禁)、TensorRT(batch-only profile、attention FP32)、benchmark(torch / ONNX / TensorRT + parity 门禁，报告携带参数量/FLOPs)、模型成本(`measure_model_cost`)、`export` CLI(导出件后缀分发)、参考推理运行时(视频/RTSP + batch,torch/ONNX/TRT 同源前后处理) |
-
-## 模型与指标
-
-### 检测谱系 `detr/*`(39 个已注册变体)
-
-| 骨干族 | 变体 | 装配 |
-|---|---|---|
-| DINOv2 ViT(patch 14) | `vits14` / `vitb14` / `vitl14` / `vitg14`,各带 `-noreg` 与 `-notpretrained`;`vittest-notpretrained` 为离线测试变体 | 13 个;NoSTA——语义 tap 直投 `hidden_dim` |
-| DINOv3 ViT(patch 16) | `vits16` / `vitb16` / `vitl16` / `vitt16` / `vitt16plus`,`-eupe` 架构别名见 `vits16` / `vitb16` / `vitt16`,各档带 `-notpretrained` | 13 个;STA,`conv_inplane = factor × patch_size` |
-| DINOv3 ConvNeXt | `tiny` / `small` / `base` / `large`,`-eupe` 架构别名见 `tiny` / `small` / `base` | 7 个;末三段 stage tap,整骨干走 backbone LR |
-| timm HGNetV2 + GTR 解码器装配 | `hgnetv2-b0` / `hgnetv2-b1`,冻结档位 `n` / `s`,`gtr-s` | 5 个;`n` 走蒸馏路线,`s` 走装配微调 |
-| GTR GLA 骨干 | `gtrvit-s`(`gtr_tiny_spatial_swiglu` + `GTREncoder`,需 `gtr` extra) | 1 个 |
-
-档位谱系方向冻结于 2026-10-15:`n` / `s` 已冻结为公开档位,`m` / `l` / `x` 骨干线
-待定,`gtr-s` 待装配覆盖与趋势评审。编码器 / 解码器配方(隐藏维、FFN 宽、采样点、
-层数)逐变体携带,不共享单一全局默认。
-
-### 用户自持权重库(D1-a:仓库外,不可再分发)
-
-7 个第三方训练的 COCO 检测器(DINOv3 骨干 + 第三方检测头)经合规重打包——张量
-逐位不变,容器与元数据换为我方格式并携带一等许可块,逐位忠实性对拍(logits /
-boxes 逐位相等)——存于**仓库之外**的用户自持库(默认
-`~/Research/Model/AutoVision`,`AUTOVISION_USER_HELD_ROOT` 覆盖),每个资产为
-`weights.pt` + `warm_start.pt` + `ASSET.json` 三件套:
-
-| 资产名 | 加载 model 键 | 构建覆盖(加载必需) |
-|---|---|---|
-| `dinov3-vitt16` / `dinov3-vitt16plus` / `dinov3-vits16` | `detr/dinov3-{vitt16,vitt16plus,vits16}-notpretrained` | 无(变体规格配方) |
-| `dinov3-convnext-tiny` / `-small` / `-base` / `-large` | `detr/dinov3-convnext-{tiny,small,base,large}` | `dec_layers=6` + `decoder_hidden_dim=256` |
-
-ConvNeXt 检查点用 6 层 / 256 宽解码器训练,**不是**变体规格默认的 3/4 层 × 384
-宽——不带覆盖会被严格加载拒绝;`user_held_model_args(<资产名>)` 一次取全所需
-`model_args`(含 `backbone_pretrained=False` 与 `image_size`)。资产名与两份容器的
-sha256 在 `autovision.registry.user_held_assets` 钉住(`resolve_user_held_asset`
-解析、`verify_user_held_asset` 离线核验)。
-
-两条加载路线:
-
-```python
-import autovision
-from autovision.registry.user_held_assets import user_held_model_args
-
-# 路线 A:检查点热启(名字解析 + ConvNeXt 必需的 dec_layers / 宽度覆盖)
-autovision.train_object_detection(
-    out="runs/d1", data="data.yaml", model="detr/dinov3-convnext-base",
-    model_args=user_held_model_args("dinov3-convnext-base"),
-)
-
-# 路线 B:AVWarmStart v1(我方键布局,形状兼容子集迁移)
-autovision.train_object_detection(
-    out="runs/d2", data="data.yaml", model="detr/dinov3-vitt16-notpretrained",
-    model_args={"warm_start": "dinov3-vitt16"},   # 或 warm_start.pt 的路径
-)
-```
-
-**许可边界**(`DINOv3-License+NOASSERTION`):骨干继承 DINOv3 License 义务,检测头
-无许可声明(默认保留全部权利)。**禁再分发、禁商用**;不随仓库或导出产物分发,
-不注册可下载资产清单(`ASSET_MANIFEST`)。使用即视为已自行接受相应条款。
-
-### GTR 多任务家族
-
-Intellindust GTR(MIT)整族 26 个官方权重已在 `autovision.registry.gtr_assets`
-注册(sha256 全钉住,`resolve_gtr_asset` 解析、`verify_gtr_asset` 离线核验),
-文件存于用户自持库(`AUTOVISION_GTR_ROOT` 覆盖,默认 `~/Research/Model/gtr`)。
-整族共享一套 GLA 骨干(`ViTAdapterSpatialSwiGLU`)+ `GTREncoder`,各任务只换
-头 / 解码器。
-
-| 任务 | model 键 | 变体 | 官方指标 | 权重资产 |
-|---|---|---|---|---|
-| 检测 COCO | `detr/gtr-s`(GTR 解码器装配,骨干走 timm HGNetV2-b1)、`detr/gtrvit-s`(官方 GLA 骨干 + GTREncoder,需 `gtr` extra) | s(m/l/x 权重已入库,model 变体仅 S 接入) | AP 53.6 | `gtr_{s,m,l,x}_coco` |
-| 检测 Obj365 预训练 | —(作检测初始化权重) | s/m/l/x | — | `gtr_{s,m,l,x}_obj365` |
-| 实例分割 COCO | `gtr/<s\|m\|l\|x>` | s/m/l/x | mask AP 45.0 / 47.7 / 49.5 / 49.8 | `gtrseg_{s,m,l,x}_coco` |
-| 语义分割 Cityscapes | `gtr/<s\|m\|l\|x>` | s/m/l/x | mIoU 81.5 / 83.0 / 83.2 / 83.3 | `gtrsemseg_{s,m,l,x}_cityscapes` |
-| 深度 NYU | `gtr/<s\|m\|l\|x>` | s/m/l/x | absRel 0.074 / 0.069 / 0.069 / 0.067 | `gtrdepth_{s,m,l,x}` |
-| 旋转框 DOTA | `gtr/<s\|x>` | s/x | AP50 80.0 / 81.3 | `gtrobb_{s,x}_dota` |
-| 姿态 COCO | `gtr/<s\|m\|l\|x>` | s/m/l/x | kp AP 70.1 / 74.1 / 74.7 / 75.5 | `gtrpose_{s,m,l,x}_coco` |
-
-`gtr/*` 任务族用 `model_args={"checkpoint": "<注册资产名或路径>"}` 直载官方权重
-后微调,不传即随机初始化。六个任务组的权重加载与前向数值对拍已打通(检测解码器
-谱系金标准见 `tests/test_gtr_integration.py`;姿态全链读数与 delta 见
-[docs/benchmarks.md](docs/benchmarks.md))。`detr/gtrvit-s` 的 GLA 骨干前向依赖
-Triton(CUDA,`gtr` extra)。
-
-## 目标跟踪与推理服务（A3 / F2）
-
-参考推理运行时支持 **ByteTrack** 跟踪（卡尔曼运动模型 + 三阶段 IoU 关联，
-class-aware，官方门限：新轨迹需 `score ≥ track_thresh + 0.1` 且连续两帧命中
-才发布（首帧例外）、低分框 `>0.1` 只维持轨迹不新建——官方语义）:
-
-```bash
-autovision-cli predict model=exported_best.pt source=clip.mp4 out=preds/ track=true
-```
-
-JSONL 逐帧增加 `tracks`(`track_id`/`bbox`/`score`/`class_id`/`age`),渲染画面标注
-`#id 类别 分数`,汇总带唯一 id 数;API 侧 `run_stream(..., track=True)`。
-`age` 是轨迹创建以来的帧数;tracker 接收源视频的真实帧率,`track_buffer`
-按该帧率折算丢失窗口。
-
-参考 **serving**(roadmap F2;需要 `.[serving]`,属参考实现而非生产网关):
-
-```bash
-autovision-cli serve model=exported_best.pt port=8000
-```
-
-- `POST /predict`:`{"images": ["<base64>", ...]}`(或单张 `{"image": ...}`),
-  批处理按输入顺序返回,前后处理与评测同源;
-- `GET /healthz`:后端/模型/threshold;
-- `GET /metrics`:Prometheus 文本(请求数/错误数/图片数/延迟 summary)。
-
-**边界**(定位仍是训练+参考推理框架):不提供鉴权、TLS、多进程编排;漂移检测 /
-A-B / 金丝雀不在范围内——`/metrics` 是它们的起点,按产品需求在其上构建。
-
-## 数据版本化
-
-mmap 清单的缓存键是「路径 + mtime」;做**内容寻址快照**用 `data-snapshot`
-(每分片记录根路径、文件数/字节数与 `(相对路径, 大小)` 清单的 sha256;`deep=true`
-再对文件内容哈希):
+mmap 清单的缓存键是「路径 + mtime」；做**内容寻址快照**用 `data-snapshot`
+（每分片记录根路径、文件数/字节数与 `(相对路径, 大小)` 清单的 sha256；`deep=true`
+再对文件内容哈希）：
 
 ```bash
 autovision-cli data-snapshot data=coco8 out=coco8.snap.json deep=true   # 写入
-autovision-cli data-snapshot snapshot=coco8.snap.json                   # 校验(漂移非零退出)
+autovision-cli data-snapshot snapshot=coco8.snap.json                   # 校验（漂移非零退出）
 autovision-cli data-snapshot snapshot=coco8.snap.json spec=copied.yaml  # 迁移/副本校验
 ```
 
-漂移报告给出逐项差异(added / removed / resized / content_digest)与涉及文件;
-摘要是「根相对」的,目录整体搬迁后可用副本 spec 校验通过。`spec` 内的相对路径按
-spec 文件所在目录解析(与训练入口同一规则;快照记录该基准目录,换 CWD 校验不会
-漂移);`out` 已存在时报错,需显式 `overwrite=true`;`snapshot=... deep=true` 只对
-deep 快照有效——浅快照会明确报错,避免「内容校验」空转。
+漂移报告给出逐项差异（added / removed / resized / content_digest）与涉及文件；
+摘要是「根相对」的，目录整体搬迁后可用副本 spec 校验通过。`spec` 内的相对路径按
+spec 文件所在目录解析（与训练入口同一规则；快照记录该基准目录，换 CWD 校验不会
+漂移）；`out` 已存在时报错，需显式 `overwrite=true`；`snapshot=... deep=true` 只对
+deep 快照有效——浅快照会明确报错，避免「内容校验」空转。
 
-## 超参搜索（HPO）
+</details>
+
+<details>
+<summary>超参搜索（随机 / 网格 / ASHA）</summary>
 
 随机 / 网格搜索与 ASHA（逐 rung 续训，非重训），复用与 CLI 同一套 Pydantic
 覆盖面（`model_args.*` / `transform_args.*` / `trainer_args.*` 与顶层参数），
@@ -288,9 +504,12 @@ autovision-cli hpo space=search.yaml out=runs/hpo-asha task=object_detection \
 `task_trial`（任意 `autovision.train_*` 入口）。Ray Tune 用户可用同一 trial 函数
 接 `ASHAScheduler`（本实现零依赖）。
 
-## 数据闭环（伪标注 / 误差分析）
+</details>
 
-VOC 数据可直接训练（下载 → 转换 → 训练三步；官方源较慢时自备数据集同流程）:
+<details>
+<summary>数据闭环（VOC 转换 / 数据体检 / 伪标注 / 误差分析）</summary>
+
+VOC 数据可直接训练（下载 → 转换 → 训练三步；官方源较慢时自备数据集同流程）：
 
 ```bash
 autovision-cli download dataset=voc2007-trainval out=datasets/       # 解包出 VOCdevkit/VOC2007
@@ -301,19 +520,53 @@ autovision-cli train-object-detection out=runs/voc model=rtdetr/resnet18 steps=2
 ```
 
 `difficult` 目标转为 COCO ignore 区（不罚不欠召回）；关键点 / 分割的 YOLO 布局
-用 `from=yolo-pose | yolo-seg`。
-
-低标注预算的两条主线。伪标注 / 自训练（教师模型 → 伪标签 → 学生 → 评测，
-端到端脚本 `scripts/self_train_detect.py`）:
+用 `from=yolo-pose | yolo-seg`。CVAT / Label Studio 可直接转 COCO：
 
 ```bash
+autovision-cli convert-data from=cvat cvat-xml=annotations.xml images=images/ out=cvat.json
+autovision-cli convert-data from=label-studio ls-json=export.json images=images/ out=ls.json
+```
+
+CVAT 支持 bbox / polygon；Label Studio 支持 rectangle / polygon / keypoint
+（keypoint 以 `keypoint_radius` 小框输出，原始坐标保留在 `keypoint` 字段）。
+
+数据体检（坏图 / 重复图 / split 泄漏 / 框越界 / 类别分布）：
+
+```bash
+autovision-cli data-check data=coco.yaml out=qa/ near_duplicate=true
+```
+
+输出 `qa/report.md` + `report.json` + `manifest.json`；`fail_on=error`（默认）
+发现问题时非零退出。`near_duplicate` 为 O(n²)，大数据集可关闭或只做精确重复。
+
+难例回灌（**在训练 split 上挖掘**，避免把验证集样本采样进训练）：
+
+```bash
+autovision-cli analyze-errors model=best.pt data=coco_train.yaml split=train out=report/
+autovision-cli train-object-detection out=runs/r2 data=coco.yaml model=rfdetr/rf-detr-small \
+    hard_examples=report/hard_examples.json
+```
+
+`analyze-errors` 输出 `report/hard_examples.json`；训练入口按
+`min(max_repeat, 1 + alpha × 归一化误差)` 加权采样。v1 只支持单机
+（DDP 会覆盖 sampler，组合被显式拒绝）。
+
+伪标注 / 自训练与长尾采样：
+
+```bash
+# 单轮伪标注；scripts/self_train_detect.py 可串联多轮（--rounds N）
 autovision-cli pseudo-label model=teacher.pt images=unlabeled/ out=pseudo.json data=coco.yaml threshold=0.5
 python scripts/self_train_detect.py --teacher teacher.pt --images unlabeled/ \
-    --val-data coco_val.yaml --out runs/round1 --student rtdetr/resnet18 --steps 2000
+    --val-data coco_val.yaml --out runs/self_train --steps 2000 --rounds 3 \
+    --min-improvement 0.2
+
+# 长尾类别采样（class_balanced | repeat_factor）；与 hard_examples 互斥
+autovision-cli train-object-detection out=runs/longtail data=coco.yaml \
+    model=rfdetr/rf-detr-small long_tail_sampler=class_balanced
 ```
 
 误差分析（TP/FP/FN 匹配、FP 归因 duplicate/classification/localization/background、
-按类别与 COCO 面积分档切片、top-FP/FN 可视化画廊）:
+按类别与 COCO 面积分档切片、top-FP/FN 可视化画廊）：
 
 ```bash
 autovision-cli analyze-errors model=best.pt data=coco.yaml out=report/ iou=0.5 top_k=5 threshold=0.3
@@ -321,97 +574,109 @@ autovision-cli analyze-errors model=best.pt data=coco.yaml out=report/ iou=0.5 t
 
 输出 `report/report.md`（含内嵌画廊）+ `report/report.json`（逐条匹配记录）。
 
-## 导出与部署
+</details>
 
-```python
-result = autovision.train_object_detection(out="runs/det1", data="coco8", steps=2000)
-model = autovision.load_task_model(result.best_exported_model_path)   # 导出件 → 任务模型
-model.export_onnx("model.onnx", precision="fp16")                     # FP16 + 数值对拍门禁
-model.export_tensorrt("model.engine", precision="fp16")               # 需自行安装 tensorrt
+<details>
+<summary>全部 CLI 命令（30）</summary>
 
-autovision.benchmark("rtdetr/resnet18", out="bench/", num_classes=2,
-                     backends={"torch": {}, "onnx": {"provider": "cpu"}},
-                     verify_parity=True)
+| 组 | 命令 |
+|---|---|
+| 训练 | `pretrain`、`train-object-detection`、`train-oriented-object-detection`、`train-instance-segmentation`、`train-panoptic-segmentation`、`train-semantic-segmentation`、`train-pose-estimation`、`train-depth-estimation`、`train-image-classification` |
+| 评测 / 推理 | `val`、`predict`、`benchmark`、`embed`、`pseudo-label`、`analyze-errors` |
+| 导出 / 服务 | `export`、`serve` |
+| 数据 | `download`、`convert-data`、`data-check`、`data-snapshot` |
+| 模型 / 治理 | `list-models`、`model-info`、`list-methods`、`plugins`、`compliance-report`、`registry` |
+| 调参 / 工具 | `hpo`、`extract-video-frames`、`plot-curves`（需 matplotlib） |
 
-autovision.measure_model_cost(model)   # 参数量 / FLOPs（含 MACs；benchmark 报告内同样携带）
-```
+</details>
 
-等价命令行(导出件后缀分发 `.onnx` / `.engine`):
+## 致谢（Acknowledgements）
 
-```bash
-autovision-cli export model=runs/det1/exported_models/exported_best.pt out=model.onnx precision=fp16
-autovision-cli export model=runs/det1/exported_models/exported_best.pt out=model.onnx dynamic_spatial=true
-autovision-cli export model=runs/det1/exported_models/exported_best.pt out=model.xml        # OpenVINO IR(对拍门禁;precision=fp16 可出半精度 IR)
-autovision-cli export model=runs/det1/exported_models/exported_best.pt out=model.engine precision=int8 calibration_data=calib_images/
-```
+AutoVision 的架构与实现受益于以下开源工作。代码 lineage 与修改说明见
+[溯源台账](docs/provenance/LEDGER.md)，第三方许可文本见
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)，权重许可见
+[模型库](docs/model_zoo.md)。
 
-**动态 H/W**（`dynamic_spatial=true`）：ONNX 图的 H/W 轴动态，导出时内置"第二尺寸
-parity 探针"（torch↔ONNX Runtime 在未见尺寸对拍），并要求 dynamo 导出器
-（fail-closed；严格 trace 失败时静态导出会回退 legacy TorchScript）。支持的骨干线：
-`rtdetr/resnet18` 等 torchvision CNN、`detr/` 的 HGNetV2 谱系（`detr/n`、
-`detr/s`、`detr/hgnetv2-*`、`detr/gtr-s`）；**HF 骨干（`detr/dinov2-*`、
-`detr/dinov3-*`）不支持**——上游 transformers 在输入尺寸上有 Python 级分支/守卫，
-严格导出无法符号化，会以可读错误指引（导出静态 H/W 或改用可符号化骨干）。
-`detr/gtrvit-s` 带 export_blocker（GLA 无 ONNX 降级）。
+- **代码 / 算法 lineage**：[DEIM](https://github.com/Intellindust-AI-Lab/DEIM)
+  （Apache-2.0）、[D-FINE](https://github.com/Peterande/D-FINE)（Apache-2.0）、
+  [RT-DETR](https://github.com/lyuwenyu/RT-DETR)（Apache-2.0）、
+  [Detectron2](https://github.com/facebookresearch/detectron2)（Apache-2.0）、
+  [GTR](https://github.com/Intellindust-AI-Lab/GTR)（MIT）、
+  [torch-linear-assignment](https://github.com/ivan-chai/torch-linear-assignment)
+  （Apache-2.0）。
+- **模型与权重**：[Roboflow RF-DETR](https://github.com/roboflow/rf-detr)
+  （Apache-2.0）、[Intellindust GTR](https://github.com/Intellindust-AI-Lab/GTR)
+  （MIT）、[Meta DINOv2](https://github.com/facebookresearch/dinov2)（代码
+  Apache-2.0；权重 CC-BY-NC 4.0）、
+  [Meta DINOv3](https://github.com/facebookresearch/dinov3)（权重 DINOv3
+  License）、[PaddleDetection PP-PicoDet](https://github.com/PaddlePaddle/PaddleDetection)
+  （Apache-2.0）。
+- **跟踪 / 切片**：[ByteTrack](https://github.com/ifzhang/ByteTrack)（ECCV
+  2022，MIT）、[SAHI](https://github.com/obss/sahi)（MIT）提供了算法参考；
+  本仓库为 AutoVision 实现。
+- **推理 / 训练工具**：PyTorch、torchvision、HuggingFace Transformers、
+  ONNX Runtime、NVIDIA TensorRT、OpenVINO、FastAPI、MLflow、
+  Weights & Biases、TensorBoard。
+- **数据集**：COCO、PASCAL VOC、Cityscapes、DOTA、NYU Depth V2、Objects365、
+  ImageNet；各自条款适用，不随本仓库分发。
 
-**int8 首层 fp32 配方**：观测到（间歇性）部分主干（如 torchvision stem 的
-Conv+Relu+MaxPool 融合）没有可用的 TensorRT int8 tactic，把首层留在 fp32 是
-受支持的兜底配方；构建失败时错误信息会给出可粘贴的 `nodes_to_exclude`，也可直接：
-
-```python
-from autovision.export import Int8QuantizationConfig, suggest_first_layer_nodes
-nodes = suggest_first_layer_nodes("model.int8.fp32.onnx")   # 前两个 Conv 节点名
-config = Int8QuantizationConfig(nodes_to_exclude=tuple(nodes))
-```
-
-视频/RTSP 参考推理运行时(`autovision.inference`,需 `.[video]`;后端换 `onnx`/`tensorrt`
-时附 `artifact=` 编译产物,前后处理与评测同源):
-
-```bash
-autovision-cli predict model=exported_best.pt source=clip.mp4 out=preds/ batch_size=4
-autovision-cli predict model=exported_best.pt source=rtsp://camera/live out=preds/ backend=onnx artifact=model.onnx
-```
-
-输出 `out_dir/predictions.jsonl`(逐帧框,原始像素)+ `out_dir/annotated.mp4`(渲染画面)。
+> YOLO / Ultralytics 名称仅用于兼容性描述，不表示官方背书或关联；
+> `ultralytics` 组件以 AGPL-3.0 extra 隔离，不进入核心依赖、不随仓库分发。
+> README 致谢是社区信用；法律归属以 `NOTICE` / `THIRD_PARTY_LICENSES.md`
+> 为准。
 
 ## 开发
 
 ```bash
 pip install -e ".[dev,export]"   # CI 同款
-pytest tests                     # 1600+ 个测试(含金标准 loss 轨迹快照)
-ruff check src tests scripts     # lint(规则集见 pyproject.toml)
+pytest tests                     # 2100+ 个测试（含金标准 loss 轨迹快照）
+ruff check src tests scripts     # lint（规则集见 pyproject.toml）
 python scripts/check_provenance.py && python scripts/check_layering.py   # CI 门禁
-python scripts/check_docs_links.py && mkdocs build --strict              # 文档门禁(需 .[docs])
+python scripts/check_docs_links.py && mkdocs build --strict              # 文档门禁（需 .[docs]）
 ```
 
-- 金标准快照在 `tests/golden/`;**有意的**配方变更后删除快照重新录制(对应测试跑两遍)。
-- 真实 `from_pretrained` 的测试默认跳过,`AUTOVISION_HF_TESTS=1` 开启(timm 权重下载测试同门控)。
-- 多进程 DDP 测试:`AUTOVISION_DDP_TESTS=1 pytest tests/test_torchrun_distributed.py`。
-- TensorRT int8 引擎构建测试(慢,需 tensorrt + CUDA):`AUTOVISION_TRT_TESTS=1 pytest tests/test_trt_int8.py`。
-- 贡献入口:[CONTRIBUTING.md](CONTRIBUTING.md)(环境 / 门禁 / 许可与溯源红线);
-  发布与版本政策 [docs/release_process.md](docs/release_process.md);变更记录 [CHANGELOG.md](CHANGELOG.md)。
-- 文档:模型库(许可 / sha256 / 官方指标 / 加载代码)[docs/model_zoo.md](docs/model_zoo.md)
-  (由 `scripts/gen_model_zoo.py` 从注册表机器生成);as-built 架构总览
-  [docs/framework_design.md](docs/framework_design.md);基准表与口径协议
-  [docs/benchmarks.md](docs/benchmarks.md);环境变量全表 `src/autovision/runtime/env.py`
-  (`AUTOVISION_*`,遥测默认关闭)。文档站点 = `docs/` 下 `mkdocs.yml` 导航收录的页面
-  (内部分析稿经 `exclude_docs` 显式排除,不进站点)。
+- 金标准快照在 `tests/golden/`；**有意的**配方变更后删除快照重新录制（对应测试跑两遍）。
+- 真实 `from_pretrained` 的测试默认跳过，`AUTOVISION_HF_TESTS=1` 开启（timm 权重下载测试同门控）。
+- 多进程 DDP 测试：`AUTOVISION_DDP_TESTS=1 pytest tests/test_torchrun_distributed.py`。
+- TensorRT int8 引擎构建测试（慢，需 tensorrt + CUDA）：`AUTOVISION_TRT_TESTS=1 pytest tests/test_trt_int8.py`。
+- 贡献入口：[CONTRIBUTING.md](CONTRIBUTING.md)（环境 / 门禁 / 许可与溯源红线）；
+  发布与版本政策 [docs/release_process.md](docs/release_process.md)；变更记录 [CHANGELOG.md](CHANGELOG.md)。
+- 文档：模型库（许可 / sha256 / 官方指标 / 加载代码）[docs/model_zoo.md](docs/model_zoo.md)
+  （由 `scripts/gen_model_zoo.py` 从注册表机器生成）；as-built 架构总览
+  [docs/framework_design.md](docs/framework_design.md)；基准表与口径协议
+  [docs/benchmarks.md](docs/benchmarks.md)；环境变量全表 `src/autovision/runtime/env.py`
+  （`AUTOVISION_*`，遥测默认关闭）。文档站点 = `docs/` 下 `mkdocs.yml` 导航收录的页面
+  （内部分析稿经 `exclude_docs` 显式排除，不进站点）。
 
-## 状态与已知边界
+## 已知限制
 
-- albumentations 适配层未接入(变换基于 torchvision v2);super-gradients 分割 wrapper 未接入。
-- `detr/gtr-s`、`detr/gtrvit-s` 为规划档(装配覆盖 / COCO 趋势评审后冻结);`detr/m`、`detr/l`、`detr/x` 骨干线已定方向——timm ConvNeXt(tiny→m / small→l / base→x),选型标准为可导出 + 许可干净,待实现(当前 `convnext-*` 条目为 DINOv3-ConvNeXt,用户自持权重线)。
-- GTR 模型(含 `detr/gtrvit-*`)当前不可导出 ONNX/TensorRT:导出入口以明确报错拒绝(GLA 自定义 CUDA 核无 ONNX 降级,见 `GTRViTBackbone.export_blocker`);四个 GTR 任务模型的导出 verify 钩子已就位,随 G2 部署工程生效。
-- GTR 部署工程 G2:Triton GLA 核已迁移(2× 提速),但 `torch.compile` 对 GLA 段负收益、CUDA Graphs 与自研核原地写接口冲突(需 op 改造)、TensorRT 部署需官方 `gla_plugin.cu`;官方训练增广(mosaic/mixup/zoom-out/color-jitter)未移植;姿态官方配方为 `precision="32-true"`(`use_amp: False`)。
-- ONNX FP16 parity 门禁在无 CUDA execution provider 时跳过并告警;ONNX 导出的示例输入跟随模型设备(GPU 上训练后可直接导出)。
-- TensorRT 11 已适配:该版本移除了 EXPLICIT_BATCH 与 FP16/精度约束 builder flags——fp16 引擎改为经 fp16-ONNX + strongly-typed 网络路线构建(与旧版 builder flag 路线语义等价,FP32 黑名单继续保护溢出敏感算子)。
-- 蒸馏教师默认请求预训练权重(`teacher_pretrained=True`),离线时传 `teacher_pretrained=False`。
-- 预训练权重清单按 commit + LFS sha256 全量钉住(`src/autovision/encoders/weight_hashes.py`)。
+- 定位：训练 + 参考推理框架；serving 是参考实现，不提供鉴权、TLS、多进程编排，
+  漂移检测 / A-B / 金丝雀不在范围内。
+- GTR 模型（含 `detr/gtrvit-*`）不可导出 ONNX / TensorRT（GLA 自定义 CUDA 核无
+  ONNX 降级，导出入口以明确错误拒绝）。
+- 动态 H/W 不支持 HF 骨干（`detr/dinov2-*`、`detr/dinov3-*`）；ONNX FP16 parity
+  在无 CUDA execution provider 时跳过并告警。
+- 蒸馏教师离线时传 `teacher_pretrained=False`；受限许可权重默认不下载。
+- albumentations 适配层与 super-gradients 分割 wrapper 未接入。
+- `detr/n` / `detr/s` 为 spec-frozen（规格冻结，预训练权重 / AP 待发布）；
+  `detr/m/l/x` 为 planned——状态见[模型库](docs/model_zoo.md)。
+
+完整边界、TensorRT 11 / int8 注记与 GTR 部署工程现状见[已知限制](docs/known_limits.md)。
 
 ## 许可与溯源
 
-Apache-2.0,见 [LICENSE](LICENSE);第三方组件与权重溯源见 [NOTICE](NOTICE)。
-GTR 权重为 MIT(整族 26 个,sha256 钉住);`ultralytics` 为 AGPL-3.0,仅作
-extras 隔离加载,不进核心依赖、不在模块级 import。用户自持权重库的 7 个第三方
-COCO 检测器为 `DINOv3-License+NOASSERTION`,禁再分发 / 商用,边界见
-[用户自持权重库](#用户自持权重库d1-a仓库外不可再分发)。
+核心代码 Apache-2.0，见 [LICENSE](LICENSE)；第三方组件与权重溯源见 [NOTICE](NOTICE)、
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) 与
+[溯源台账](docs/provenance/LEDGER.md)。
+
+> **0.3.0 许可状态（2026-10-17）**：DEIMv2 派生的 `SpatialPriorModule`
+> 已从代码库删除，DINOv3 ViT 变体保留但使用 no-STA adapter，因此本发行物
+> 不再包含 DEIMv2 代码，可按 Apache-2.0 发布。旧的 STA-era ViT 检查点
+> （`backbone.sta.*`）会被加载器明确拒绝；需重新训练 / 导出，或使用 ConvNeXt
+> 检查点。处置记录见溯源台账。
+
+GTR 权重为 MIT（整族 26 个，sha256 钉住）；`ultralytics` 为 AGPL-3.0，仅作
+extras 隔离加载，不进核心依赖、不在模块级 import。用户自持权重库的 7 个第三方
+COCO 检测器为 `DINOv3-License+NOASSERTION`，禁再分发 / 商用；其中 3 个 STA-era
+ViT 检查点已不被加载器支持，4 个 ConvNeXt 检查点仍可使用。边界见
+[用户自持权重指南](docs/user_held_weights.md)。

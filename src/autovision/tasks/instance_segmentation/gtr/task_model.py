@@ -44,13 +44,6 @@ class GTRSegObjectDetection(DETRObjectDetection):
         load_checkpoint: bool = True,
         **kwargs: Any,
     ) -> None:
-        if variant != "s":
-            raise NotImplementedError(
-                f"GTR seg variant '{variant}' is not registered as a task "
-                "variant yet (only 's' — roadmap doc 31 §11 S2); the width "
-                "table GTR_SEG_VARIANTS carries the values for m/l/x once "
-                "their det variant specs land."
-            )
         if variant not in GTR_SEG_VARIANTS:
             raise ValueError(
                 f"Unknown GTR seg variant '{variant}'; expected one of "
@@ -58,7 +51,7 @@ class GTRSegObjectDetection(DETRObjectDetection):
             )
         super().__init__(
             num_classes=num_classes,
-            model_name="gtrvit-s",
+            model_name=f"gtrvit-{variant}",
             image_size=image_size,
             decoder="dfine_official",
             num_queries=num_queries,

@@ -123,6 +123,7 @@ def run_stream(
     artifact: PathLike | None = None,
     device: str | None = None,
     providers: Sequence[str] | None = None,
+    openvino_device: str = "CPU",
     batch_size: int = 1,
     threshold: float = 0.5,
     render: bool = True,
@@ -135,7 +136,7 @@ def run_stream(
     """Run inference over a video file / RTSP stream and persist artifacts.
 
     Pass either a ready ``engine`` or ``model`` (+ backend selection, where
-    ``onnx``/``tensorrt`` also need ``artifact``). Writes
+    ``onnx``/``tensorrt``/``openvino`` also need ``artifact``). Writes
     ``out_dir/predictions.jsonl`` always, and ``out_dir/annotated.mp4``
     when ``render`` and the task's predictions carry boxes.
 
@@ -158,6 +159,7 @@ def run_stream(
             artifact=artifact,
             device=device,
             providers=providers,
+            openvino_device=openvino_device,
         )
 
     out_dir = Path(out_dir)

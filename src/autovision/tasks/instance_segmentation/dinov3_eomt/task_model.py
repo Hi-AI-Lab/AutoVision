@@ -10,12 +10,15 @@ from autovision.tasks.instance_segmentation.dinov2_eomt.task_model import (
 )
 from autovision.tasks.semantic_segmentation.dinov3_eomt.task_model import (
     Dinov3EomtSemanticSegmentation,
+    _Dinov3EomtCheckpointMixin,
 )
 
 __all__ = ["Dinov3EomtInstanceSegmentation"]
 
 
-class Dinov3EomtInstanceSegmentation(Dinov2EomtInstanceSegmentation):
+class Dinov3EomtInstanceSegmentation(
+    _Dinov3EomtCheckpointMixin, Dinov2EomtInstanceSegmentation
+):
     """DINOv3 backbone/head with the instance decode: queries become
     (label, score, binary mask) triplets."""
 

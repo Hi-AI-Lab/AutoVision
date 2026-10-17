@@ -75,11 +75,11 @@ def warm_start_asset(tmp_path_factory, dfine_s_checkpoint) -> Path:
 
 
 class TestSpectrumRegistry:
-    def test_n_and_s_are_frozen_with_hgnetv2_recipes(self):
+    def test_n_and_s_are_spec_frozen_with_hgnetv2_recipes(self):
         tier_n = resolve_spectrum_tier("n")
         tier_s = resolve_spectrum_tier("s")
-        assert tier_n.status == "frozen" and tier_n.route == "distill"
-        assert tier_s.status == "frozen" and tier_s.route == "assembly-finetune"
+        assert tier_n.status == "spec-frozen" and tier_n.route == "distill"
+        assert tier_s.status == "spec-frozen" and tier_s.route == "assembly-finetune"
         _, spec_n = resolve_detr_variant("detr/n")
         _, spec_s = resolve_detr_variant("detr/s")
         for spec in (spec_n, spec_s):
@@ -90,6 +90,11 @@ class TestSpectrumRegistry:
             assert spec.patch_size == 32
         assert spec_n.backbone_name == "hgnetv2_b0"
         assert spec_s.backbone_name == "hgnetv2_b1"
+
+    def test_status_vocabulary_is_tri_state(self):
+        statuses = {entry.status for entry in SPECTRUM.values()}
+        assert statuses <= {"planned", "spec-frozen", "released"}
+        assert "frozen" not in statuses
 
     def test_spectrum_keys_are_public_model_names(self):
         names = set(list_detr_model_names())
@@ -110,7 +115,7 @@ class TestSpectrumRegistry:
         with pytest.raises(ValueError, match="Unknown spectrum tier"):
             resolve_spectrum_tier("z")
 
-    def test_d10_metadata_in_frozen_notes(self):
+    def test_d10_metadata_in_spec_frozen_notes(self):
         assert "D1b" in SPECTRUM["n"].note
         assert "dfine_s" in SPECTRUM["s"].note
 

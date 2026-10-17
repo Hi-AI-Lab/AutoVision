@@ -210,13 +210,54 @@ def test_engine_torch_matches_network_predict(tiny_model, frames):
 @requires_video
 def test_engine_rejects_unknown_backend(tiny_model):
     with pytest.raises(AutoVisionError, match="Unknown inference backend"):
-        InferenceEngine(tiny_model, backend="openvino")
+        InferenceEngine(tiny_model, backend="tflite")
 
 
 @requires_video
 def test_engine_requires_artifact_for_compiled_backends(tiny_model):
     with pytest.raises(AutoVisionError, match="compiled artifact"):
         InferenceEngine(tiny_model, backend="onnx")
+    with pytest.raises(AutoVisionError, match="compiled artifact"):
+        InferenceEngine(tiny_model, backend="openvino")
+
+
+@requires_video
+def test_engine_openvino_requires_xml_artifact(tiny_model, tmp_path):
+    artifact = tmp_path / "model.onnx"
+    artifact.write_text("not an IR")
+    with pytest.raises(AutoVisionError, match="\\.xml IR artifact"):
+        InferenceEngine(tiny_model, backend="openvino", artifact=artifact)
+
+
+@requires_video
+def test_engine_openvino_forward_wiring(monkeypatch, tiny_model, tmp_path):
+    import autovision.export.openvino_helpers as ov_helpers
+
+    seen: dict[str, object] = {}
+
+    class FakeRunner:
+        def __init__(self, ir_path, device="CPU"):
+            seen["ir_path"] = str(ir_path)
+            seen["device"] = device
+
+        def run(self, batch):
+            return (
+                torch.zeros(batch.shape[0], 10, 3),
+                torch.full((batch.shape[0], 10, 4), 0.5),
+            )
+
+    monkeypatch.setattr(ov_helpers, "OpenVINOEngineRunner", FakeRunner)
+    artifact = tmp_path / "model.xml"
+    artifact.write_text("<xml />")
+    engine = InferenceEngine(
+        tiny_model, backend="openvino", artifact=artifact,
+        openvino_device="GPU",
+    )
+    raw = engine._forward(torch.zeros(1, 3, 64, 64))
+    assert raw[0].shape == (1, 10, 3)
+    assert seen["device"] == "GPU"
+    assert seen["ir_path"].endswith("model.xml")
+    assert engine.openvino_device == "GPU"
 
 
 @requires_video

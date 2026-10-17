@@ -40,10 +40,10 @@ AST 静态扫描在 CI 强制（数字越小越高层，高层可依赖低层）
 
 | 包 / 模块 | 职责 | 关键入口 |
 |---|---|---|
-| `cli` | 25 条命令；参数校验与 Python API 完全同源 | `cli/_app.py` |
+| `cli` | 30 条命令；参数校验与 Python API 完全同源 | `cli/_app.py` |
 | `engine` | step 循环、DDP / AMP、原子 checkpoint + resume、回调编排（`Engine` / `TaskEngine` 双引擎） | `engine/engine.py` |
 | `hpo` | 超参搜索：空间规格（分布 / 网格）、随机 / 网格 / ASHA 驱动、报告与断点复用 | `hpo/space.py`、`hpo/search.py`、`hpo/asha.py` |
-| `inference` | 视频 / 流推理运行时：batch 聚合、后端切换（torch / ONNX / TRT）、同源前后处理；可选 ByteTrack 跟踪 | `inference/engine.py`、`inference/stream.py` |
+| `inference` | 视频 / 流推理运行时：batch 聚合、后端切换（torch / ONNX / TRT / OpenVINO）、同源前后处理；单路跟踪 / 多路流共享批处理 | `inference/engine.py`、`inference/stream.py`、`inference/multi_stream.py` |
 | `tracking` | 多目标跟踪：ByteTrack 关联（卡尔曼 + 三阶段 IoU 与官方门限，class-aware） | `tracking/byte_track.py` |
 | `serving` | 参考推理 serving：FastAPI `/predict`（批处理）+ `/healthz` + Prometheus `/metrics` | `serving/app.py`、`serving/metrics.py` |
 | `pretext` | 自监督预训练与蒸馏方法（method 契约 + 注册表） | `pretext/`（DistillationV3、DINO(v2/v3)、SimCLR、DenseCL、DetCon） |
@@ -51,14 +51,16 @@ AST 静态扫描在 CI 强制（数字越小越高层，高层可依赖低层）
 | `augment` | 检测增广全套（mosaic / mixup / copyblend / box-aware eraser）+ 逐 step 窗口调度；多视图协议；mosaic 几何共享模块（关键点感知 pose mosaic 复用） | `augment/detection/`、`augment/mosaic_geometry.py` |
 | `features` | 功能面（embed） | `features/embed.py` |
 | `encoders` | 包装协议、包注册表（7 个注册源）、权重清单（revision + sha256 + 许可） | `encoders/weight_hashes.py` |
-| `data` | 11 类数据集、mmap 文件清单（缓存指纹 / 引用计数 / 原子发布）、数据下载与转换（YOLO / COCO / VOC / YOLO-pose / YOLO-seg、COCO 合并）、内容寻址数据集快照与漂移校验 | `data/`、`data/versioning.py` |
+| `data` | 11 类数据集、mmap 文件清单（缓存指纹 / 引用计数 / 原子发布）、数据下载与转换（YOLO / COCO / VOC / YOLO-pose / YOLO-seg、CVAT / Label Studio、COCO 合并）、内容寻址数据集快照与漂移校验、数据体检、难例/长尾采样 | `data/`、`data/versioning.py`、`data/quality.py`、`data/interchange/` |
 | `optim` | 优化器 / 调度器 / 参数组（含 8-bit AdamW） | `optim/optimizer_args.py` |
-| `metrics` | 任务指标（COCO AP + `map_small/medium/large` 面积分档）+ 跨 rank 状态汇聚（DDP 验证）；误差分析（匹配 / 归因 / 画廊） | `metrics/map_evaluator.py`、`metrics/error_analysis.py` |
+| `metrics` | 任务指标（COCO AP + `map_small/medium/large` 面积分档）+ 跨 rank 状态汇聚（DDP 验证）；误差分析（匹配 / 归因 / 画廊 / hard_examples） | `metrics/map_evaluator.py`、`metrics/error_analysis.py` |
 | `config` | Pydantic 严格校验配置（API / CLI / YAML 三方言同源） | `config/` |
-| `registry` | 资产注册表（HF 权重 / GTR / 自持）+ 模型注册表（dev / staging / prod + MLflow + model card） | `registry/model_registry.py`、`registry/*_assets.py` |
+| `registry` | 资产注册表（HF 权重 / GTR / 自持）+ 模型注册表（dev / staging / prod + current/rollback/audit + 部署门禁 + MLflow + model card）+ 任务级模型目录 | `registry/model_registry.py`、`registry/deployment_gates.py`、`registry/catalog.py` |
+| `plugins` | entry-point 插件协议（model_source/dataset/metric/loss/task/postprocess）、API 版本校验、发现错误收集 | `plugins.py` |
+| `compliance` | 企业合规包：依赖许可清单、模型卡/sha256、数据快照、JSON/Markdown 报告 | `compliance/` |
 | `scaling` | 规模策略（batch `auto` 解析等） | `scaling.py` |
 | `observability` | JSONL / TensorBoard / MLflow / W&B 记录器、OTel（opt-in，遥测默认关闭） | `observability/` |
-| `export` | ONNX / TensorRT 导出管线（对拍门禁）、int8 QDQ、benchmark、参数量 / FLOPs 统计 | `export/` |
+| `export` | ONNX / TensorRT / OpenVINO 导出管线（对拍门禁）、int8 QDQ、版本化后处理规格 + 端到端框级 parity、benchmark、参数量 / FLOPs 统计 | `export/` |
 | `debug` | NaN 捕获、underflow / overflow 检查 | `debug/nan_capture.py` |
 | `visualize` | 检测可视化与预测渲染 | `visualize/detection.py` |
 | `geometry`、`errors` | 几何工具与异常类型（叶层） | `geometry/`、`errors.py` |
@@ -77,7 +79,7 @@ AST 静态扫描在 CI 强制（数字越小越高层，高层可依赖低层）
 | 分类 | `torchvision/*`、`timm/*` 等 | top-1 / top-5 |
 
 检测档位谱系（`detr/n` … `detr/x`）的产品冻结状态与方向决策机器可读地记录在
-`tasks/detection/detr/variants.py` 的 `SPECTRUM` 表（`frozen` / `planned`）。
+`tasks/detection/detr/variants.py` 的 `SPECTRUM` 表（`planned` / `spec-frozen` / `released`）。
 
 ## 4. 权重与许可模型
 

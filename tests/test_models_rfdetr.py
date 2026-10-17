@@ -55,6 +55,26 @@ class TestGating:
         assert "rfdetr/rf-detr-base" in names
         assert "rfdetr/rf-detr-base-notpretrained" in names
 
+    def test_all_variants_have_hermetic_geometry(self):
+        """Exported weights.pt rebuilds require each variant's config
+        geometry; a missing entry fails only at load time, so pin the
+        registry coverage here (no weights, no transformers)."""
+        from autovision.tasks.detection.rfdetr.config import (
+            RFDETR_MODEL_REGISTRY,
+        )
+        from autovision.tasks.detection.rfdetr.task_model import (
+            _PRETRAINED_CONFIG_OVERRIDES,
+        )
+
+        assert set(_PRETRAINED_CONFIG_OVERRIDES) == set(RFDETR_MODEL_REGISTRY)
+        for geometry in _PRETRAINED_CONFIG_OVERRIDES.values():
+            assert {
+                "decoder_layers",
+                "decoder_n_points",
+                "decoder_cross_attention_heads",
+                "backbone",
+            } <= set(geometry)
+
     def test_graceful_without_transformers(self, monkeypatch):
         import importlib
 

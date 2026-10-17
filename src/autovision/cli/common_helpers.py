@@ -177,8 +177,12 @@ def build_task_dataloader(
     num_workers: int,
     train: bool,
     persistent_workers: bool | None = None,
+    sampler=None,
 ):
     """Train/val task dataloaders (global batch already split per device).
+
+    ``sampler`` (hard-example weighted sampling) replaces ``shuffle``: pass
+    one only for the training split.
 
     ``persistent_workers`` defaults to ``num_workers > 0``; the CLIs whose
     dataset carries a step-scheduled transform (mosaic/mixup windows) pass
@@ -215,7 +219,8 @@ def build_task_dataloader(
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=train,
+        shuffle=train and sampler is None,
+        sampler=sampler,
         drop_last=train,
         num_workers=num_workers,
         timeout=Env.DATALOADER_TIMEOUT_SEC.value if num_workers > 0 else 0.0,

@@ -45,7 +45,9 @@ class ModelCard:
     name: str  # human-readable, e.g. "DETR-S (HGNetV2-B1 + D-FINE-S decoder)"
     train_dataset: str  # e.g. "COCO 2017 train2017"
     schedule: str  # e.g. "12ep distill (RF-DETR-n teacher)" / "6ep finetune"
-    seed: int
+    #: None for third-party official weights whose training seed is not
+    #: published; our own released weights must record the seed.
+    seed: int | None = None
     metrics: dict[str, float] = field(default_factory=dict)  # {"coco_map": ...}
     latency: list[LatencyRecord] = field(default_factory=list)
     license: str = ""  # SPDX id of the WEIGHTS — required

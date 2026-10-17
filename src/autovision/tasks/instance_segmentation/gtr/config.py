@@ -25,7 +25,7 @@ class GTRSegTrainArgs(DETRObjectDetectionTrainArgs):
     default_batch_size: ClassVar[int] = 16
     default_steps: ClassVar[int] = 30_000
 
-    variant: Literal["s"] = "s"
+    variant: Literal["s", "m", "l", "x"] = "s"
     checkpoint: str | None = None
     load_checkpoint: bool = True
     mask_downsample_ratio: int = 4

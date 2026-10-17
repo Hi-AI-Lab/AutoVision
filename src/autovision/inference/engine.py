@@ -24,7 +24,7 @@ from autovision.types import PathLike
 
 __all__ = ["InferenceEngine"]
 
-_BACKENDS = ("torch", "onnx", "tensorrt")
+_BACKENDS = ("torch", "onnx", "tensorrt", "openvino")
 
 
 class InferenceEngine:
@@ -32,10 +32,11 @@ class InferenceEngine:
 
     ``model`` is an exported ``.pt`` payload or a loaded :class:`TaskNetwork`;
     the network provides pre/post-processing for every backend. ``artifact``
-    is the compiled graph for the ``onnx``/``tensorrt`` backends (``.onnx``
-    file / ``.engine`` file). The torch backend mirrors the export-path
-    reference semantics (``eval`` + ``deploy`` hooks), so its outputs sit
-    inside the same numerical band as the exported graph.
+    is the compiled graph for the ``onnx``/``tensorrt``/``openvino``
+    backends (``.onnx`` file / ``.engine`` file / ``.xml`` IR). The torch
+    backend mirrors the export-path reference semantics (``eval`` +
+    ``deploy`` hooks), so its outputs sit inside the same numerical band as
+    the exported graph.
     """
 
     def __init__(
@@ -46,6 +47,7 @@ class InferenceEngine:
         artifact: PathLike | None = None,
         device: str | torch.device | None = None,
         providers: Sequence[str] | None = None,
+        openvino_device: str = "CPU",
     ) -> None:
         if backend not in _BACKENDS:
             raise AutoVisionError(
@@ -55,7 +57,7 @@ class InferenceEngine:
         if backend != "torch" and artifact is None:
             raise AutoVisionError(
                 f"backend='{backend}' needs the compiled artifact: pass "
-                "artifact=<model.onnx|model.engine>."
+                "artifact=<model.onnx|model.engine|model.xml>."
             )
         if isinstance(model, (str, Path)):
             self.network: TaskNetwork = load_task_model(
@@ -66,6 +68,7 @@ class InferenceEngine:
         self.network.eval()
         self.backend = backend
         self.artifact = Path(artifact) if artifact is not None else None
+        self.openvino_device = openvino_device if backend == "openvino" else None
 
         if backend == "torch":
             if device is not None:
@@ -75,6 +78,8 @@ class InferenceEngine:
             self._forward = self._torch_forward
         elif backend == "onnx":
             self._forward = self._make_onnx_forward(providers)
+        elif backend == "openvino":
+            self._forward = self._make_openvino_forward(openvino_device)
         else:
             self._forward = self._make_tensorrt_forward(device)
 
@@ -113,6 +118,25 @@ class InferenceEngine:
                 # postprocess runs in fp32 regardless of the graph dtype.
                 tensors.append(tensor.float() if tensor.dtype == torch.float16 else tensor)
             return tensors[0] if len(tensors) == 1 else tuple(tensors)
+
+        return forward
+
+    def _make_openvino_forward(self, openvino_device: str):
+        from autovision.export.openvino_helpers import OpenVINOEngineRunner
+
+        if self.artifact.suffix.lower() != ".xml":
+            raise AutoVisionError(
+                "The OpenVINO backend needs an .xml IR artifact (and its "
+                f".bin weights beside it); got '{self.artifact}'."
+            )
+        if not self.artifact.exists():
+            raise AutoVisionError(
+                f"OpenVINO IR does not exist: '{self.artifact}'."
+            )
+        runner = OpenVINOEngineRunner(self.artifact, device=openvino_device)
+
+        def forward(batch: torch.Tensor) -> Any:
+            return runner.run(batch)
 
         return forward
 

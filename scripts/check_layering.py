@@ -46,6 +46,8 @@ LAYERS: dict[str, int] = {
     "tracking": 5,  # ByteTrack association (pure math over detections)
     "config": 5,
     "registry": 5,
+    "plugins": 5,  # entry-point plugin registry (model_source -> encoders)
+    "compliance": 5,  # enterprise inventory/report (reads registry/model cards)
     "scaling": 5,
     "observability": 5,
     "export": 5,  # export mixin sits below tasks (task models inherit it)
@@ -81,6 +83,10 @@ ALLOWED_UPWARD: dict[tuple[str, str], str] = {
     ),
     ("registry", "encoders.weight_verification"): (
         "sha256 utility currently lives under encoders; relocate later"
+    ),
+    ("plugins", "encoders.package_helpers"): (
+        "plugin registry is the runtime extension point for model sources; "
+        "register_source lives under encoders (same relocation debt as registry)"
     ),
     ("runtime.torch_compile", "config"): (
         "runtime torch.compile helpers read the shared config base"

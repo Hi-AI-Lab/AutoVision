@@ -16,10 +16,7 @@ import pytest
 import torch
 
 from autovision.data.coco8 import ensure_coco8
-from autovision.tasks.detection.detr.variants import (
-    resolve_detr_variant,
-    resolve_spectrum_tier,
-)
+from autovision.tasks.detection.detr.variants import resolve_detr_variant
 
 _TINY_TRANSFORM_ARGS = {
     "scale_jitter": None,
@@ -55,15 +52,6 @@ class TestGtrVariantRegistry:
         assert spec.interaction_indexes == (3, 7, 11)
         assert spec.patch_size == 16
         assert spec.decoder_default == "dfine_official"
-
-    def test_not_a_frozen_spectrum_tier(self):
-        from autovision.tasks.detection.detr.variants import SPECTRUM
-
-        tier = resolve_spectrum_tier("gtr-s")
-        assert tier.status == "planned"
-        frozen = {t for t, e in SPECTRUM.items() if e.status == "frozen"}
-        assert "gtr-s" not in frozen and "gtrvit-s" not in frozen
-
 
 class TestGtrFamilyForward:
     @requires_gla

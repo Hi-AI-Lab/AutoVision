@@ -71,3 +71,27 @@ jobs:
         run: pip install -e ".[dev,export]"
       - name: Run test suite
         run: pytest tests -q
+
+  publish:
+    # Trusted publishing (no long-lived token). Configure the PyPI pending
+    # publisher for project "autovision-framework", this workflow ("ci.yml")
+    # and the "pypi" environment before the first tag push.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [lint, provenance, docs, test]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build sdist and wheel
+        run: |
+          pip install build twine
+          python -m build
+          python -m twine check dist/*
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

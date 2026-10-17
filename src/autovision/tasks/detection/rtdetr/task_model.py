@@ -56,6 +56,8 @@ class RTDETRObjectDetection(ONNXExportMixin, TaskNetwork):
     onnx_export_precision_policy = ONNXExportPrecisionPolicy(
         fp32_onnx_op_types=("Softmax", "MatMul")
     )
+    #: Export-side postprocess contract marker (see export/postprocess.py).
+    postprocess_spec_family = "detr"
 
     def __init__(
         self,

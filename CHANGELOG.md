@@ -8,8 +8,111 @@
 
 ## [Unreleased]
 
+（下一版本开发中。）
+
+## [0.3.0] - 2026-10-17
+
+### 许可与兼容性
+
+- **删除 DEIMv2 派生的 STA（2026-10-17）**：`SpatialPriorModule` 从代码库
+  移除，`DETRVariantSpec` 不再携带 `use_sta` / `conv_inplane`；DINOv3 ViT
+  变体保留并改用 no-STA adapter，DINOv3 ConvNeXt 与其他家族不变。发行物
+  不再包含 DEIMv2 代码，许可阻塞解除。
+- **旧 STA-era ViT 检查点不再兼容**：含 `backbone.sta.*` 的基线 `.pt` 与
+  用户自持的 `dinov3-vitt16` / `dinov3-vitt16plus` / `dinov3-vits16` 会被
+  加载器显式拒绝；需使用重新训练/导出的 no-STA 检查点，或改用 ConvNeXt
+  资产。用户自持的 4 个 ConvNeXt 资产不受影响。
+
 ### 新增
 
+- **许可与致谢文档**：README 新增 `致谢（Acknowledgements）`；
+  新增 `THIRD_PARTY_LICENSES.md`（GTR MIT 全文）与
+  `docs/provenance/LEDGER.md`；`NOTICE` 补齐 RF-DETR / PicoDet /
+  ByteTrack / SAHI 归属，并记录 DEIMv2 派生 STA 的删除与兼容性变化。
+- **发布依赖**：`export` extra 下限提升为 `numpy>=1.25`（onnx / onnxscript
+  在导入时使用 `numpy.exceptions`，numpy 1.23/1.24 下会直接失败）；核心训练
+  安装仍保持 `numpy>=1.23`，与 super-gradients 的互斥由既有 extras 冲突声明
+  处理。
+
+- **黄金路径 / 部署契约（roadmap phase 1–2 代码基础）**：
+  - **任务级模型目录**：`autovision.registry.catalog` 汇总 RF-DETR N/S/M/L、
+    GTR s/m/l/x、自研 DETR 谱系与 RT-DETR 的许可 / 权重 / AP / 可导出状态；
+    `list-models --task detection --pretrained`、`model-info <key>` 可查。
+  - **预训练检测句柄**：`autovision.detection(<key>, pretrained=True)` /
+    `DetectionModel.from_pretrained` 惰性加载发布权重（RF-DETR 全链；GTR 在
+    GLA/CUDA 可用时走官方 EMA 权重装配，否则给出可读安装/硬件指引）；
+    `predict / val / export` 不再要求先训练。
+  - **训练配方**：`recipe=finetune | coco-finetune | low-data` 或 YAML 路径，
+    只覆盖 `model_args` / `transform_args` / `trainer_args`，显式参数优先。
+  - **版本化后处理规格**：ONNX / OpenVINO / TensorRT 导出件旁写
+    `<artifact>.postprocess.json`（schema_version=1；top-k、阈值、原图映射、
+    resize/mean/std），附带 NumPy 参考解码器；分割 / 姿态 / 深度 / 分类导出
+    不写 sidecar。
+  - **端到端框级 parity**：`autovision.export.verify_end_to_end_parity`
+    比较最终框 / 分数 / 类别（宽松匹配 + 像素容差 + missing/extra 计数），
+    可直接输出 JSON 报告；不再只比张量求和。
+  - **OpenVINO 运行时**：`InferenceEngine(backend="openvino")`、`run_stream`、
+    serving 与 CLI `predict` 均支持 `.xml` IR（`openvino_device=CPU|GPU|AUTO`）。
+  - 修复 legacy ONNX 导出回退时多传一个位置参数导致的
+    `TypeError`（dynamo 不可用时的真正回退路径）。
+  - 新增测试：模型目录、预训练句柄、配方（含 1 步真实训练）、后处理规格、
+    框级 parity、OpenVINO 运行时接线。
+
+- **数据体检与难例闭环（phase 3 代码基础）**：
+  - **数据体检**：`autovision.data.quality` + CLI `data-check`：坏图、精确/近重复
+    图、跨 split 泄漏、框越界/非法尺寸、原始类别 id、类别分布与 val 缺类；
+    产出 `report.json` / `report.md` / `manifest.json`，`fail_on` 控制退出码。
+  - **难例清单**：`analyze-errors` 额外写 `hard_examples.json`（逐图 TP/FP/FN、
+    FP 归因、漏检面积）；`split=` 记录来源，采样器只消费 `train`，避免验证集
+    泄漏进训练。
+  - **难例采样**：`autovision.data.hard_examples` 的 manifest + 确定性
+    `WeightedRandomSampler`；`train_object_detection(..., hard_examples=...)`
+    按 `min(max_repeat, 1 + alpha × 归一化误差)` 加权。v1 单机；DDP 组合被
+    显式拒绝（DistributedSampler 会覆盖权重）。
+  - **多轮自训练**：`scripts/self_train_detect.py --rounds N --min-improvement`；
+    逐轮产物（`rounds/r{i}/`）、学生提升后升级为下一轮教师、不升即停；
+    顶层 `summary.json` / `summary.md` 记录 stop_reason 与最优模型。
+    `--rounds 1` 保持原有单轮布局。
+  - **长尾采样**：`autovision.data.samplers` 的 `class_balanced` /
+    `repeat_factor`；`train_object_detection(..., long_tail_sampler=...)`
+    接入训练，与 `hard_examples` 互斥，v1 单机。
+  - **标注工具互通**：`autovision.data.interchange` 的 CVAT XML（bbox /
+    polygon）与 Label Studio JSON（rectangle / polygon / keypoint-as-box）→
+    COCO；`convert-data from=cvat | label-studio`，含 CLI 与 loader 往返测试。
+  - 新增测试：数据体检（核心 + CLI 夹具）、难例 manifest/采样/误差分析输出/
+    1 步真实训练接入、多轮自训练（真实 2 轮）、长尾采样权重/确定性/训练接入、
+    CVAT / Label Studio 转换。
+
+- **生态与企业能力（phase 4 代码基础）**：
+  - **插件协议**：`autovision.plugins` 的 `autovision.plugins` entry-point
+    发现、`PluginInfo` / `PLUGIN_API_VERSION`、kind 校验、失败收集 /
+    strict 模式；`model_source` 自动接入编码器目录；CLI
+    `plugins action=list|check`；`examples/plugin-demo` 可安装模板。
+  - **企业合规报告**：`autovision.compliance` 汇总框架/依赖许可/模型卡+
+    sha256/数据快照；CLI `compliance-report` 输出 `compliance.json` +
+    `compliance.md`，支持 `strict` / `no_timestamp`。
+  - **私有注册表**：`current` 指针、`rollback`、append-only `audit.jsonl`、
+    模型卡/后处理边车随产物复制；部署门禁
+    `Sha256Gate` / `ModelCardGate` / `LicenseGate` / `BenchmarkGate` /
+    `ParityGate` / `DataSnapshotGate`；CLI
+    `registry action=register|promote|rollback|current|list|audit`。
+  - **LTS / SLA 文档**：`docs/lts_policy.md`、`docs/support_policy.md`
+    （6 个月 LTS 节奏、12/6 个月支持窗、P1–P3 响应目标）。
+  - **硬件伙伴包模板**：`deploy/packs/_template/` 的 `convert.py`（校验
+    ONNX/spec、执行厂商命令）与 `parity.py`（目标端 JSONL 对拍）；一伙伴
+    一包，不预研厂商矩阵。
+
+- **谱系发布治理（P0）**：
+  - `SPECTRUM` 档位状态改为三态 `planned / spec-frozen / released`；
+    `detr/n`、`detr/s` 明确为 spec-frozen（规格冻结，预训练权重 / AP 待发布）。
+  - 新增 `autovision.registry.spectrum_release` 发布门禁：`released` 必须有
+    已发布资产、模型卡（许可 + sha256）、训练 seed、全量 COCO AP、延迟记录
+    与存在的复现脚本。
+  - 新增 `scripts/train_spectrum.py`、`scripts/eval_spectrum_coco.py` 骨架
+    （支持 `--dry-run` 与 coco8 smoke 路径）。
+  - 新增 RF-DETR 五档模型卡（官方 COCO 指标 + pinned sha256，
+    `autovision.registry.model_cards`；Base 标记上游弃用）；基准表补
+    RF-DETR 官方 T4 口径（N/S/M/L）。
 - **数据闭环（P1）**：
   - 伪标注 / 自训练：`autovision.tasks.detection.shared.pseudo_label` +
     `scripts/self_train_detect.py`（教师 `.pt` → 伪标注 → 学生训练 → 标注 val 评测
@@ -36,6 +139,20 @@
     calibration_data=...)`（QDQ ONNX 先过 int8↔fp32 门禁，再以 strongly-typed
     网络构建引擎），benchmark 的 `tensorrt` 后端支持 `precision="int8"` +
     `quantization={...}`（首层 fp32 配方用 `nodes_to_exclude`）。
+  - **多路流运行时**：`MultiStreamRunner` / `run_multi_stream`（`predict
+    sources=...`）：每路 reader 线程 + 单一共享 batcher、每路
+    `predictions.jsonl` / `annotated.mp4`、断流指数退避重连、队列
+    `drop_oldest|block` 背压、`summary.json` 每路帧数/丢弃/重连/错误。
+    v1 不做跨路跟踪。
+  - **PicoDet NMS 后处理规格**：`postprocess.json` 新增 `family="picodet"` +
+    class-offset NMS；NumPy 参考解码与 torch 后处理逐框对拍（含重复框抑制）。
+  - **int8 vs fp32 AP 报告**：`scripts/measure_int8_accuracy.py` +
+    `autovision.export.int8_report`：同一 split/前后处理下导出 fp32/int8、
+    跑全量 COCO AP、输出 `report.json`/`report.md`（delta、门禁、校准集、
+    硬件）；`--max-ap-drop` 控制退出码。
+  - **C++ ONNX Runtime 示例**：`examples/cpp/`（header-only decode + host
+    test + ORT/OpenCV main + CMake）；host 测试由 g++ 真实编译运行，
+    完整 runtime 构建依赖 ORT/OpenCV 开发库。
 - int8 QDQ 链与 TensorRT 的互操作修复：int32 常量 `DequantizeLinear` 折叠回
   fp32（TRT 11 解析器要求）；激活量化默认**对称**（`activation_symmetric`，
   非对称 zero-point 被 TRT 拒绝）。
@@ -71,6 +188,14 @@
     （added/removed/resized/content_digest）+ 搬迁副本校验；spec 内相对路径按
     spec 文件目录解析，写入默认不覆盖（`overwrite=true`），deep 校验要求
     deep 快照（浅快照显式报错）。
+
+### 变更
+
+- **PyPI 打包**：发行名改为 `autovision-framework`（import 名仍 `autovision`，
+  CLI 仍 `autovision-cli`）；新增 PyPI 专用 README、PEP 639 许可元数据、
+  sdist 的 GTR / MSDA CUDA-C++ 源清单，以及 tag 触发的 trusted-publishing
+  CI job。`super-gradients` 与 `export` / `transformers` / `rfdetr` / `video`
+  的 extras 互斥已显式声明。
 
 ### 修复
 

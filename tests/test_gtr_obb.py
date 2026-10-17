@@ -50,7 +50,30 @@ def obb_checkpoint() -> Path:
 class TestGtrObbLoad:
     def test_variant_table(self):
         assert set(GTR_OBB_VARIANTS) == {"s", "x"}
-        assert GTR_OBB_VARIANTS["s"] == (192, 3, 4.0, 512)
+        assert GTR_OBB_VARIANTS["s"] == (192, 3, 4.0, 192, 512, 4)
+        assert GTR_OBB_VARIANTS["x"] == (384, 6, 6.0, 256, 2048, 4)
+
+    def test_x_official_checkpoint_loads_completely(self):
+        try:
+            resolve_gtr_asset("gtrobb_x_dota")
+        except Exception:  # noqa: BLE001 - absent local weights keep fresh checkouts green
+            pytest.skip("local GTR OBB X weights not present")
+        from autovision.tasks.oriented_detection.gtr import (
+            GTRROBBOrientedDetection,
+        )
+
+        net = GTRROBBOrientedDetection(
+            num_classes=15, variant="x", image_size=(1024, 1024),
+            checkpoint="gtrobb_x_dota",
+        )
+        assert net.load_report is not None
+        assert net.load_report["encoder_decoder_coverage"] == 1.0
+        assert net.load_report["skipped_shape"] == 0
+        assert net.load_report["unexpected"] == 0
+        assert net.load_report["transferred"] == 274
+        assert net.decoder.decoder.layers[0].linear1.weight.shape == (2048, 256)
+        offsets = net.decoder.decoder.layers[0].cross_attn.sampling_offsets
+        assert offsets.weight.shape == (8 * 12 * 2, 256)
 
     def test_official_checkpoint_loads_completely(self, obb_checkpoint):
         from autovision.tasks.oriented_detection.gtr import (

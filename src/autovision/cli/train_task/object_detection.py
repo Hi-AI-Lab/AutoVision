@@ -89,12 +89,42 @@ def train_object_detection(
     trainer_args: dict[str, Any] | None = None,
     debug_args: dict[str, Any] | None = None,
     loggers: dict[str, dict[str, Any] | None] | None = None,
+    recipe: str | Path | None = None,
+    hard_examples: PathLike | None = None,
+    hard_example_alpha: float = 1.0,
+    hard_example_max_repeat: float = 5.0,
+    long_tail_sampler: str | dict[str, Any] | None = None,
 ) -> TaskTrainResult:
     """Object detection finetuning (COCO/YOLO formats).
+
+    ``recipe`` names a built-in detection recipe (``finetune``,
+    ``coco-finetune``, ``low-data``) or a YAML file with
+    ``model_args``/``transform_args``/``trainer_args`` overlays. Explicit
+    keyword values win over recipe values.
+
+    ``hard_examples`` points at an ``analyze-errors`` manifest
+    (``hard_examples.json``); the training split is sampled with weights
+    ``min(max_repeat, 1 + alpha * normalized_error)``. Single-device only:
+    a DDP DistributedSampler would override these weights, so the
+    combination is rejected rather than silently ignored.
+
+    ``long_tail_sampler`` is ``"class_balanced"`` / ``"repeat_factor"`` or
+    a config dict (``power`` / ``threshold`` / ``max_repeat`` / ``seed``).
+    It is mutually exclusive with ``hard_examples`` (both replace the train
+    sampler) and is also single-device only.
 
     See the design doc (§8) for the contract; returns a
     :class:`TaskTrainResult` with checkpoint/export paths and best metrics.
     """
+    if recipe is not None:
+        from autovision.cli.recipes import apply_recipe
+
+        model_args, transform_args, trainer_args = apply_recipe(
+            recipe,
+            model_args=model_args,
+            transform_args=transform_args,
+            trainer_args=trainer_args,
+        )
     common_helpers.validate_trainer_args(
         trainer_args, allowed={"val_every_num_steps", "log_every_n_steps"}
     )
@@ -252,11 +282,69 @@ def train_object_detection(
 
             train_dataset = TwoViewObjectDetectionDataset(train_dataset)
         val_dataset = ObjectDetectionDataset(data_args, val_rows)
+        train_sampler = None
+        if hard_examples is not None and long_tail_sampler is not None:
+            raise ValueError(
+                "hard_examples and long_tail_sampler both replace the train "
+                "sampler; choose one weighting strategy."
+            )
+        if hard_examples is not None:
+            if num_devices > 1:
+                raise ValueError(
+                    "hard_examples weighted sampling is single-device only "
+                    "(a DDP DistributedSampler would override the weights); "
+                    "run with devices=1 or drop hard_examples."
+                )
+            from autovision.data.hard_examples import (
+                HardExampleManifest,
+                build_weighted_sampler,
+            )
+
+            manifest = HardExampleManifest.load(hard_examples)
+            train_paths = [str(row["image_path"]) for row in train_rows]
+            train_sampler = build_weighted_sampler(
+                manifest,
+                train_paths,
+                alpha=hard_example_alpha,
+                max_repeat=hard_example_max_repeat,
+                seed=seed,
+            )
+        elif long_tail_sampler is not None:
+            if num_devices > 1:
+                raise ValueError(
+                    "long_tail_sampler weighted sampling is single-device only "
+                    "(a DDP DistributedSampler would override the weights); "
+                    "run with devices=1 or drop long_tail_sampler."
+                )
+            from autovision.data.samplers import build_long_tail_sampler
+
+            if isinstance(long_tail_sampler, str):
+                sampler_config: dict[str, Any] = {"strategy": long_tail_sampler}
+            elif isinstance(long_tail_sampler, dict):
+                sampler_config = dict(long_tail_sampler)
+            else:
+                raise ValueError(
+                    "long_tail_sampler must be a strategy name or a config dict."
+                )
+            allowed = {
+                "strategy", "power", "threshold", "max_repeat", "seed", "num_samples",
+            }
+            unknown = set(sampler_config) - allowed
+            if unknown:
+                raise ValueError(
+                    f"Unknown long_tail_sampler key(s) {sorted(unknown)}; "
+                    f"accepted: {sorted(allowed)}."
+                )
+            sampler_config.setdefault("seed", seed)
+            train_sampler = build_long_tail_sampler(
+                train_rows, **sampler_config
+            )
         train_loader = common_helpers.build_task_dataloader(
             train_dataset, batch_size=per_device_batch,
             num_workers=num_workers_resolved, train=True,
             # Step-windowed augmentation: see build_task_dataloader's note.
             persistent_workers=False,
+            sampler=train_sampler,
         )
         val_loader = common_helpers.build_task_dataloader(
             val_dataset, batch_size=per_device_batch,

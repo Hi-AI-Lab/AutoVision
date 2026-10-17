@@ -5,6 +5,24 @@
 # section 6.3). Keep this import before the names below re-export the
 # manifest so ``from autovision.registry import ASSET_MANIFEST`` observes it.
 from autovision.registry import apache_assets  # noqa: F401
+from autovision.registry.catalog import (
+    MODEL_CATALOG,
+    ModelEntry,
+    describe_model,
+    format_model_table,
+    get_model_entry,
+    list_task_models,
+)
+from autovision.registry.deployment_gates import (
+    BenchmarkGate,
+    DataSnapshotGate,
+    DeploymentGate,
+    LicenseGate,
+    ModelCardGate,
+    ParityGate,
+    Sha256Gate,
+    default_gates,
+)
 from autovision.registry.downloadable import (
     ASSET_MANIFEST,
     DownloadableModel,
@@ -22,13 +40,27 @@ from autovision.registry.model_registry import (
 
 __all__ = [
     "ASSET_MANIFEST",
+    "BenchmarkGate",
+    "DataSnapshotGate",
+    "DeploymentGate",
     "DownloadableModel",
     "DownloadableModelError",
+    "LicenseGate",
     "MLflowModelRegistry",
+    "MODEL_CATALOG",
     "MODEL_STAGES",
+    "ModelCardGate",
+    "ModelEntry",
     "ModelRegistry",
+    "ParityGate",
     "RegistryEntry",
     "RegistryError",
+    "Sha256Gate",
+    "default_gates",
+    "describe_model",
+    "format_model_table",
+    "get_model_entry",
+    "list_task_models",
     "register_downloadable",
     "resolve_downloadable",
 ]

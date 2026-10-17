@@ -4,7 +4,8 @@
 Seven repackaged COCO detectors — third-party trained heads on Meta
 DINOv3 backbones — live in a store OUTSIDE the git tree
 (``~/Research/Model/AutoVision`` by default; ``AUTOVISION_USER_HELD_ROOT``
-overrides) as ``<variant>/{weights.pt, warm_start.pt, ASSET.json}``
+overrides) as ``<variant>/{weights.pt, warm_start.pt, ASSET.json}`` or,
+after the store was split by task, ``detection/<variant>/{...}``
 (packing records: the store's ``RECORDS-2026-10-16.md`` §B). This registry
 pins IDENTITY (sha256 of both containers, mirroring
 :mod:`autovision.registry.gtr_assets`), never distribution: the entries are
@@ -89,6 +90,11 @@ class UserHeldAsset:
     #: Load-contract build overrides. ConvNeXt checkpoints carry a 6-layer
     #: / 256-wide decoder; ``None`` (ViT) = the variant spec recipe.
     dec_layers: int | None = None
+    #: This checkpoint contains ``backbone.sta.*`` weights. The DEIMv2-derived
+    #: spatial prior was removed for licensing, so the no-STA ViT adapter
+    #: cannot load it; loading is rejected rather than silently dropping the
+    #: fusion tensors.
+    requires_removed_sta: bool = False
     decoder_hidden_dim: int | None = None
     image_size: tuple[int, int] = (640, 640)
     num_classes: int = 80
@@ -97,6 +103,14 @@ class UserHeldAsset:
 
     @property
     def directory(self) -> Path:
+        # The store may keep the detector category in ``detection/`` (the
+        # task-split layout) or directly under the root (the original
+        # layout). Prefer the nested directory when it exists; an
+        # ``AUTOVISION_USER_HELD_ROOT`` pointing straight at ``detection/``
+        # falls through to the root form.
+        nested = USER_HELD_ROOT / "detection" / self.name
+        if nested.is_dir():
+            return nested
         return USER_HELD_ROOT / self.name
 
     @property
@@ -115,8 +129,17 @@ class UserHeldAsset:
         portable) together with the build-time overrides the checkpoint's
         shapes require (``backbone_pretrained=False``: the store
         checkpoint carries the backbone; ``dec_layers`` /
-        ``decoder_hidden_dim`` for ConvNeXt).
+        ``decoder_hidden_dim`` for ConvNeXt). STA-era ViT checkpoints are
+        rejected because the spatial prior was removed for licensing.
         """
+        if self.requires_removed_sta:
+            raise UserHeldAssetError(
+                f"User-held asset '{self.name}' contains backbone.sta.* "
+                "weights. The DEIMv2-derived spatial prior was removed for "
+                "licensing and the no-STA ViT adapter cannot load this "
+                "checkpoint faithfully. Retrain/export a no-STA checkpoint, "
+                "or use a ConvNeXt asset."
+            )
         args: dict[str, Any] = {
             "detector_checkpoint": self.name,
             "backbone_pretrained": False,
@@ -141,6 +164,7 @@ USER_HELD_ASSETS: dict[str, UserHeldAsset] = {
         source_sha256="dfd34210a1a3375793d149a55d9b49e6e8b783458bdd4cd76fd28fa2d61dbb37",
         weights_sha256="e7153c95379cb27e695aa1899041300dcb6b9dfc62c4cf913f158ebe057c3839",
         warm_start_sha256="5e303fba99e28aa99e574a8ef2c0cb87fa78f8c362bf80d8cb1d37e2065b410c",
+        requires_removed_sta=True,
     ),
     "dinov3-vitt16plus": UserHeldAsset(
         name="dinov3-vitt16plus",
@@ -149,6 +173,7 @@ USER_HELD_ASSETS: dict[str, UserHeldAsset] = {
         source_sha256="af499c825436013098a77a028ff5cf08dbf31118f4d68b15eefa6fdd9635f5d2",
         weights_sha256="96603bff98fb7c49ada16f2d2eb0b86324737c8b8de36cfed2215a8b25919202",
         warm_start_sha256="8b93a15f0193de4587bc5e4029bbcc7a61b03259ad08089b09d851bad22bd08f",
+        requires_removed_sta=True,
     ),
     "dinov3-vits16": UserHeldAsset(
         name="dinov3-vits16",
@@ -157,6 +182,7 @@ USER_HELD_ASSETS: dict[str, UserHeldAsset] = {
         source_sha256="4812416b861a80f305889cf1408775044c8b05f1baf9be45cd4b1d0edd5d4532",
         weights_sha256="9c38f900d1a5472b3b2b062acf5f841df298abc8f85f38eee912e82ff40d9f88",
         warm_start_sha256="589f593cf41f588444b0adc637e5cf29c25b934af21980e7d2f5a25ebc2befc5",
+        requires_removed_sta=True,
     ),
     "dinov3-convnext-tiny": UserHeldAsset(
         name="dinov3-convnext-tiny",
@@ -275,6 +301,12 @@ def resolve_avwarm_start_source(source: str | Path) -> Path:
     asset = USER_HELD_ASSETS.get(str(source))
     if asset is None:
         return path
+    if asset.requires_removed_sta:
+        raise UserHeldAssetError(
+            f"User-held asset '{asset.name}' contains backbone.sta.* weights; "
+            "the DEIMv2-derived spatial prior was removed for licensing. "
+            "Use a ConvNeXt asset or a retrained no-STA checkpoint."
+        )
     if not asset.warm_start_path.is_file():
         raise UserHeldAssetError(
             f"User-held asset '{asset.name}' is registered but its "

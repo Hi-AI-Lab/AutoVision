@@ -1,25 +1,29 @@
 AutoVision
 Copyright 2026 AutoVision contributors
 
-This product is licensed under the Apache License, Version 2.0 (the
-"License"); see the LICENSE file. Unless required by applicable law or
+AutoVision-authored code is licensed under the Apache License, Version 2.0
+(the "License"); see the LICENSE file. Unless required by applicable law or
 agreed to in writing, software distributed under the License is distributed
 on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
+
+Third-party components are listed below. The DEIMv2-derived SpatialPriorModule
+that earlier revisions carried was removed (2026-10-17); this distribution
+contains no DEIMv2 code. See THIRD_PARTY_LICENSES.md and
+docs/provenance/LEDGER.md.
 
 ==========================================================================
 Third-party code contained in this repository
 ==========================================================================
 
-Vendored or ported components (file-level ledger: docs/provenance/LEDGER.md,
-remediation plan: docs/design/28-clean-provenance-refactor.md):
+Vendored or ported components (module/file-level ledger:
+docs/provenance/LEDGER.md; full non-Apache license texts:
+THIRD_PARTY_LICENSES.md; policy: CONTRIBUTING.md):
 
-* DEIM / DEIMv2 (Apache License 2.0)
-  Source: https://github.com/Intellindust-AI-Lab/DEIMv2
-          https://github.com/Intellindust-AI-Lab/DEIM
+* DEIM (Apache License 2.0, with the upstream copyright preamble)
+  Source: https://github.com/Intellindust-AI-Lab/DEIM
   Used for: the flat-cosine LR schedule
-  (src/autovision/tasks/shared/flat_cosine.py) and the spatial-prior
-  adapter logic re-derived in
-  src/autovision/tasks/detection/detr/backbone_wrappers.py.
+  (src/autovision/tasks/shared/flat_cosine.py), re-implemented by
+  AutoVision on a step-based interface.
 
 * D-FINE (Apache License 2.0)
   Source: https://github.com/Peterande/D-FINE
@@ -87,6 +91,28 @@ remediation plan: docs/design/28-clean-provenance-refactor.md):
   Used for: tensor/ops foundations; RandomResizedCrop-family sampling math
   and roi_align/grid_sample referenced by data-augmentation utilities.
 
+* Roboflow RF-DETR (Apache License 2.0)
+  Source: https://github.com/roboflow/rf-detr
+  Used for: the RF-DETR detector family through HuggingFace transformers
+  (encoders/rfdetr/, tasks/detection/rfdetr/); weights are downloaded from
+  the upstream Roboflow HuggingFace repositories, not vendored.
+
+* PaddleDetection PP-PicoDet (Apache License 2.0)
+  Source: https://github.com/PaddlePaddle/PaddleDetection
+  Used for: the PicoDet architecture/algorithm reference; the implementation
+  in tasks/detection/picodet/ is authored by AutoVision.
+
+* ByteTrack (MIT License, Copyright (c) 2021 Yifu Zhang)
+  Source: https://github.com/ifzhang/ByteTrack
+  Used for: the association algorithm (ECCV 2022) referenced by
+  tracking/byte_track.py; the implementation is authored by AutoVision.
+
+* SAHI — Slicing Aided Hyper Inference (MIT License)
+  Source: https://github.com/obss/sahi
+  Used for: the slicing/tiling algorithm referenced by
+  tasks/shared/sahi.py and tasks/shared/tiling_utils.py; the implementation
+  is authored by AutoVision.
+
 Algorithm references (ideas/papers, no code vendored): DINO (Apache-2.0,
 facebookresearch/dino), DetCon (Apache-2.0, google-deepmind/detcon),
 PaKA (arXiv 2509.05606), SimCLR, DINOv2 (Apache-2.0), DEIM schedulers.
@@ -114,17 +140,15 @@ never accepts non-Apache weight terms on the user's behalf.
   terms on their own account). Models fine-tuned from these weights
   inherit the non-commercial restriction.
 
-* DEIMv2 public checkpoints as distillation teachers: DEIMv2's code is
-  Apache-2.0, but checkpoints whose backbone descends from DINOv3 (e.g.
-  DEIMv2-DINOv3-S) embed DINOv3-derived weights and carry the DINOv3
-  License obligations listed above. The framework's position: research
-  comparison/distillation from such teachers is the user's responsibility
-  under those terms; models produced by distilling FROM them are treated
-  as DINOv3-obligation-carrying. Commercial products should use
-  obligation-free teachers (own-SSL DINOv2-line backbones, timm /
-  torchvision initializations, or D-FINE COCO components) — the manifest
-  entry for every teacher weight records its license, and the loader logs
-  a warning for non-unrestricted entries.
+* DEIMv2 public checkpoints / converted weights (external; NOT distributed):
+  subject to the DEIMv2 License (NON-COMMERCIAL), and checkpoints whose
+  backbone descends from DINOv3 (e.g. DEIMv2-DINOv3-S) also carry the DINOv3
+  License obligations listed above. AutoVision no longer contains DEIMv2-
+  derived code (the former SpatialPriorModule was removed), but third-party
+  DEIMv2 weights remain non-commercial. Check every checkpoint card before
+  any commercial use; commercial products should use obligation-free
+  teachers (own-SSL DINOv2-line backbones, timm/torchvision initializations,
+  or D-FINE COCO components).
 
 * The fully clean path for unrestricted commercial use: build any backbone
   config-only (``-notpretrained``) and pretrain it with this framework's
@@ -135,5 +159,5 @@ Runtime dependencies (not vendored) carry their own licenses; see
 pyproject.toml. Optional integrations with AGPL-licensed or custom-licensed
 software (e.g. Ultralytics, DINOv3/DINOv2 weights) are isolated behind
 optional extras and runtime downloads and must never have source or weights
-copied into this repository (docs/design/28-clean-provenance-refactor.md,
-rule R18).
+copied into this repository (docs/provenance/LEDGER.md;
+CONTRIBUTING.md license/provenance red lines).

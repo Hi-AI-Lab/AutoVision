@@ -60,6 +60,7 @@ def create_app(
     artifact: "str | Path | None" = None,
     device: str | None = None,
     providers: "list[str] | None" = None,
+    openvino_device: str = "CPU",
     threshold: float = 0.5,
     max_batch: int = 16,
     class_names: dict[int, str] | None = None,
@@ -69,9 +70,9 @@ def create_app(
     ``model`` may be an exported ``.pt`` path or a ``TaskNetwork`` (it gets
     wrapped in an :class:`~autovision.inference.InferenceEngine`); pass a
     ready engine via ``engine=`` instead. The engine path
-    (``backend``/``artifact``) selects the torch / ONNX / TensorRT forward,
-    matching the stream runtime. ``max_batch`` bounds one request's image
-    count (a 413 otherwise).
+    (``backend``/``artifact``) selects the torch / ONNX / TensorRT /
+    OpenVINO forward, matching the stream runtime. ``max_batch`` bounds one
+    request's image count (a 413 otherwise).
     """
     try:
         from fastapi import FastAPI, Request
@@ -94,7 +95,7 @@ def create_app(
             raise AutoVisionError("create_app needs either engine= or model=.")
         engine = InferenceEngine(
             model, backend=backend, artifact=artifact, device=device,
-            providers=providers,
+            providers=providers, openvino_device=openvino_device,
         )
     names = dict(class_names or {})
     metrics = MetricsRegistry()
@@ -114,6 +115,7 @@ def create_app(
             "backend": engine.backend,
             "model": type(network).__name__ if network is not None else None,
             "artifact": str(engine.artifact) if getattr(engine, "artifact", None) else None,
+            "openvino_device": getattr(engine, "openvino_device", None),
             "threshold": threshold,
         }
 

@@ -39,6 +39,7 @@ class Dinov3EomtInstanceSegmentationTrain(Dinov2EomtInstanceSegmentationTrain):
             mlp_ratio=model_args.mlp_ratio,
             use_gated_mlp=model_args.use_gated_mlp,
             drop_path_rate=model_args.drop_path_rate,
+            layer_norm_eps=model_args.layer_norm_eps,
             load_weights=model_args.load_weights,
             weight_source=model_args.weight_source,
             score_threshold=model_args.score_threshold,

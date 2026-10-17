@@ -93,28 +93,28 @@ class TestRegistry:
         """Baseline: DINOv2 ViT variants use NO spatial prior, and the
         vits14 recipe projects to hidden 224 with a 4-layer decoder."""
         _, spec = resolve_detr_variant("detr/dinov2-vits14")
-        assert spec.use_sta is False
-        assert spec.conv_inplane == 2 * 14
+        assert not hasattr(spec, "use_sta")
+        assert not hasattr(spec, "conv_inplane")
         assert spec.hidden_dim == 224
         assert spec.dec_layers == 4
         assert spec.enc_dim_feedforward == 896
         assert spec.dec_dim_feedforward == 1792
         _, base = resolve_detr_variant("detr/dinov2-vitb14")
-        assert base.conv_inplane == 4 * 14 and base.hidden_dim == 768
+        assert base.hidden_dim == 768
         _, giant = resolve_detr_variant("detr/dinov2-vitg14")
         assert giant.interaction_indexes == (19, 29, 39)
 
-    def test_dinov3_variants_use_sta(self):
-        """Baseline: DINOv3 ViT variants fuse the CNN spatial prior with
-        conv_inplane = factor x patch_size (16)."""
+    def test_dinov3_variants_keep_vit_with_nosta_adapter(self):
+        """DINOv3 ViT stays, but the DEIMv2-derived spatial prior was
+        removed for licensing; the variant spec carries no STA fields."""
         _, tiny = resolve_detr_variant("detr/dinov3-vitt16")
-        assert tiny.use_sta is True
-        assert tiny.conv_inplane == 1 * 16
+        assert not hasattr(tiny, "use_sta")
+        assert not hasattr(tiny, "conv_inplane")
         assert tiny.hidden_dim == 192
         assert tiny.enc_expansion == 0.34 and tiny.enc_depth_mult == 0.67
         assert tiny.requires_dinov3 is True
         _, small = resolve_detr_variant("detr/dinov3-vits16")
-        assert small.conv_inplane == 2 * 16 and small.hidden_dim == 224
+        assert small.hidden_dim == 224
 
     def test_eupe_names_are_aliases(self):
         base = resolve_detr_variant("detr/dinov3-vits16")[1]
@@ -289,11 +289,15 @@ class TestViTBackboneWrapper:
         backbone = train_model.model.backbone
         assert backbone.backbone_model is backbone._model_wrapper.raw_module()
         # The pretrained ViT is the only part of the backbone at low LR —
-        # STA + projection layers must live OUTSIDE backbone_model.
+        # projection/norm layers must live OUTSIDE backbone_model.
         backbone_ids = {id(p) for p in backbone.backbone_model.parameters()}
-        sta_params = list(backbone.sta.parameters())
-        assert sta_params
-        assert all(id(p) not in backbone_ids for p in sta_params)
+        adapter_params = [
+            p
+            for module in (backbone.convs, backbone.norms)
+            for p in module.parameters()
+        ]
+        assert adapter_params
+        assert all(id(p) not in backbone_ids for p in adapter_params)
 
     def test_finetune_false_freezes_vit(self):
         train_model = make_train_model()
@@ -301,6 +305,31 @@ class TestViTBackboneWrapper:
         backbone._model_wrapper.requires_grad_(False)
         backbone._model_wrapper.eval()
         assert not any(p.requires_grad for p in backbone.backbone_model.parameters())
+
+
+class TestDinov3ViTNoSta:
+    """DINOv3 ViT is retained but runs the no-STA adapter after the
+    licensing removal; no ``backbone.sta.*`` state is created."""
+
+    def test_builds_and_forwards_without_sta(self):
+        from autovision.tasks.detection.detr.task_model import (
+            DETRObjectDetection,
+        )
+
+        model = DETRObjectDetection(
+            num_classes=2,
+            model_name="dinov3-vitt16-notpretrained",
+            image_size=(224, 224),
+            num_queries=20,
+            load_weights=False,
+        )
+        assert not hasattr(model.backbone, "sta")
+        state_keys = list(model.state_dict())
+        assert not any(k.startswith("backbone.sta.") for k in state_keys)
+        assert any(k == "backbone.convs.0.weight" for k in state_keys)
+        out = model._forward_train(torch.randn(2, 3, 224, 224))
+        assert out["pred_logits"].shape == (2, 20, 2)
+        assert out["pred_boxes"].shape == (2, 20, 4)
 
 
 class TestTaskModel:
@@ -448,12 +477,17 @@ class TestOptimizerGroups:
         # Full parameter coverage across groups.
         total = sum(len(g["params"]) for g in optimizer.param_groups)
         assert total == len(list(train_model.model.parameters()))
-        # The STA prior trains at detector LR (randomly initialized).
-        sta_ids = {
-            id(p) for p in train_model.model.backbone.sta.parameters()
+        # The projection/norm adapter trains at detector LR.
+        adapter_ids = {
+            id(p)
+            for module in (
+                train_model.model.backbone.convs,
+                train_model.model.backbone.norms,
+            )
+            for p in module.parameters()
         }
         detector_ids = {id(p) for g in groups.values() for p in g["params"]}
-        assert sta_ids <= detector_ids
+        assert adapter_ids <= detector_ids
 
     def test_scheduler_is_flat_cosine(self):
         from autovision.tasks.shared.flat_cosine import (
@@ -642,7 +676,7 @@ class TestCocoCheckpointLoaderViT:
                 continue
             if not key.startswith("backbone_wrapper._model."):
                 if key.startswith(
-                    ("backbone.sta.", "backbone.convs.", "backbone.norms.",
+                    ("backbone.convs.", "backbone.norms.",
                      "encoder.", "decoder.")
                 ):
                     # wrapper extras + encoder/decoder: identical names on
@@ -720,7 +754,7 @@ class TestCocoCheckpointLoaderViT:
         target = self._model(num_classes=80)
         summary = load_baseline_coco_checkpoint(target, path)
         assert summary["backbone"] == 211
-        assert summary["backbone_extras"] == 42  # sta 24 + convs 3 + norms 15
+        assert summary["backbone_extras"] == 18  # convs 3 + norms 15
         assert summary["decoder_skipped_cls"] == 0
         # spot tensors identical across the remap
         src_sd = source.state_dict()
@@ -731,7 +765,6 @@ class TestCocoCheckpointLoaderViT:
             "backbone_wrapper._model.model.layer.5.layer_scale1.lambda1",
             "backbone_wrapper._model.embeddings.register_tokens",
             "backbone_wrapper._model.embeddings.mask_token",
-            "backbone.sta.stem.0.weight",
             "backbone.convs.1.weight",
             "backbone.norms.2.running_var",
             "encoder.fpn_blocks.0.conv1.conv.weight",

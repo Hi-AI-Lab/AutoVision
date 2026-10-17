@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 
 import pytest
+import torch
 
 from autovision.registry.user_held_assets import (
     USER_HELD_ASSETS,
@@ -26,6 +27,9 @@ from autovision.registry.user_held_assets import (
 )
 
 _MANIFEST = USER_HELD_ROOT / "manifest.json"
+if not _MANIFEST.is_file():
+    # Task-split store layout: the detector category lives in detection/.
+    _MANIFEST = USER_HELD_ROOT / "detection" / "manifest.json"
 _store_present = pytest.mark.skipif(
     not _MANIFEST.is_file(), reason="user-held store not present"
 )
@@ -60,6 +64,7 @@ class TestRegistryShape:
             assert asset.license_id == "DINOv3-License+NOASSERTION"
             assert asset.redistributable is False
             assert asset.origin.endswith(".pt")
+            assert asset.requires_removed_sta is (name in _VIT_NAMES), name
 
     def test_model_names_resolve_in_detr_registry(self):
         from autovision.tasks.detection.detr.variants import resolve_detr_variant
@@ -93,9 +98,9 @@ class TestRegistryShape:
         # time against the (overridable) store root.
         assert args["detector_checkpoint"] == "dinov3-convnext-base"
 
-        vit = user_held_model_args("dinov3-vitt16")
-        assert "dec_layers" not in vit
-        assert "decoder_hidden_dim" not in vit
+        for name in _VIT_NAMES:
+            with pytest.raises(UserHeldAssetError, match="spatial prior"):
+                user_held_model_args(name)
 
     def test_unknown_name_error_lists_registered(self):
         with pytest.raises(UserHeldAssetError) as excinfo:
@@ -103,6 +108,67 @@ class TestRegistryShape:
         message = str(excinfo.value)
         assert "dinov3-vitt16" in message
         assert "D1-a" in message
+
+
+class TestStaRemovalGuards:
+    """The DEIMv2-derived spatial prior was removed for licensing; every
+    entry point that would load an STA-era ViT checkpoint refuses it."""
+
+    def test_registry_entry_points_reject_vit_assets(self):
+        from autovision.registry.downloadable import DownloadableModelError
+        from autovision.tasks.detection.detr.coco_checkpoint import (
+            resolve_detector_checkpoint,
+        )
+
+        for name in _VIT_NAMES:
+            with pytest.raises(UserHeldAssetError, match="spatial prior"):
+                user_held_model_args(name)
+            with pytest.raises(UserHeldAssetError, match="spatial prior"):
+                resolve_avwarm_start_source(name)
+            with pytest.raises(DownloadableModelError, match="spatial prior"):
+                resolve_detector_checkpoint(name)
+
+    def test_convnext_assets_are_not_blocked(self):
+        for name in _CONVNEXT_NAMES:
+            assert user_held_model_args(name)["detector_checkpoint"] == name
+            assert USER_HELD_ASSETS[name].requires_removed_sta is False
+
+    def test_baseline_loader_rejects_sta_tensors(self, tmp_path):
+        from autovision.tasks.detection.detr.coco_checkpoint import (
+            load_baseline_coco_checkpoint,
+        )
+
+        path = tmp_path / "sta_era.pt"
+        torch.save(
+            {
+                "train_model": {
+                    "ema_model.model.backbone.dinov3.patch_embed.proj.weight":
+                        torch.zeros(1),
+                    "ema_model.model.backbone.sta.stem.0.weight": torch.zeros(1),
+                }
+            },
+            path,
+        )
+        # Fails before touching the target model, with the licensing reason.
+        with pytest.raises(ValueError, match="spatial prior"):
+            load_baseline_coco_checkpoint(object(), path)
+
+    def test_warm_start_loader_rejects_sta_tensors(self, tmp_path):
+        from autovision.registry.assets import LicenseRef
+        from autovision.registry.warm_start import save_warm_start
+        from autovision.tasks.detection.detr.task_model import (
+            load_warm_start_into_network,
+        )
+
+        path = save_warm_start(
+            tmp_path / "sta_warm_start.pt",
+            {"backbone.sta.stem.0.weight": torch.zeros(1)},
+            {},
+            LicenseRef(id="test", origin="unit test"),
+        )
+        # No network access is needed: the STA guard precedes the transfer.
+        with pytest.raises(ValueError, match="spatial prior"):
+            load_warm_start_into_network(object(), path)
 
 
 class TestConfigAcceptsNames:
@@ -150,14 +216,16 @@ class TestStoreConsistency:
             resolve_detector_checkpoint,
         )
 
-        resolved = resolve_detector_checkpoint("dinov3-vitt16")
-        assert resolved == USER_HELD_ASSETS["dinov3-vitt16"].weights_path
+        name = "dinov3-convnext-tiny"
+        resolved = resolve_detector_checkpoint(name)
+        assert resolved == USER_HELD_ASSETS[name].weights_path
         assert resolved.is_file()
 
     @_store_present
     def test_warm_start_name_resolution(self):
-        resolved = resolve_avwarm_start_source("dinov3-vitt16")
-        assert resolved == USER_HELD_ASSETS["dinov3-vitt16"].warm_start_path
+        name = "dinov3-convnext-tiny"
+        resolved = resolve_avwarm_start_source(name)
+        assert resolved == USER_HELD_ASSETS[name].warm_start_path
         assert resolved.is_file()
 
     def test_warm_start_unknown_name_passes_through(self):
@@ -165,7 +233,7 @@ class TestStoreConsistency:
         assert passthrough == Path("some/other/path.pt")
 
     @_store_present
-    def test_vitt16_real_load_matches_recorded_summary(self):
+    def test_convnext_real_load_matches_recorded_summary(self):
         """End-to-end: build through the train model (name resolution +
         load) and match the summary the packing session recorded."""
         from autovision.tasks.detection.detr import (
@@ -177,14 +245,15 @@ class TestStoreConsistency:
             resolve_detector_checkpoint,
         )
 
+        name = "dinov3-convnext-tiny"
         args = DETRObjectDetectionTrainArgs(
-            backbone="dinov3-vitt16-notpretrained",
+            backbone=name,
             num_classes=80,
-            **user_held_model_args("dinov3-vitt16"),
+            **user_held_model_args(name),
         )
         model = DETRObjectDetectionTrain(args)
         recorded = json.loads(
-            (USER_HELD_ROOT / "dinov3-vitt16" / "ASSET.json").read_text()
+            (USER_HELD_ASSETS[name].directory / "ASSET.json").read_text()
         )["loader_summary"]
         path = resolve_detector_checkpoint(args.detector_checkpoint)
         actual = load_baseline_coco_checkpoint(model.model, path)
@@ -211,7 +280,7 @@ class TestStoreConsistency:
             DETRObjectDetectionTrain(args)
 
     @_store_present
-    def test_warm_start_name_loads_into_network(self):
+    def test_convnext_warm_start_name_loads_into_network(self):
         from autovision.tasks.detection.detr import (
             DETRObjectDetectionTrain,
             DETRObjectDetectionTrainArgs,
@@ -220,12 +289,13 @@ class TestStoreConsistency:
             load_warm_start_into_network,
         )
 
+        name = "dinov3-convnext-tiny"
         args = DETRObjectDetectionTrainArgs(
-            backbone="dinov3-vitt16-notpretrained", num_classes=80
+            backbone=name, num_classes=80, **user_held_model_args(name)
         )
         model = DETRObjectDetectionTrain(args)
-        summary = load_warm_start_into_network(model.model, "dinov3-vitt16")
-        assert summary
+        summary = load_warm_start_into_network(model.model, name)
+        assert summary["transferred"] > 0
 
     @pytest.mark.skipif(
         os.environ.get("AUTOVISION_USER_HELD_TESTS") != "1",

@@ -26,13 +26,16 @@ from autovision.tasks.task_model import TaskNetwork
 
 __all__ = ["GTRDepthEstimation", "GTR_DEPTH_VARIANTS"]
 
-#: variant -> (embed_dim, num_heads, ffn_ratio); encoder/head width follows
-#: the official pretrain configs (hidden == embed_dim).
-GTR_DEPTH_VARIANTS: dict[str, tuple[int, int, float]] = {
-    "s": (192, 3, 4.0),
-    "m": (256, 4, 4.0),
-    "l": (384, 6, 4.0),
-    "x": (384, 6, 6.0),
+#: variant -> (embed_dim, num_heads, ffn_ratio, hidden); ``hidden`` is the
+#: encoder/DPT input width. S/M coincide with the ViT width; the official
+#: L/X depth checkpoints keep a 256-wide encoder/head while the ViT is 384
+#: (same pattern as semseg L/X), so the width cannot be derived from
+#: ``embed_dim``.
+GTR_DEPTH_VARIANTS: dict[str, tuple[int, int, float, int]] = {
+    "s": (192, 3, 4.0, 192),
+    "m": (256, 4, 4.0, 256),
+    "l": (384, 6, 4.0, 256),
+    "x": (384, 6, 6.0, 256),
 }
 
 
@@ -57,7 +60,7 @@ class GTRDepthEstimation(ONNXExportMixin, TaskNetwork):
                 f"Unknown GTR depth variant '{variant}'; expected one of "
                 f"{sorted(GTR_DEPTH_VARIANTS)}."
             )
-        embed_dim, num_heads, ffn_ratio = GTR_DEPTH_VARIANTS[variant]
+        embed_dim, num_heads, ffn_ratio, hidden = GTR_DEPTH_VARIANTS[variant]
         self.variant = variant
         self.image_size = tuple(image_size)
         self.normalize = NormalizeArgs()
@@ -69,7 +72,7 @@ class GTRDepthEstimation(ONNXExportMixin, TaskNetwork):
         )
         self.encoder = GTREncoder(
             in_channels=[embed_dim] * 3,
-            hidden_dim=embed_dim,
+            hidden_dim=hidden,
             scale_factors=[2.0, 1.0, 0.5],
             feat_strides=[8, 16, 32],
             num_blocks=3,
@@ -78,7 +81,7 @@ class GTRDepthEstimation(ONNXExportMixin, TaskNetwork):
             force_contiguous=False,
         )
         self.decoder = DPTDepthHead(
-            in_channels=[embed_dim] * 3,
+            in_channels=[hidden] * 3,
             features=features,
             use_bn=False,
             log_depth=True,  # released weights decode via exp(clamp)

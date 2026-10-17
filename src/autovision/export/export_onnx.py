@@ -180,9 +180,14 @@ class ONNXExportMixin(nn.Module):
         opset_version: int | None = None,
         simplify: bool = True,
         verify: bool = True,
+        write_spec: bool = True,
         format_args: dict[str, Any] | None = None,
     ) -> Path:
         """Export the model to ONNX with verification gates.
+
+        ``write_spec=False`` is used by the TensorRT/OpenVINO wrappers for
+        their intermediate graph: only the final artifact gets a
+        ``.postprocess.json`` sidecar.
 
         ``dynamic_spatial=True`` marks the H/W axes dynamic (roadmap D2):
         the graph then accepts any input size the network itself supports
@@ -300,7 +305,7 @@ class ONNXExportMixin(nn.Module):
                 )
                 self._legacy_onnx_export(
                     module, example_tensor, out, spec, example_name, format_args,
-                    opset_version, dynamic_batch_size, dynamic_spatial,
+                    opset_version, dynamic_batch_size,
                 )
 
         # 4. FP16 conversion with the op blacklist.
@@ -326,6 +331,8 @@ class ONNXExportMixin(nn.Module):
                 dynamic_spatial=dynamic_spatial,
             )
         logger.info("Exported ONNX model to '%s' (%s).", out, precision)
+        if write_spec:
+            _maybe_write_postprocess_spec(self, out)
         return out
 
     # ── internals ───────────────────────────────────────────────────────
@@ -571,6 +578,7 @@ class ONNXExportMixin(nn.Module):
                 opset_version=opset_version,
                 simplify=simplify,
                 verify=verify,
+                write_spec=False,
             )
 
             # 2. Static quantization (QDQ) with calibration.
@@ -615,6 +623,7 @@ class ONNXExportMixin(nn.Module):
         else:
             _drop_onnx_artifacts(fp32_path)
         logger.info("Exported int8 ONNX model to '%s'.", out)
+        _maybe_write_postprocess_spec(self, out)
         return out
 
     def _verify_int8_parity(
@@ -699,6 +708,10 @@ class ONNXExportMixin(nn.Module):
         """
         from autovision.export.tensorrt_helpers import export_onnx_to_tensorrt
 
+        # The intermediate ONNX is not the delivered artifact: only the
+        # engine gets a postprocess sidecar.
+        effective_onnx_args = {**(onnx_args or {}), "write_spec": False}
+
         if precision == "int8":
             if calibration_data is None and calibration_reader is None:
                 raise ValueError(
@@ -733,7 +746,7 @@ class ONNXExportMixin(nn.Module):
                     out=out,
                     precision="int8",
                     model_dtype=next(self.parameters()).dtype,
-                    onnx_args=onnx_args,
+                    onnx_args=effective_onnx_args,
                     min_batch_size=min_batch_size,
                     opt_batch_size=opt_batch_size,
                     max_batch_size=max_batch_size,
@@ -747,14 +760,19 @@ class ONNXExportMixin(nn.Module):
                 _drop(int8_onnx.with_suffix(".fp32.onnx"))
                 if not keep_int8_onnx:
                     _drop(int8_onnx)
+            _maybe_write_postprocess_spec(self, engine)
+            if not keep_int8_onnx:
+                # export_onnx_int8 wrote the staged ONNX sidecar; the engine
+                # carries its own, so do not leave a dangling contract.
+                Path(str(int8_onnx) + ".postprocess.json").unlink(missing_ok=True)
             return engine
 
-        return export_onnx_to_tensorrt(
+        engine = export_onnx_to_tensorrt(
             export_onnx_fn=self.export_onnx,
             out=out,
             precision=precision,
             model_dtype=next(self.parameters()).dtype,
-            onnx_args=onnx_args,
+            onnx_args=effective_onnx_args,
             min_batch_size=min_batch_size,
             opt_batch_size=opt_batch_size,
             max_batch_size=max_batch_size,
@@ -763,6 +781,8 @@ class ONNXExportMixin(nn.Module):
             verbose=verbose,
             debug=debug,
         )
+        _maybe_write_postprocess_spec(self, engine)
+        return engine
 
     def export_openvino(
         self,
@@ -786,16 +806,39 @@ class ONNXExportMixin(nn.Module):
         """
         from autovision.export.openvino_helpers import export_onnx_to_openvino
 
-        return export_onnx_to_openvino(
+        xml_path = export_onnx_to_openvino(
             out=out,
             export_onnx_fn=self.export_onnx,
             model=self,
             precision=precision,
             device=device,
-            onnx_args=onnx_args,
+            onnx_args={**(onnx_args or {}), "write_spec": False},
             verify=verify,
             keep_onnx=keep_onnx,
         )
+        _maybe_write_postprocess_spec(self, xml_path)
+        return xml_path
+
+
+def _maybe_write_postprocess_spec(network: Any, artifact: Path) -> None:
+    """Write the decode contract only for task families that have one.
+
+    Segmentation / pose / depth / classification exports must keep working;
+    they simply have no DETR top-k contract to serialize. The explicit
+    ``postprocess_spec_family`` marker distinguishes the DETR detection task
+    models from other heads that also carry ``image_size``/``num_classes``
+    or ``num_top_queries`` (OBB / instance segmentation / PicoDet).
+    """
+    family = getattr(network, "postprocess_spec_family", None)
+    if family is None:
+        logger.debug("No postprocess spec for %s.", type(network).__name__)
+        return
+    from autovision.export.postprocess import write_postprocess_spec
+
+    try:
+        write_postprocess_spec(network, artifact, family=family)
+    except NotImplementedError:
+        logger.debug("No postprocess spec for %s.", type(network).__name__)
 
 
 def _repair_value_info(out: Path) -> None:

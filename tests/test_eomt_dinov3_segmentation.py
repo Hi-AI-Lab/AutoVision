@@ -50,7 +50,7 @@ from autovision.tasks.semantic_segmentation.dinov3_eomt import (
     Dinov3EomtSemanticSegmentationTrain,
     Dinov3EomtSemanticSegmentationTrainArgs,
 )
-from autovision.tasks.shared.eomt.modeling import build_eomt_model
+from autovision.tasks.shared.eomt.modeling import ROPE_PERIODS_KEY, build_eomt_model
 
 # Small HF-compatible EOMT layout (hidden 16 / queries 4 / blocks 3 crash).
 MODEL_KWARGS = {
@@ -245,6 +245,24 @@ class TestArgs:
                 num_classes=3, nonexistent_option=1
             )
 
+    def test_layer_norm_eps_default_and_forwarded(self):
+        default = Dinov3EomtSemanticSegmentationTrainArgs(num_classes=3)
+        assert default.layer_norm_eps == 1e-6
+        args = Dinov3EomtSemanticSegmentationTrainArgs(
+            num_classes=3, layer_norm_eps=1e-5, **MODEL_KWARGS
+        )
+        train = Dinov3EomtSemanticSegmentationTrain(args)
+        assert train.model.init_args["layer_norm_eps"] == 1e-5
+        assert train.model.model.layernorm.eps == 1e-5
+        assert train.model.model.layers[0].norm1.eps == 1e-5
+        assert train.model.model.upscale_block.block[0].layernorm2d.eps == 1e-5
+
+    def test_rejects_nonpositive_layer_norm_eps(self):
+        with pytest.raises(ValueError):
+            Dinov3EomtSemanticSegmentationTrainArgs(
+                num_classes=3, layer_norm_eps=0.0
+            )
+
 
 class TestBuilder:
     def test_builds_hf_eomt_dinov3_model(self):
@@ -254,6 +272,18 @@ class TestBuilder:
         assert model.config.num_register_tokens == 4
         # mlp_ratio maps to the DINOv3 intermediate_size.
         assert model.config.intermediate_size == 4 * MODEL_KWARGS["hidden_size"]
+
+    def test_layer_norm_eps_applied_to_scale_block(self):
+        # HF constructs EomtDinov3ScaleLayer's LayerNorm2d with its own
+        # default, so the builder must apply the requested eps everywhere.
+        model = build_eomt_model(
+            3, variant="dinov3", layer_norm_eps=1e-5, **MODEL_KWARGS
+        )
+        assert model.config.layer_norm_eps == 1e-5
+        assert model.layernorm.eps == 1e-5
+        assert model.layers[0].norm1.eps == 1e-5
+        assert model.layers[0].norm2.eps == 1e-5
+        assert model.upscale_block.block[0].layernorm2d.eps == 1e-5
 
     def test_gated_mlp_forwarded(self):
         model = build_eomt_model(
@@ -296,8 +326,72 @@ class TestTaskModel:
         model = make_model()
         assert model.init_args["num_classes"] == 3
         assert model.init_args["use_gated_mlp"] is False
+        assert model.init_args["layer_norm_eps"] == 1e-6
         assert "use_swiglu_ffn" not in model.init_args
         assert "load_weights" not in model.init_args
+
+    def test_layer_norm_eps_in_init_args(self):
+        model = make_model(layer_norm_eps=1e-5)
+        assert model.init_args["layer_norm_eps"] == 1e-5
+        assert model.model.layernorm.eps == 1e-5
+        assert model.model.upscale_block.block[0].layernorm2d.eps == 1e-5
+
+    def test_rope_periods_transport(self):
+        model = make_model()
+        state = {key: value.clone() for key, value in model.state_dict().items()}
+        state[ROPE_PERIODS_KEY] = torch.tensor([1.0, 2.0])
+        loaded = make_model()
+        loaded.load_train_state_dict(state)
+        torch.testing.assert_close(
+            loaded.model.rope_embeddings.inv_freq, torch.tensor([1.0, 0.5])
+        )
+        torch.testing.assert_close(
+            loaded.model.rope_embeddings.original_inv_freq,
+            torch.tensor([1.0, 0.5]),
+        )
+
+    def test_rope_periods_length_mismatch_rejected(self):
+        model = make_model()
+        state = {key: value.clone() for key, value in model.state_dict().items()}
+        state[ROPE_PERIODS_KEY] = torch.tensor([1.0, 2.0, 3.0])
+        with pytest.raises(ValueError, match="does not match"):
+            model.load_train_state_dict(state)
+
+    def test_attn_mask_probs_loaded(self):
+        model = make_model()
+        state = {key: value.clone() for key, value in model.state_dict().items()}
+        state["model.attn_mask_probs"] = torch.zeros(MODEL_KWARGS["num_blocks"])
+        loaded = make_model()
+        loaded.load_train_state_dict(state)
+        torch.testing.assert_close(
+            loaded.model.attn_mask_probs,
+            torch.zeros(MODEL_KWARGS["num_blocks"]),
+        )
+
+    def test_panoptic_rope_periods_transport(self):
+        # The mixin must be first in the panoptic MRO, not only in semantic.
+        model = Dinov3EomtPanopticSegmentation(
+            num_classes=4, num_thing_classes=2, **MODEL_KWARGS
+        )
+        state = {key: value.clone() for key, value in model.state_dict().items()}
+        state[ROPE_PERIODS_KEY] = torch.tensor([1.0, 2.0])
+        loaded = Dinov3EomtPanopticSegmentation(
+            num_classes=4, num_thing_classes=2, **MODEL_KWARGS
+        )
+        loaded.load_train_state_dict(state)
+        torch.testing.assert_close(
+            loaded.model.rope_embeddings.inv_freq, torch.tensor([1.0, 0.5])
+        )
+
+    def test_instance_rope_periods_transport(self):
+        model = Dinov3EomtInstanceSegmentation(num_classes=3, **MODEL_KWARGS)
+        state = {key: value.clone() for key, value in model.state_dict().items()}
+        state[ROPE_PERIODS_KEY] = torch.tensor([1.0, 2.0])
+        loaded = Dinov3EomtInstanceSegmentation(num_classes=3, **MODEL_KWARGS)
+        loaded.load_train_state_dict(state)
+        torch.testing.assert_close(
+            loaded.model.rope_embeddings.inv_freq, torch.tensor([1.0, 0.5])
+        )
 
     def test_three_stage_contract(self):
         model = make_model()

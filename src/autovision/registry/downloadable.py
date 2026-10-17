@@ -106,6 +106,9 @@ def resolve_downloadable(
     )
     cache_root.mkdir(parents=True, exist_ok=True)
     target = cache_root / f"{name}.pt"
+    # Registered names may contain a namespace ("d-fine/dfine_s_coco"),
+    # so the cache target can be nested.
+    target.parent.mkdir(parents=True, exist_ok=True)
     if target.is_file() and compute_file_sha256(target) == entry.sha256:
         return target
     if target.is_file():

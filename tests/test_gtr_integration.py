@@ -1,6 +1,6 @@
 # Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """GTR integration (roadmap design doc 31): G0 teacher foundation +
-G1 assembly-compatible ``gtr-s`` variant.
+GTR decoder-lineage checks. The former timm decoder-only GTR route is removed.
 
 Checkpoint-dependent tests auto-skip when the local GTR weights are
 absent (trees without the user-held store stay green).
@@ -11,25 +11,12 @@ from __future__ import annotations
 import pytest
 import torch
 
-from autovision.data.coco8 import ensure_coco8
 from autovision.errors import AutoVisionError
 from autovision.registry.gtr_assets import (
     GTR_ASSETS,
     resolve_gtr_asset,
     verify_gtr_asset,
 )
-from autovision.tasks.detection.detr.variants import (
-    SPECTRUM,
-    resolve_detr_variant,
-    resolve_spectrum_tier,
-)
-
-TINY_TRANSFORM_ARGS = {
-    "scale_jitter": None,
-    "photometric_distort_prob": 0.5,
-    "random_zoom_out_prob": None,
-    "random_iou_crop_prob": None,
-}
 
 
 def _gtr_s_checkpoint():
@@ -42,11 +29,6 @@ def _gtr_s_checkpoint():
 @pytest.fixture(scope="module")
 def gtr_s_checkpoint():
     return _gtr_s_checkpoint()
-
-
-@pytest.fixture(scope="module")
-def coco8(tmp_path_factory):
-    return ensure_coco8(tmp_path_factory.mktemp("coco8"))
 
 
 class TestGtrAssets:
@@ -160,149 +142,6 @@ class TestGtrTeacherBundle:
         assert bundle.decoder_decoder_state  # state-dict handoff works
 
 
-class TestGtrSVariant:
-    def test_width_recipe_is_gtr_s_faithful(self):
-        _, spec = resolve_detr_variant("detr/gtr-s")
-        assert spec.family == "timm_cnn"
-        assert spec.hidden_dim == 192
-        assert spec.dec_dim_feedforward == 512
-        assert spec.dec_layers == 4
-        assert spec.dec_num_points == (3, 6, 3)
-        assert spec.decoder_default == "dfine_official"
-
-    def test_spectrum_tier_is_planned_with_component(self):
-        tier = resolve_spectrum_tier("gtr-s")
-        assert tier.status == "planned"
-        assert tier.variant_key == "gtr-s"  # component exists (G1)
-        assert "gtr-s" not in {t for t, e in SPECTRUM.items() if e.status == "frozen"}
-
-
-class TestGtrAssembly:
-    def test_assembly_coverage_gate(self, gtr_s_checkpoint, tmp_path):
-        from autovision.registry.warm_start import load_warm_start
-        from autovision.tasks.detection.detr.dfine_official_warm_start import (
-            build_dfine_official_warm_start,
-        )
-
-        out = tmp_path / "detr_gtr_s_ws.pt"
-        report = build_dfine_official_warm_start(
-            "gtr-s",
-            out=out,
-            checkpoint=gtr_s_checkpoint,
-            backbone_pretrained=False,
-            license_id="MIT",
-            origin="https://huggingface.co/Phoenix8125/GTR",
-            source_format="gtr",
-        )
-        assert report["decoder_coverage"] >= 0.9  # G1 exit gate
-        assert report["source_format"] == "gtr"
-        payload = load_warm_start(out)
-        assert payload.license.id == "MIT"
-        assert payload.spec["decoder_coverage"] >= 0.9
-
-    def test_assembly_is_now_complete(self, gtr_s_checkpoint, tmp_path):
-        """2026-10-16 gold-check fix: with the GTR lineage decoder
-        (dec_lineage="gtr" — 3-layer query_pos_head, group selection heads,
-        no enc_output, silu) + the norm2→norm3 key remap, the official
-        GTR-S decoder transfers COMPLETELY: 181 tensors, zero shape skips,
-        decoder coverage 1.0 (was 144 / 3 skips / 0.9613)."""
-        from autovision.tasks.detection.detr.dfine_official_warm_start import (
-            build_dfine_official_warm_start,
-        )
-
-        report = build_dfine_official_warm_start(
-            "gtr-s",
-            out=tmp_path / "full.pt",
-            checkpoint=gtr_s_checkpoint,
-            backbone_pretrained=False,
-            license_id="MIT",
-            origin="https://huggingface.co/Phoenix8125/GTR",
-            source_format="gtr",
-        )
-        assert report["skipped_shape"] == 0
-        assert report["decoder_coverage"] == 1.0
-        assert report["transferred"] >= 181
-
-    def test_coverage_gate_refuses_partial(self, gtr_s_checkpoint, tmp_path):
-        from autovision.tasks.detection.detr.dfine_official_warm_start import (
-            WarmStartAssemblyError,
-            build_dfine_official_warm_start,
-        )
-
-        with pytest.raises(WarmStartAssemblyError, match="coverage"):
-            build_dfine_official_warm_start(
-                "gtr-s",
-                out=tmp_path / "x.pt",
-                checkpoint=gtr_s_checkpoint,
-                backbone_pretrained=False,
-                source_format="gtr",
-                min_decoder_coverage=1.0001,  # unreachable → the gate must refuse
-            )
-
-    def test_payload_records_num_points_and_lineage(self, gtr_s_checkpoint, tmp_path):
-        from autovision.registry.warm_start import load_warm_start
-        from autovision.tasks.detection.detr.dfine_official_warm_start import (
-            build_dfine_official_warm_start,
-        )
-
-        out = tmp_path / "detr_gtr_s_ws.pt"
-        build_dfine_official_warm_start(
-            "gtr-s",
-            out=out,
-            checkpoint=gtr_s_checkpoint,
-            backbone_pretrained=False,
-            license_id="MIT",
-            origin="https://huggingface.co/Phoenix8125/GTR",
-            source_format="gtr",
-        )
-        spec = load_warm_start(out).spec
-        assert spec["dec_num_points"] == [3, 6, 3]
-        assert spec["dec_lineage"] == "gtr"
-
-    def test_load_refuses_num_points_mismatch(self, gtr_s_checkpoint, tmp_path):
-        """A payload whose (shape-identical) sampling split disagrees with
-        the target variant must be refused: sum(num_points) is the only
-        shape-visible quantity, so the transfer would silently mis-place
-        every level's deformable offsets (2026-10-16 gold-check)."""
-        from autovision.registry.warm_start import load_warm_start, save_warm_start
-        from autovision.tasks.detection.detr.dfine_official_warm_start import (
-            build_dfine_official_warm_start,
-        )
-        from autovision.tasks.detection.detr.task_model import (
-            DETRObjectDetection,
-            load_warm_start_into_network,
-        )
-
-        out = tmp_path / "detr_gtr_s_ws.pt"
-        build_dfine_official_warm_start(
-            "gtr-s",
-            out=out,
-            checkpoint=gtr_s_checkpoint,
-            backbone_pretrained=False,
-            license_id="MIT",
-            origin="https://huggingface.co/Phoenix8125/GTR",
-            source_format="gtr",
-        )
-        payload = load_warm_start(out)
-        tampered = tmp_path / "tampered.pt"
-        save_warm_start(
-            tampered,
-            model=payload.model,
-            spec={**payload.spec, "dec_num_points": [4, 4, 4]},
-            license=payload.license,
-        )
-        network = DETRObjectDetection(
-            num_classes=80,
-            model_name="gtr-s",
-            image_size=(640, 640),
-            decoder="dfine_official",
-            load_weights=False,
-            backbone_pretrained=False,
-        )
-        with pytest.raises(ValueError, match="num_points"):
-            load_warm_start_into_network(network, tampered)
-
-
 class TestGtrDecoderLineage:
     """Gold-check (2026-10-16): GTR freezes the query positional embedding
     across decoder layers (GTR-main ``decoder.py``:543-544: computed once
@@ -378,46 +217,6 @@ class TestGtrDecoderLineage:
         assert len(seen) == len(inner.layers)
         # Distinct per-layer embeddings (references update between layers).
         assert len({id(query_pos) for query_pos in seen}) > 1
-
-
-class TestGtrSTrainClosure:
-    """detr/gtr-s 加载闭环: assembly -> warm-start -> tiny coco8 train."""
-
-    def test_train_detr_gtr_s(self, coco8, gtr_s_checkpoint, tmp_path):
-        from autovision import train_object_detection
-        from autovision.tasks.detection.detr.dfine_official_warm_start import (
-            build_dfine_official_warm_start,
-        )
-
-        warm_start = tmp_path / "ws_gtr_s.pt"
-        build_dfine_official_warm_start(
-            "gtr-s",
-            out=warm_start,
-            checkpoint=gtr_s_checkpoint,
-            backbone_pretrained=False,
-            license_id="MIT",
-            origin="https://huggingface.co/Phoenix8125/GTR",
-            source_format="gtr",
-        )
-        result = train_object_detection(
-            out=tmp_path / "run_gtr_s",
-            data=coco8,
-            model="detr/gtr-s",
-            steps=3,
-            batch_size=2,
-            num_workers=0,
-            model_args={
-                "image_size": (64, 64),
-                "num_queries": 50,
-                "num_top_queries": 50,
-                "num_denoising": 10,
-                "warm_start": warm_start,
-            },
-            transform_args=TINY_TRANSFORM_ARGS,
-            trainer_args={"val_every_num_steps": 2},
-        )
-        assert result.steps_run == 3
-        assert result.exported_model_path and result.exported_model_path.exists()
 
 
 class TestTeacherModelCard:

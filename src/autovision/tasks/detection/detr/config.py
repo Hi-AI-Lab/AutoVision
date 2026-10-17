@@ -17,7 +17,8 @@ the provenance ledger):
 - **DINOv2 ViT** (patch 14): NoSTA wrapper — no spatial-prior fusion, the
   semantic taps are projected straight to ``hidden_dim``.
 - **DINOv3 ViT** (patch 16, incl. the tiny ``vitt16``/``vitt16plus``
-  distillations): STA wrapper with ``conv_inplane = factor × patch_size``.
+  distillations): no-STA adapter (the DEIMv2-derived spatial prior was
+  removed for licensing; old STA checkpoints are unsupported).
 - **DINOv3 ConvNeXt**: last-three-stage taps, whole backbone at backbone LR.
 
 Encoder/decoder recipes (hidden dims, FFN widths, expansion/depth
@@ -556,11 +557,12 @@ class DETRObjectDetectionTrainArgs(TrainModelArgs, PydanticConfig):
     #: legacy baseline DETR detector checkpoint (the published
     #: "…-ltdetr-coco" .pt files): warm-starts backbone + encoder +
     #: decoder for both families (ConvNeXt via the old-ConvNeXt remap, ViT
-    #: via the Meta-ViT remap including the STA wrapper extras). Requires
-    #: the baseline-faithful shapes (ConvNeXt: dec_layers=6 AND
-    #: decoder_hidden_dim=256 at the checkpoint's encoder width; ViT: the
-    #: spec recipe); class-count-dependent decoder heads are skipped when
-    #: the class count differs. See
+    #: via the Meta-ViT remap). STA-era ViT checkpoints (``backbone.sta.*``)
+    #: are unsupported: the DEIMv2-derived spatial prior was removed for
+    #: licensing. Requires the baseline-faithful shapes (ConvNeXt:
+    #: dec_layers=6 AND decoder_hidden_dim=256 at the checkpoint's encoder
+    #: width; ViT: the spec recipe); class-count-dependent decoder heads are
+    #: skipped when the class count differs. See
     #: coco_checkpoint.load_baseline_coco_checkpoint.
     detector_checkpoint: Path | str | None = None
     #: Path (or registered user-held asset name) to an AVWarmStart v1 asset
@@ -789,7 +791,7 @@ class DETRObjectDetectionTrainArgs(TrainModelArgs, PydanticConfig):
         The default is rounded UP to the next multiple of ``2 × patch_size``
         (baseline rule: 640 -> 644 for patch-14 backbones, 640 unchanged for
         patch 16). An explicitly set size must already be divisible — the
-        ViT patch grid and the STA/encoder pyramids both assume it.
+        ViT patch grid and the encoder pyramid both assume it.
         """
         _, spec = resolve_detr_variant(f"detr/{self.backbone}")
         divisor = detr_image_size_divisor(spec)

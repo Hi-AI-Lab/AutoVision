@@ -172,6 +172,22 @@ class TestDownloadable:
         finally:
             ASSET_MANIFEST.pop("test-model", None)
 
+    def test_nested_name_creates_cache_parent(self, tmp_path):
+        import hashlib
+
+        source = tmp_path / "hosted.pt"
+        payload = b"nested-checkpoint"
+        source.write_bytes(payload)
+        digest = hashlib.sha256(payload).hexdigest()
+        register_downloadable("nested/model", source.as_uri(), digest)
+        try:
+            cache = tmp_path / "cache"
+            path = resolve_downloadable("nested/model", cache_dir=cache)
+            assert path == cache / "nested" / "model.pt"
+            assert path.read_bytes() == payload
+        finally:
+            ASSET_MANIFEST.pop("nested/model", None)
+
     def test_corrupt_cache_is_redownloaded(self, tmp_path):
         import hashlib
 

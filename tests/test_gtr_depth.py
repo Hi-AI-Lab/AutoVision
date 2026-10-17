@@ -49,11 +49,26 @@ def depth_checkpoint() -> Path:
 class TestGtrDepthLoad:
     def test_variant_table(self):
         assert GTR_DEPTH_VARIANTS == {
-            "s": (192, 3, 4.0),
-            "m": (256, 4, 4.0),
-            "l": (384, 6, 4.0),
-            "x": (384, 6, 6.0),
+            "s": (192, 3, 4.0, 192),
+            "m": (256, 4, 4.0, 256),
+            "l": (384, 6, 4.0, 256),
+            "x": (384, 6, 6.0, 256),
         }
+
+    @pytest.mark.parametrize("variant", ["l", "x"])
+    def test_lx_official_checkpoint_loads_completely(self, variant):
+        try:
+            resolve_gtr_asset(f"gtrdepth_{variant}")
+        except Exception:  # noqa: BLE001 - absent local weights keep fresh checkouts green
+            pytest.skip("local GTR depth L/X weights not present")
+        from autovision.tasks.depth_estimation.gtr import GTRDepthEstimation
+
+        net = GTRDepthEstimation(variant=variant, checkpoint=f"gtrdepth_{variant}")
+        assert net.load_report is not None
+        assert net.load_report["encoder_decoder_coverage"] == 1.0
+        assert net.load_report["skipped_shape"] == 0
+        assert net.load_report["unexpected"] == 0
+        assert net.load_report["transferred"] == 132
 
     def test_official_checkpoint_loads_completely(self, depth_checkpoint):
         from autovision.tasks.depth_estimation.gtr import GTRDepthEstimation

@@ -9,9 +9,10 @@
 
 ## 1. 自家精度（COCO val2017 AP）
 
-**§1.0 待训练档位（无权重、无读数——不对外叙事）**：`detr/n`（hgnetv2-b0，12ep
+**§1.0 待训练档位（spec-frozen；无权重、无读数——不对外叙事）**：`detr/n`（hgnetv2-b0，12ep
 蒸馏路线，RF-DETR-n 教师）与 `detr/s`（hgnetv2-b1 + dfine_s 装配后短程微调）
-尚未产出训练权重与 AP 读数，训练入口随档位实现入库；短程趋势证据见 §1.1。
+尚未产出训练权重与 AP 读数；训练入口见 `scripts/train_spectrum.py`，全量评测见
+`scripts/eval_spectrum_coco.py`；短程趋势证据见 §1.1。
 
 | 模型 | 档位来源 | schedule | seeds | AP | AP50 | 权重 | 模型卡 | 复现脚本 | 日期 |
 |---|---|---|---|---|---|---|---|---|---|
@@ -45,15 +46,12 @@
 | detr/n | fp16 | 22.6 | 24.8 | autocast 开销为正收益前口径 |
 | detr/s | fp32 | 20.0 | 20.6 | |
 | detr/s | fp16 | 24.1 | 24.8 | |
-| detr/gtr-s | fp32 | 21.6 | 23.4 | 装配变体（HGNetV2-b1 骨干） |
-| detr/gtr-s | fp16 | 27.7 | 28.0 | |
 | detr/gtrvit-s | fp32 | 29.2 | 34.2 | GLA Triton 核；fp16 慢于 fp32（核内 fp32 计算+转换） |
 
 > **补记（2026-10-16，口径标定）**：按现有脚本重测，§2 口径 = **未 deploy 的 eager
 > `forward_backend`**（detr/n fp32 b1 19.5ms vs 表内 19.3ms，b4 21.5 vs 20.6；
-> detr/s 21.5/20.7 vs 20.0/20.6——n/s 一致）；**detr/gtr-s、detr/gtrvit-s 偏高
-> 2.3–5.0ms**（25.0/25.6 vs 21.6/23.4；34.2/32.4 vs 29.2/34.2，原脚本未入库、
-> 残余差不可考）。若把 CPU 预处理（resize+normalize）计入，b1 为 27–35ms 量级
+> detr/s 21.5/20.7 vs 20.0/20.6——n/s 一致）；**detr/gtrvit-s 偏高
+> 2.3–5.0ms**（34.2/32.4 vs 29.2/34.2，原脚本未入库、残余差不可考）。若把 CPU 预处理（resize+normalize）计入，b1 为 27–35ms 量级
 > （§2.1 全链列同源）；「含 CPU 预处理」表述自此以脚本口径为准。
 
 ### 2.1 模型成本与 TensorRT 延迟（2026-10-16 首测）
@@ -81,7 +79,6 @@ detr/n、detr/s 的 deploy 融合会额外驻留一份融合卷积（训练分�
 |---|---|---|---|---|---|---|---|---|
 | detr/n | 17.79 | 59.1 | 2.70 | 13.06 | 3.46 | 19.68 | `scripts/measure_spectrum_benchmarks.py` | 2026-10-16 |
 | detr/s | 18.14 | 61.8 | 2.83 | 12.71 | 3.54 | 20.22 | 同上 | 2026-10-16 |
-| detr/gtr-s | 12.04 | 38.4 | 2.73 | 14.35 | 3.43 | 22.80 | 同上 | 2026-10-16 |
 | detr/gtrvit-s | 12.12 | 33.9 | — | — | — | — | 同上（导出被显式拒绝） | 2026-10-16 |
 | rtdetr/resnet18 | 26.46 | 87.1 | 1.92 | 11.34 | 3.10 | 23.61 | 同上 | 2026-10-16 |
 
@@ -158,7 +155,7 @@ GPU↔CPU 如此，CPU↔`deepcopy` 亦然——parity 门禁报出的差异来�
 
 动态 H/W（D2）家族覆盖（`export_onnx(dynamic_spatial=True)`，含第二尺寸
 parity 探针，本轮实测）：`rtdetr/resnet18` ✅、`detr/hgnetv2-b0`（256px）✅、
-`detr/s` ✅、`detr/gtr-s` ✅（timm CNN 线均通过；`hgnetv2-b0` 另在 192/320
+`detr/s` ✅（timm CNN 线通过；`hgnetv2-b0` 另在 192/320
 两尺寸做 torch↔ORT 对拍通过）；HF 骨干线（`detr/dinov2-*`、`detr/dinov3-vit*`、
 `detr/dinov3-convnext-*`）不支持——上游 transformers 在**输入尺寸上有 Python 级
 分支/守卫**（ViT 嵌入的 patch 数分支、ConvNeXt 的 stage-grid 守卫），严格导出
@@ -213,6 +210,30 @@ warm-up 一次前向）。
 |---|---|---|---|---|
 | _（首批已并入上表；后续逐行补官方原始出处链接）_ | — | — | — | — |
 
+### 3.1 RF-DETR 官方口径（T4 / TensorRT 10.4 / CUDA 12.4 / FP16 / bs1）
+
+> 与 §3 的统一协议（RTX 4090 / torch.compile + CUDA Graphs）**不可直接对比**。
+> 来源：Roboflow RF-DETR 官方文档（<https://rfdetr.roboflow.com>）与 ICLR 2026
+> 论文（arXiv:2511.09554），引用日期 2026-10-17。官方表未列 GFLOPs；我方全链
+> AP / 延迟复测待 Phase 1 补。
+
+| 模型 | 输入 | COCO AP | COCO AP50 | Params (M) | 官方延迟 (ms) | 许可 |
+|---|---|---|---|---|---|---|
+| RF-DETR Nano | 384² | 48.4 | 67.6 | 30.5 | 2.3 | Apache-2.0 |
+| RF-DETR Small | 512² | 53.0 | 72.1 | 32.1 | 3.5 | Apache-2.0 |
+| RF-DETR Medium | 576² | 54.7 | 73.6 | 33.7 | 4.4 | Apache-2.0 |
+| RF-DETR Large | 704² | 56.5 | 75.1 | 33.9 | 6.8 | Apache-2.0 |
+| RF-DETR Base（上游弃用） | — | — | — | — | — | Apache-2.0 |
+
+注：
+
+- 当前官方阵容为 N / S / M / L；Base 已被 Medium 取代，仓库保留 `rf-detr-base`
+  资产用于兼容，选型时请用 N/S/M/L，不要使用 Base。
+- XL（AP 58.6 / 126.4M / 11.5ms）与 2XL 为 PML 1.0，不属于 Apache 家族；§3 表中的
+  `RF-DETR-X` 对应 XL，勿与 Apache 五档混淆。
+- §3 行是 GTR 论文统一协议下的延迟读数 + 各原文 AP；本节是 Roboflow 官方 T4 口径。
+  Small 档 AP 在两处为 52.9 / 53.0（版本差），选型时以本节官方卡为准并注明出处。
+
 ## 4. 勘误
 
 | 日期 | 条目 | 修正 | 原因 |
@@ -220,6 +241,6 @@ warm-up 一次前向）。
 | 2026-10-16 | §2 表头复现脚本 | `scripts/measure_spectrum_latency_torch.py` → `scripts/measure_spectrum_benchmarks.py`（数字未变）<!-- docpath-ok --> | 脚本重组更名（协议不变） |
 | 2026-10-16 | §1.1 `detr/gtrvit-s` 冒烟行的脚本引用 | smoke 脚本归档（公开树不携带；读数与轨迹保留原文） | 公开树脚本清理 |
 | 2026-10-16 | §1 `detr/n`、`detr/s` 两行 | 移入新增 §1.0「待训练档位」块（结果表只保留已产出读数的行） | A2 透明基准补全（结果表禁空列） |
-| 2026-10-16 | §2 口径补记 | 见 §2「补记」：口径 = 未 deploy 的 eager forward；gtr-s/gtrvit-s 重测偏高 2.3–5.0ms（数字未改） | 口径标定实验 |
+| 2026-10-16 | §2 口径补记 | 见 §2「补记」：口径 = 未 deploy 的 eager forward；gtrvit-s 重测偏高 2.3–5.0ms（数字未改） | 口径标定实验 |
 | 2026-10-16 | 导出/benchmark parity 比较输入 | 由全零样例改为带种子的随机张量（数字未变；门禁复现性修复） | 全零输入在 DETR 顶-k 处并列、元素级对比抖动（评审实测） |
 | 2026-10-16 | §2.1 新增 | 成本（Params/GFLOPs）+ TRT-fp16 b1/b4 首测 | A2 透明基准补全（`scripts/measure_spectrum_benchmarks.py`） |

@@ -223,4 +223,5 @@ def analyze_errors(
         iou_threshold=iou,
         score_threshold=threshold,
         top_k=top_k,
+        split=split,
     )
