@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Tests: Ascend NPU accelerator adaptation + optional OTel spans.
 
 Two families (design §12.4, §15.2):

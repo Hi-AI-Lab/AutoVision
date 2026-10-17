@@ -4,15 +4,20 @@
 Criterion/matcher/CDN are the faithfully re-ported official pieces
 (``shared/gtr/pose_criterion.py`` + ``pose_dn.py``); the decoder runs the
 pose CDN internally in training mode (upstream passes the image for the
-per-keypoint noise scaling). Validation reports the mean matched OKS as
-the selection metric (higher better) — the COCO keypoint-AP dataset
-surface and its official metric remain data-gated follow-ups.
+per-keypoint noise scaling). Validation computes the official COCO
+keypoint AP (OKS, pycocotools ``keypoints``) against the raw
+``person_keypoints`` annotation file and selects on it
+(``watch_metric = "val_metric/kp_map"``); the mean matched OKS remains a
+diagnostic (``val_metric/oks``).
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import torch
 
+from autovision.metrics.pose_estimation import COCOKeypointAPEvaluator
 from autovision.optim.optimizer_helpers import (
     build_adamw,
     get_weight_decay_parameters,
@@ -29,13 +34,14 @@ from autovision.tasks.pose_estimation.gtr.config import (
 )
 from autovision.tasks.pose_estimation.gtr.task_model import GTRPoseEstimation
 from autovision.tasks.train_model import TaskStepResult, TrainModel
+from autovision.types import PathLike
 
 __all__ = ["GTRPoseEstimationTrain"]
 
 
 class GTRPoseEstimationTrain(TrainModel):
     task = "pose_estimation"
-    watch_metric = "val_metric/oks"
+    watch_metric = "val_metric/kp_map"
 
     def __init__(self, model_args: GTRPoseEstimationTrainArgs) -> None:
         model_args.resolve_auto_fields()
@@ -66,11 +72,17 @@ class GTRPoseEstimationTrain(TrainModel):
             num_body_points=model_args.num_body_points,
         )
         self.categories: dict[int, str] = {}
+        self._val_annotations: Path | None = None
+        self._evaluators: dict[str, COCOKeypointAPEvaluator] = {}
         self._oks_sum = 0.0
         self._oks_count = 0
 
     def set_categories(self, categories: dict[int, str]) -> None:
         self.categories = dict(categories)
+
+    def set_val_annotations(self, annotations: PathLike) -> None:
+        """Raw ``person_keypoints`` JSON powering the official AP evaluator."""
+        self._val_annotations = Path(annotations)
 
     # ── targets ─────────────────────────────────────────────────────────
     def _build_targets(
@@ -78,9 +90,11 @@ class GTRPoseEstimationTrain(TrainModel):
     ) -> list[dict[str, torch.Tensor]]:
         """Targets from the batch contract (official layout):
 
-        ``keypoints`` (N, 3*K) normalized ``[x, y, v]`` triplets,
-        ``bboxes`` (N, 4) normalized cxcywh person boxes (their centers
-        anchor the CDN noise), ``area`` (N,) person areas in px², and
+        ``keypoints`` (N, 3K) normalized with the xy block first and the
+        visibility block last (``cat([xy (2K), v (K)])`` — the official
+        ``PoseNormalize`` layout, not interleaved triplets), ``bboxes``
+        (N, 4) normalized cxcywh person boxes (their centers anchor the
+        CDN noise), ``area`` (N,) frame-normalized person areas, and
         ``classes`` (N,).
         """
         targets = []
@@ -114,6 +128,31 @@ class GTRPoseEstimationTrain(TrainModel):
         x = batch["image"]
         model = self.model
         out = model._forward_train(x)
+
+        # Official-protocol AP: postprocess to the original frame (no score
+        # gate — the official postprocessor keeps the plain top-k) and feed
+        # the pycocotools keypoint evaluator.
+        if self._val_annotations is not None:
+            decoded = model.postprocess(
+                (out["pred_logits"], out["pred_keypoints"]),
+                [
+                    {"orig_w": width, "orig_h": height}
+                    for width, height in batch["original_size"]
+                ],
+            )
+            evaluator = self._evaluators.setdefault(
+                "val",
+                COCOKeypointAPEvaluator(
+                    self._val_annotations, categories=self.categories
+                ),
+            )
+            image_ids = batch.get("index")
+            evaluator.update(
+                decoded,
+                [int(image_id) for image_id in image_ids] if image_ids is not None else None,
+            )
+
+        # Mean matched OKS (diagnostic; matcher-based, training-domain units).
         targets = self._build_targets(batch, x)
         indices = self.matcher(
             {"pred_logits": out["pred_logits"], "pred_keypoints": out["pred_keypoints"]},
@@ -129,7 +168,9 @@ class GTRPoseEstimationTrain(TrainModel):
                 + torch.cat([src for (src, _) in indices])
             ]
         else:
-            src = src_keypoints.reshape(0, out["pred_keypoints"].shape[-1])
+            # A validation batch can be entirely person-free (val keeps
+            # every image); the matched tensors are then empty.
+            src = src_keypoints.new_zeros(0, out["pred_keypoints"].shape[-1])
         tgt = torch.cat([t["keypoints"][j] for t, (_, j) in zip(targets, indices)], dim=0) \
             if len(batch_index) else torch.zeros(0, 3 * self.model_args.num_body_points)
         areas = torch.cat([t["area"][j] for t, (_, j) in zip(targets, indices)], dim=0) \
@@ -151,23 +192,45 @@ class GTRPoseEstimationTrain(TrainModel):
     def compute_metrics(self, split: str) -> dict[str, float]:
         if split != "val":
             return {}
+        metrics: dict[str, float] = {}
+        evaluator = self._evaluators.get(split)
+        if evaluator is not None:
+            metrics.update(evaluator.compute())
+            evaluator.reset()
         mean_oks = self._oks_sum / max(self._oks_count, 1)
         self._oks_sum = 0.0
         self._oks_count = 0
-        return {f"{split}_metric/oks": mean_oks}
+        metrics["oks"] = mean_oks
+        return {f"{split}_metric/{name}": value for name, value in metrics.items()}
 
     def reset_metrics(self, split: str) -> None:
+        evaluator = self._evaluators.get(split)
+        if evaluator is not None:
+            evaluator.reset()
         self._oks_sum = 0.0
         self._oks_count = 0
 
     def export_metric_state(self, split: str) -> dict | None:
-        return {"oks_sum": self._oks_sum, "oks_count": self._oks_count}
+        state: dict = {"oks_sum": self._oks_sum, "oks_count": self._oks_count}
+        evaluator = self._evaluators.get(split)
+        if evaluator is not None:
+            state["evaluator"] = evaluator.export_state()
+        return state
 
     def merge_metric_state(self, split: str, state: dict | None) -> None:
         if state is None:
             return
         self._oks_sum += float(state.get("oks_sum", 0.0))
         self._oks_count += int(state.get("oks_count", 0))
+        evaluator_state = state.get("evaluator")
+        if evaluator_state is not None:
+            evaluator = self._evaluators.setdefault(
+                split,
+                COCOKeypointAPEvaluator(
+                    self._val_annotations, categories=self.categories
+                ),
+            )
+            evaluator.merge_state(evaluator_state)
 
     # ── optimization ────────────────────────────────────────────────────
     def get_optimizer(

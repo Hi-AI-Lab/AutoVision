@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Base classes and helpers for all Pydantic-based configuration models."""
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ class PydanticConfig(BaseModel):
     - ``extra="forbid"``: unknown keys are errors — the basis of friendly
       messages (``Unknown key: 'batch_szie'`` + did-you-mean).
     - ``frozen=False`` + ``validate_assignment=True``: configs are mutated
-      in place by ``resolve_auto()`` and every assignment is re-validated.
+      in place by ``resolve_auto_fields()`` and every assignment is re-validated.
     - ``strict=True``: no silent coercions (CLI dialects may relax per field).
     - ``validate_default=True``: defaults are validated like user input.
     - ``protected_namespaces``: allows user fields named ``model`` and

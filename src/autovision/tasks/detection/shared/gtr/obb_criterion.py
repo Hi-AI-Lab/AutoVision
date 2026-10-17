@@ -4,8 +4,7 @@
 Re-port from Intellindust-AI-Lab GTR (``engine/gtr/obb/criterion.py`` +
 ``engine/gtr/obb/matcher.py``, MIT License, Copyright (c) 2026 The GTR
 Authors), adapted by AutoVision per MIT sections 2-4 (registration
-cleanup, typing, distributed helpers inlined); ledger:
-``docs/provenance/LEDGER.md`` (GTR multi-task S3b, roadmap design doc 31
+cleanup, typing, distributed helpers inlined); provenance ledger entry (GTR multi-task S3b, roadmap design doc 31
 §11).
 
 Official OBB recipe (``gtrobb_base.yml``): losses ``['mal', 'boxes']``
@@ -24,7 +23,6 @@ as the soft target; the single matching pass per group mirrors upstream
 from __future__ import annotations
 
 import copy
-import math
 import os
 
 import torch

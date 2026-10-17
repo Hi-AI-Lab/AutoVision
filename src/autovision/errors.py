@@ -1,13 +1,13 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Custom exception hierarchy.
 
 Every error raised intentionally by the framework derives from
-:class:`AutovisionError` so callers can distinguish framework errors from
+:class:`AutoVisionError` so callers can distinguish framework errors from
 accidental bugs (which raise plain exceptions).
 """
 
 __all__ = [
-    "AutovisionError",
+    "AutoVisionError",
     "ConfigError",
     "ConfigMissingKeysError",
     "ConfigUnknownKeyError",
@@ -18,15 +18,15 @@ __all__ = [
 ]
 
 
-class AutovisionError(Exception):
+class AutoVisionError(Exception):
     """Base class for all framework errors."""
 
 
-class UnknownModelError(AutovisionError):
+class UnknownModelError(AutoVisionError):
     """A model cannot be attributed to any known package."""
 
 
-class ConfigError(AutovisionError):
+class ConfigError(AutoVisionError):
     """Base class for user-facing configuration errors."""
 
 
@@ -42,7 +42,7 @@ class ConfigValidationError(ConfigError):
     """A configuration value failed validation."""
 
 
-class UnresolvedAutoError(AutovisionError):
+class UnresolvedAutoError(AutoVisionError):
     """An ``"auto"`` value was read before being resolved.
 
     This is a framework bug, not a user error: the resolution chain in the
@@ -50,5 +50,5 @@ class UnresolvedAutoError(AutovisionError):
     """
 
 
-class CheckpointError(AutovisionError):
+class CheckpointError(AutoVisionError):
     """A checkpoint is missing, unreadable, or incompatible."""

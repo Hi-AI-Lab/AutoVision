@@ -11,7 +11,7 @@ import logging
 
 import pytest
 import torch
-from tests.test_ltdetr_ssl import VARIANT_ARGS
+from tests.test_detr_ssl import VARIANT_ARGS
 
 from autovision.geometry.box_ops import (
     elementwise_giou_loss,

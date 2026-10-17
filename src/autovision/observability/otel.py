@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Optional OpenTelemetry spans (design §15.2).
 
 Four-phase instrumentation following the baseline's TrainingStepTimer

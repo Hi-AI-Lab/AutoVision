@@ -1,27 +1,56 @@
+# AutoVision 公开文档站点配置。
+#
+# 契约（由 CI 与 tests/test_infrastructure.py 强制）：
+#   - 导航引用的每个路径必须存在于 docs/ 下；
+#   - `mkdocs build --strict` 零警告（站内链接、导航、孤儿页面均受检）；
+#   - docs/ 下的页面必须全部出现在导航里，或经 exclude_docs 显式排除；
+#   - 公开树相对链接由 scripts/check_docs_links.py 独立检查（覆盖仓库根
+#     Markdown，超出本站点范围）。
 site_name: AutoVision
-site_description: Enterprise visual model training framework
-theme: {name: material}
+site_description: 企业级视觉模型训练框架：预训练/蒸馏 → 微调 → 评测 → 导出
+
+theme:
+  name: material
+  language: zh
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: 切换深色模式
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: 切换浅色模式
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.suggest
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences
+  # 站点页包含仓库根 CONTRIBUTING.md / CHANGELOG.md（单一来源，避免漂移）。
+  - pymdownx.snippets:
+      base_path: ["."]
+
 nav:
-  - Home: index.md
-  - Migration 0.2: migration-0.2.md
-  - Design:
-      - Overview: design/01-overview-and-architecture.md
-      - API & Config: design/02-public-api-and-config.md
-      - Model Layer: design/03-model-layer.md
-      - Pretraining: design/04-pretraining-methods.md
-      - Task Models: design/05-task-models.md
-      - Data Layer: design/06-data-layer.md
-      - Runtime: design/07-runtime-and-experiments.md
-      - Deployment: design/08-assets-and-deployment.md
-      - Quality & Security: design/09-quality-security-observability.md
-      - Process & Roadmap: design/10-process-roadmap-risks.md
-      - Baseline Appendix: design/11-appendix-baseline-analysis.md
-      - Gap Implementation: design/12-gap-implementation-status.md
-      - LT-DETR × Dome-DETR Integration: design/13-ltdetr-dome-integration.md
-      - LT-DETR SSL Contrastive Head: design/14-ltdetr-ssl-contrastive-head.md
-      - SIoU Box Regression: design/15-siou-box-regression-loss.md
-      - Box-Aware Eraser: design/16-box-aware-eraser.md
-      - Clean Provenance Refactor: design/28-clean-provenance-refactor.md
-      - DETR Productization Roadmap: design/29-detr-productization-roadmap.md
-      - Task-First Layout (As-Built): design/30-task-first-layout.md
-      - GTR Integration Design: design/31-gtr-integration.md
+  - 首页: index.md
+  - 模型库: model_zoo.md
+  - 基准: benchmarks.md
+  - 架构总览: framework_design.md
+  - 贡献指南: contributing.md
+  - 发布流程: release_process.md
+  - 变更日志: changelog.md
+
+# 内部分析稿（决策依据，非对外发布产物）不进入站点；
+# 对应文档自带的「非对外发布产物」状态即此处置的依据。
+exclude_docs: |
+  strategy/gap-analysis.md

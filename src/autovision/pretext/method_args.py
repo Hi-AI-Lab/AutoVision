@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """PretextRecipe argument base class."""
 
 from __future__ import annotations
@@ -24,20 +24,20 @@ class PretextArgs(PydanticConfig):
     :mod:`autovision.pretext.knn_eval`).
     """
 
-    default_steps: ClassVar[int | None] = None
-    default_epochs: ClassVar[int | None] = 100
+    auto_steps: ClassVar[int | None] = None
+    auto_epochs: ClassVar[int | None] = 100
 
     knn_eval: KnnEvalArgs | None = None
 
     lr_scale_method: Literal["linear", "sqrt"] = "linear"
     reference_batch_size: int = 256
 
-    def resolve_auto(
+    def resolve_auto_fields(
         self,
-        scaling_info: Any = None,
+        scaling: Any = None,
         optimizer_args: Any = None,
         wrapped_model: Any = None,
     ) -> None:
         """Resolve any ``"auto"`` fields (default: nothing to resolve)."""
-        if self.knn_eval is not None and scaling_info is not None:
-            self.knn_eval.resolve_auto(dataset_size=scaling_info.dataset_size)
+        if self.knn_eval is not None and scaling is not None:
+            self.knn_eval.resolve_auto_fields(dataset_size=scaling.dataset_size)

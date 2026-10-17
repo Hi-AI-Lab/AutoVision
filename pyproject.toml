@@ -4,7 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "autovision"
-version = "0.1.0"
+# Single source of truth: src/autovision/_version.py (statically readable by
+# setuptools; release tooling and the release-readiness tests compare it
+# against CHANGELOG.md and the release tag).
+dynamic = ["version"]
 description = "AutoVision: enterprise visual model training framework (pretrain/distill -> finetune -> evaluate -> export)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -68,7 +71,23 @@ transformers = ["transformers>=4.56", "sentencepiece>=0.2", "protobuf>=4"]
 rfdetr = ["transformers>=5.9"]
 # ONNX export pipeline (torch.export -> dynamo/legacy ONNX -> FP16 ->
 # onnxslim -> verification gates); also required by the deployment tests.
-export = ["onnx>=1.15", "onnxruntime>=1.17", "onnxslim>=0.1"]
+# onnxscript backs the dynamo exporter (torch.onnx.export(dynamo=True)) —
+# without it every export silently falls back to the legacy TorchScript
+# path, which cannot represent dynamic H/W graphs (roadmap D2) correctly.
+export = ["onnx>=1.15", "onnxruntime>=1.17", "onnxslim>=0.1", "onnxscript>=0.1"]
+# OpenVINO backend (roadmap D3): ONNX -> OpenVINO IR conversion + runtime,
+# CPU-first deployment (Apache-2.0, pip-installable; the benchmark backend
+# and `export out=model.xml` need this extra).
+openvino = ["openvino>=2024.0"]
+# Reference inference runtime video/stream I/O (autovision.inference):
+# OpenCV's FFmpeg backend reads local files and RTSP/HTTP streams through
+# one interface; the headless build keeps servers slim.
+video = ["opencv-python-headless>=4.8"]
+# Documentation site (mkdocs build --strict; CI's docs job installs this).
+docs = ["mkdocs-material>=9.5"]
+# Reference inference serving (roadmap F2): FastAPI + uvicorn. A reference
+# implementation (single process, no auth) — see the README's boundaries.
+serving = ["fastapi>=0.110", "uvicorn>=0.29"]
 dev = ["pytest>=8.0", "pytest-mock>=3.14", "ruff>=0.8"]
 
 [tool.uv]
@@ -83,11 +102,18 @@ conflicts = [
     ],
 ]
 
+[tool.setuptools.dynamic]
+version = {attr = "autovision._version.__version__"}
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The documented/CI invocation is the `pytest` console script (no CWD on
+# sys.path): pin the repo root so `tests.conftest` resolves to THIS tree
+# (a same-named package in site-packages must never shadow it).
+pythonpath = ["."]
 
 [tool.ruff]
 target-version = "py310"
@@ -103,7 +129,7 @@ extend-exclude = [
 [tool.ruff.lint]
 # High-signal core: pycodestyle errors (E4/E7/E9), pyflakes (F), and
 # import sorting (I). Broader opinionated sets (UP/BLE/PLR/RUF) are a
-# deliberate follow-up — see docs/design/12-gap-implementation-status.md.
+# deliberate follow-up (tracked in the provenance ledger).
 select = ["E4", "E7", "E9", "F", "I"]
 
 [tool.ruff.lint.per-file-ignores]

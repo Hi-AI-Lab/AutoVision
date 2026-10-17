@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Semantic segmentation dataset over paired image/mask directories.
 
 Layout: an images directory and a masks directory containing files with

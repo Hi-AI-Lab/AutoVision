@@ -3,8 +3,7 @@
 G1 assembly-compatible ``gtr-s`` variant.
 
 Checkpoint-dependent tests auto-skip when the local GTR weights are
-absent (fresh checkouts without ``Dino-Dome-Research/weight/gtr`` stay
-green).
+absent (trees without the user-held store stay green).
 """
 
 from __future__ import annotations

@@ -12,7 +12,7 @@ DINOv2 sizes accept the package suffixes (``-noreg``, ``-notpretrained``).
 (mirrors the baseline ``ViTTest``).
 
 Variants mirror the published baseline registry (lineage:
-``docs/provenance/LEDGER.md``):
+the provenance ledger):
 
 - **DINOv2 ViT** (patch 14): NoSTA wrapper — no spatial-prior fusion, the
   semantic taps are projected straight to ``hidden_dim``.
@@ -551,22 +551,25 @@ class DETRObjectDetectionTrainArgs(TrainModelArgs, PydanticConfig):
     #: baseline checkpoints share the spec width, so ``None`` is correct
     #: there (vitt16 192 / vits16 224 / vitt16plus 256).
     decoder_hidden_dim: int | None = None
-    #: Optional path to a legacy baseline DETR detector checkpoint
-    #: (the published "…-ltdetr-coco" .pt files): warm-starts backbone + encoder
-    #: + decoder for both families (ConvNeXt via the old-ConvNeXt remap,
-    #: ViT via the Meta-ViT remap including the STA wrapper extras).
-    #: Requires the baseline-faithful shapes (ConvNeXt: decoder_hidden_
-    #: dim=256 at the checkpoint's encoder width; ViT: the spec recipe);
-    #: class-count-dependent decoder heads are skipped when the class
-    #: count differs. See coco_checkpoint.load_baseline_coco_checkpoint.
-    detector_checkpoint: Path | None = None
-    #: Path to an AVWarmStart v1 asset (registry/warm_start.py — the
-    #: framework's own licensed warm-start format, e.g. produced by
-    #: ``detr.dfine_official_warm_start``). Transfers encoder/decoder
-    #: knowledge shape-compatibly; the license field is mandatory (R7)
-    #: and the decoder coverage gate applies. Roadmap doc 29 P1 (S 档
-    #: 装配 warm-start 微调).
-    warm_start: Path | None = None
+    #: Optional path (or registered name: downloadable ``d-fine/*`` or
+    #: user-held asset, policy D1-a — registry/user_held_assets.py) to a
+    #: legacy baseline DETR detector checkpoint (the published
+    #: "…-ltdetr-coco" .pt files): warm-starts backbone + encoder +
+    #: decoder for both families (ConvNeXt via the old-ConvNeXt remap, ViT
+    #: via the Meta-ViT remap including the STA wrapper extras). Requires
+    #: the baseline-faithful shapes (ConvNeXt: dec_layers=6 AND
+    #: decoder_hidden_dim=256 at the checkpoint's encoder width; ViT: the
+    #: spec recipe); class-count-dependent decoder heads are skipped when
+    #: the class count differs. See
+    #: coco_checkpoint.load_baseline_coco_checkpoint.
+    detector_checkpoint: Path | str | None = None
+    #: Path (or registered user-held asset name) to an AVWarmStart v1 asset
+    #: (registry/warm_start.py — the framework's own licensed warm-start
+    #: format, e.g. produced by ``detr.dfine_official_warm_start``).
+    #: Transfers encoder/decoder knowledge shape-compatibly; the license
+    #: field is mandatory (R7) and the decoder coverage gate applies.
+    #: Roadmap doc 29 P1 (S 档装配 warm-start 微调).
+    warm_start: Path | str | None = None
 
     #: Detection head family. "auto" picks the per-variant default
     #: ("dfine_official" only when explicitly selected, else "rtdetrv2").

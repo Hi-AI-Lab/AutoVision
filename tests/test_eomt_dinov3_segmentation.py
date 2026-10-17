@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """DINOv3 EOMT segmentation variants: derivation contracts on top of the
 DINOv2 packages (model strings, HF EomtDinov3 classes, args surfaces and
 minimal end-to-end loops). Deep task logic (losses, metrics, decodes,

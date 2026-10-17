@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Per-object SimCSE-style contrastive components (design doc 14).
 
 Port of the RF-DETR-SSL training-side building blocks: the train-only

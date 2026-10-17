@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """PicoDet object detection training wrapper."""
 
 from __future__ import annotations
@@ -145,7 +145,7 @@ class PicoDetObjectDetectionTrain(TrainModel):
             or args.scheduler_flat_steps == "auto"
             or args.scheduler_no_aug_steps == "auto"
         ):
-            args.resolve_auto(
+            args.resolve_auto_fields(
                 total_steps=total_steps,
                 train_num_batches=train_num_batches or total_steps,
                 gradient_accumulation_steps=gradient_accumulation_steps,

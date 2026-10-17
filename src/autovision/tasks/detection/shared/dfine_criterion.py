@@ -3,7 +3,7 @@
 
 Source lineage: D-FINE ``dfine_criterion.py`` (Apache-2.0, ``Peterande/D-FINE`` @ ``956d170``)
 over the RT-DETRv2 loss set (``lyuwenyu/RT-DETR`` @ ``df2a96c``), restructured by AutoVision;
-ledger ``docs/provenance/LEDGER.md`` (P1-3).
+provenance ledger entry (P1-3).
 
 Runs ONE Hungarian matching pass per decoder layer (the D-FINE losses share
 the classification/box assignments) and extends the RT-DETRv2 loss set
@@ -81,8 +81,8 @@ __all__ = ["DFINECriterionV2"]
 # ── mask losses (GTR seg lineage, design doc 31 §11 S2) ─────────────────
 # Point-sampled BCE + Dice on matched masks, re-ported from GTR's
 # engine/gtr/det/criterion.py::GTRCriterion.loss_masks (MIT; the point
-# sampler is PointRend's, via GTR's segmentation_head) — ledger:
-# docs/provenance/LEDGER.md.
+# sampler is PointRend's, via GTR's segmentation_head) — provenance ledger entry
+# provenance ledger entry.
 def mask_point_losses(
     pred_masks: torch.Tensor,
     targets: list[dict[str, torch.Tensor]],

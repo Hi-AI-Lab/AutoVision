@@ -5,8 +5,7 @@ Re-port from Intellindust-AI-Lab GTR (``engine/gtr/hybrid_encoder.py`` +
 ``engine/gtr/utils.py::get_activation``, MIT License, Copyright (c) 2026
 The GTR Authors; the encoder itself is "Modified from RF-DETR /
 LW-DETR" upstream), adapted by AutoVision per MIT sections 2-4 (module
-placement, docstring/registration cleanup); ledger:
-``docs/provenance/LEDGER.md`` (GTR integration, roadmap design doc 31
+placement, docstring/registration cleanup); provenance ledger entry (GTR integration, roadmap design doc 31
 G2). Takes N same-resolution ViT tap features, resamples each target
 scale (ConvTranspose up / stride-2 down / identity), concatenates and
 fuses to ``hidden_dim`` through a YOLOv8-style C2f block.

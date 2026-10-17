@@ -35,16 +35,15 @@ requires_gla = pytest.mark.skipif(
     reason="GTR GLA forward needs flash-linear-attention + CUDA",
 )
 
-_gtr_ckpt_candidates = (
-    Path.home() / "Research/Project/Dino-Dome-Research/weight/gtr/det/gtr_s_coco.pth",
-)
-
-
 def _gtr_s_checkpoint() -> Path:
-    for candidate in _gtr_ckpt_candidates:
-        if candidate.exists():
-            return candidate
-    pytest.skip("local GTR weights not present")
+    # Single source of truth for the user-held location: the registry's
+    # resolvable root (AUTOVISION_GTR_ROOT / known locations).
+    from autovision.registry.gtr_assets import GTR_ASSETS
+
+    path = GTR_ASSETS["gtr_s_coco"].path
+    if not path.exists():
+        pytest.skip("local GTR weights not present")
+    return path
 
 
 class TestGtrVariantRegistry:

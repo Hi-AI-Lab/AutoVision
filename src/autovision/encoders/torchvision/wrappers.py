@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Torchvision model wrappers."""
 
 from __future__ import annotations
@@ -7,9 +7,9 @@ import torch
 from torch import Tensor, nn
 
 from autovision.encoders.model_wrapper import (
-    ArchitectureInfo,
-    ForwardFeaturesOutput,
-    ForwardPoolOutput,
+    ArchTraits,
+    FeatureMapsOut,
+    PoolOut,
 )
 
 
@@ -26,10 +26,10 @@ class TorchvisionModelWrapper(nn.Module):
         super().__init__()
         self._model = model
 
-    def get_model(self) -> nn.Module:
+    def raw_module(self) -> nn.Module:
         return self._model
 
-    def forward_pool(self, x: ForwardFeaturesOutput) -> ForwardPoolOutput:
+    def pool_features(self, x: FeatureMapsOut) -> PoolOut:
         pooled = torch.nn.functional.adaptive_avg_pool2d(
             x["features"], output_size=1
         )
@@ -39,7 +39,7 @@ class TorchvisionModelWrapper(nn.Module):
     def _matches(cls, model: nn.Module) -> bool:
         raise NotImplementedError
 
-    def architecture_info(self) -> ArchitectureInfo:  # pragma: no cover - overridden
+    def arch_traits(self) -> ArchTraits:  # pragma: no cover - overridden
         return {"model_type": "convolutional", "norm_type": "batchnorm"}
 
 
@@ -50,7 +50,7 @@ class ResNetModelWrapper(TorchvisionModelWrapper):
     def _matches(cls, model: nn.Module) -> bool:
         return hasattr(model, "layer4") and hasattr(model, "fc")
 
-    def forward_features(self, x: Tensor) -> ForwardFeaturesOutput:
+    def feature_maps(self, x: Tensor) -> FeatureMapsOut:
         model = self._model
         x = model.conv1(x)
         x = model.bn1(x)
@@ -62,10 +62,10 @@ class ResNetModelWrapper(TorchvisionModelWrapper):
         x = model.layer4(x)
         return {"features": x}
 
-    def feature_dim(self) -> int:
+    def encoder_dim(self) -> int:
         return int(self._model.fc.in_features)
 
-    def architecture_info(self) -> ArchitectureInfo:
+    def arch_traits(self) -> ArchTraits:
         return {"model_type": "convolutional", "norm_type": "batchnorm"}
 
 
@@ -78,13 +78,13 @@ class ConvNeXtModelWrapper(TorchvisionModelWrapper):
             model, "layer4"
         )
 
-    def forward_features(self, x: Tensor) -> ForwardFeaturesOutput:
+    def feature_maps(self, x: Tensor) -> FeatureMapsOut:
         return {"features": self._model.features(x)}
 
-    def feature_dim(self) -> int:
+    def encoder_dim(self) -> int:
         return int(self._model.classifier[-1].in_features)
 
-    def architecture_info(self) -> ArchitectureInfo:
+    def arch_traits(self) -> ArchTraits:
         return {"model_type": "convolutional", "norm_type": "layernorm"}
 
 

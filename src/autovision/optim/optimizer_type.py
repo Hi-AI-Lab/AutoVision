@@ -1,16 +1,15 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
-"""Supported optimizer types."""
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
+"""Optimizer discriminator values accepted by ``optimizer_args={"type": …}``."""
 
 from __future__ import annotations
 
-from enum import Enum, unique
+from typing import Literal
 
-__all__ = ["OptimizerType"]
+__all__ = ["OPTIMIZER_KINDS", "OptimizerKind"]
 
+#: The ``type`` value selects the optimizer settings class in the
+#: ``optimizer_args`` config block.
+OptimizerKind = Literal["adamw", "adamw8bit", "sgd", "lars"]
 
-@unique
-class OptimizerType(str, Enum):
-    ADAMW = "adamw"
-    ADAMW8BIT = "adamw8bit"
-    SGD = "sgd"
-    LARS = "lars"
+#: Every valid value, for validators and help text.
+OPTIMIZER_KINDS: tuple[OptimizerKind, ...] = ("adamw", "adamw8bit", "sgd", "lars")

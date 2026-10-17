@@ -1,8 +1,8 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """D-FINE utilities: distributional box regression + FGL/DDF loss math.
 
 Source lineage: D-FINE ``dfine_utils.py`` (Apache-2.0, ``Peterande/D-FINE`` @ ``956d170``),
-re-expressed and extended by Autovision; ledger ``docs/provenance/LEDGER.md`` (P1-3).
+re-expressed and extended by AutoVision; provenance ledger entry (P1-3).
 
 D-FINE (Peng et al., "D-FINE: Redefine Regression Task in DETRs as
 Fine-grained Distribution Refinement", arXiv:2410.13842) replaces the box

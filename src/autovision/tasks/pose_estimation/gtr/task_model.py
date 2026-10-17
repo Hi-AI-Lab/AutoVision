@@ -30,15 +30,18 @@ from autovision.tasks.task_model import TaskNetwork
 
 __all__ = ["GTRPoseEstimation", "GTR_POSE_VARIANTS"]
 
-#: variant -> (embed_dim, num_heads, ffn_ratio); the S decode widths come
-#: from the official S finetune config (hidden == embed_dim, FFN 512,
-#: 3 decoder layers) — other sizes follow the same pattern once their
-#: variants are registered.
-GTR_POSE_VARIANTS: dict[str, tuple[int, int, float]] = {
-    "s": (192, 3, 4.0),
-    "m": (256, 4, 4.0),
-    "l": (384, 6, 4.0),
-    "x": (384, 6, 6.0),
+#: variant -> (embed_dim, num_heads, ffn_ratio, hidden, decoder_layers,
+#: decoder_ffn) from the official per-variant finetune configs
+#: (``configs/pose/coco_pose_finetune/gtrpose_*.yml``), cross-checked
+#: against the checkpoint shapes (2026-10-16): L/X keep a **256-wide
+#: encoder+decoder** while their ViT is 384 (the encoder down-projects —
+#: same trap class as semseg L/X), decoder depth is 3 for S and 4 for
+#: M/L/X, and FFN widths are 512/512/1024/2048.
+GTR_POSE_VARIANTS: dict[str, tuple[int, int, float, int, int, int]] = {
+    "s": (192, 3, 4.0, 192, 3, 512),
+    "m": (256, 4, 4.0, 256, 4, 512),
+    "l": (384, 6, 4.0, 256, 4, 1024),
+    "x": (384, 6, 6.0, 256, 4, 2048),
 }
 
 
@@ -51,8 +54,8 @@ class GTRPoseEstimation(ONNXExportMixin, TaskNetwork):
         variant: str = "s",
         image_size: tuple[int, int] = (640, 640),
         num_queries: int = 60,
-        num_decoder_layers: int = 3,
-        dim_feedforward: int = 512,
+        num_decoder_layers: int | None = None,
+        dim_feedforward: int | None = None,
         num_body_points: int = 17,
         num_select: int = 60,
         load_checkpoint: bool = True,
@@ -68,7 +71,15 @@ class GTRPoseEstimation(ONNXExportMixin, TaskNetwork):
                 f"Unknown GTR pose variant '{variant}'; expected one of "
                 f"{sorted(GTR_POSE_VARIANTS)}."
             )
-        embed_dim, num_heads, ffn_ratio = GTR_POSE_VARIANTS[variant]
+        embed_dim, num_heads, ffn_ratio, hidden, official_layers, official_ffn = (
+            GTR_POSE_VARIANTS[variant]
+        )
+        # None keeps the variant's official shape (the shape gate would
+        # refuse an official checkpoint against anything else).
+        if num_decoder_layers is None:
+            num_decoder_layers = official_layers
+        if dim_feedforward is None:
+            dim_feedforward = official_ffn
         self.num_classes = num_classes
         self.variant = variant
         self.image_size = tuple(image_size)
@@ -83,7 +94,7 @@ class GTRPoseEstimation(ONNXExportMixin, TaskNetwork):
         )
         self.encoder = GTREncoder(
             in_channels=[embed_dim] * 3,
-            hidden_dim=embed_dim,
+            hidden_dim=hidden,
             scale_factors=[2.0, 1.0, 0.5],
             feat_strides=[8, 16, 32],
             num_blocks=3,
@@ -91,7 +102,7 @@ class GTRPoseEstimation(ONNXExportMixin, TaskNetwork):
             act="silu",
         )
         self.decoder = GTRPoseTransformer(
-            hidden_dim=embed_dim,
+            hidden_dim=hidden,
             nhead=8,  # official pose-decoder default (independent of the backbone)
             num_queries=num_queries,
             num_decoder_layers=num_decoder_layers,
@@ -151,12 +162,17 @@ class GTRPoseEstimation(ONNXExportMixin, TaskNetwork):
         target = self.state_dict()
         transferred: dict[str, torch.Tensor] = {}
         skipped_shape: list[str] = []
+        checkpoint_only: list[str] = []
         for key, tensor in bundle.state.items():
             if not key.startswith(("encoder.", "decoder.")):
                 continue
             if key.endswith(("anchors", "valid_mask")):
                 continue  # stale; regenerated from eval_spatial_size
             if key not in target:
+                # No counterpart at all — e.g. a decoder deeper than ours
+                # (official M/L/X decode 4 layers, S decodes 3). Coverage
+                # counting alone cannot see this direction.
+                checkpoint_only.append(key)
                 continue
             if tensor.shape != target[key].shape:
                 skipped_shape.append(key)
@@ -176,13 +192,15 @@ class GTRPoseEstimation(ONNXExportMixin, TaskNetwork):
             "weights_source": bundle.inventory["weight_source"],
             "transferred": len(transferred),
             "skipped_shape": len(skipped_shape),
+            "checkpoint_only": len(checkpoint_only),
             "encoder_decoder_coverage": round(loaded / expected, 4) if expected else 0.0,
             "unexpected": len(unexpected),
         }
-        if unexpected or skipped_shape or report["encoder_decoder_coverage"] < 1.0:
+        if unexpected or skipped_shape or checkpoint_only or report["encoder_decoder_coverage"] < 1.0:
             raise ValueError(
                 f"GTR pose checkpoint '{path}' did not load cleanly: {report} "
-                f"(skipped_shape[:5]={skipped_shape[:5]})"
+                f"(skipped_shape[:5]={skipped_shape[:5]}, "
+                f"checkpoint_only[:5]={checkpoint_only[:5]})"
             )
         del missing
         return report
@@ -307,4 +325,27 @@ class GTRPoseEstimation(ONNXExportMixin, TaskNetwork):
                     shape=(3, *self.image_size), dtype=torch.float32, is_batched=True
                 )
             }
+        )
+
+    def verify_onnx_export_outputs(
+        self, torch_outputs: tuple, onnx_outputs: list
+    ) -> None:
+        # Two graph outputs: pred_logits, then pred_keypoints.
+        torch.testing.assert_close(
+            torch_outputs[0].sum(dim=1),
+            torch.as_tensor(onnx_outputs[0]).float().sum(dim=1),
+            atol=5e-3,
+            rtol=1e-1,
+            equal_nan=True,
+            check_device=False,
+            check_dtype=False,
+        )
+        torch.testing.assert_close(
+            torch_outputs[1].sum(dim=1),
+            torch.as_tensor(onnx_outputs[1]).float().sum(dim=1),
+            atol=5e-3,
+            rtol=1e-1,
+            equal_nan=True,
+            check_device=False,
+            check_dtype=False,
         )

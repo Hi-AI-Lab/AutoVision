@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """int8 post-training quantization (PTQ) for exported ONNX models.
 
 Design (§12.2 extension): the FP32 ONNX produced by the existing dynamo
@@ -32,6 +32,7 @@ __all__ = [
     "Int8QuantizationConfig",
     "image_folder_calibration_reader",
     "quantize_onnx_int8",
+    "suggest_first_layer_nodes",
 ]
 
 #: Default ops to quantize. LayerNorm/Softmax stay FP32 (numerically hot,
@@ -116,6 +117,13 @@ class Int8QuantizationConfig:
     op_types_to_quantize: tuple[str, ...] = DEFAULT_OP_TYPES_TO_QUANTIZE
     nodes_to_exclude: tuple[str, ...] = ()
     extra_options: dict[str, Any] = field(default_factory=dict)
+    #: Symmetric activation quantization (zero_point = 0). ON by default:
+    #: TensorRT's Q/DQ parser rejects non-zero zero points outright
+    #: (``buildZeroPointTensor``), so an asymmetric QDQ graph is an
+    #: ORT-only artifact; symmetric activations are consumed by both
+    #: runtimes (and are the standard TRT int8 recipe). Set to False for
+    #: an ORT-only asymmetric graph.
+    activation_symmetric: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -125,6 +133,7 @@ class Int8QuantizationConfig:
             "calibrate_method": self.calibrate_method,
             "op_types_to_quantize": list(self.op_types_to_quantize),
             "nodes_to_exclude": list(self.nodes_to_exclude),
+            "activation_symmetric": self.activation_symmetric,
             "extra_options": {k: str(v) for k, v in self.extra_options.items()},
         }
 
@@ -167,6 +176,44 @@ def _resolve_ort_quantization():
     return quantize_static, QuantFormat.QDQ, quant_types, calibrate_methods
 
 
+def resolve_calibration_samples(model: Any, calibration_data: Any) -> Any:
+    """Calibration samples for the int8 chains.
+
+    ``None`` passes through (no int8); a path (image file/dir) is expanded
+    through the model's own ``preprocess_image`` + ``preprocess_batch`` (the
+    exact tensors the exported graph consumes, matching
+    ``image_folder_calibration_reader``); anything iterable is materialized.
+    """
+    if calibration_data is None:
+        return None
+    from collections.abc import Iterable
+    from pathlib import Path
+
+    from autovision.data.file_helpers import list_image_filenames_from_dir
+
+    if isinstance(calibration_data, (str, Path)):
+        root = Path(calibration_data)
+        paths = (
+            list(list_image_filenames_from_dir(root)) if root.is_dir() else [root]
+        )
+        if not paths:
+            raise ValueError(f"No calibration images found at '{root}'.")
+        input_name = next(iter(model.model_input_spec.input_specs))
+        return [
+            {
+                input_name: model.preprocess_batch(
+                    model.preprocess_image(str(path))[0].unsqueeze(0)
+                )
+            }
+            for path in paths
+        ]
+    if isinstance(calibration_data, Iterable):
+        return list(calibration_data)
+    raise TypeError(
+        "calibration_data must be a path or an iterable of {input_name: Tensor}."
+    )
+
+
 def quantize_onnx_int8(
     model_input: Path | str,
     model_output: Path | str,
@@ -195,10 +242,48 @@ def quantize_onnx_int8(
         weight_type=quant_types[config.weight_type],
         nodes_to_exclude=list(config.nodes_to_exclude),
         calibrate_method=calibrate_methods[config.calibrate_method],
-        extra_options=dict(config.extra_options),
+        extra_options={
+            "ActivationSymmetric": bool(config.activation_symmetric),
+            **dict(config.extra_options),
+        },
     )
     onnx.checker.check_model(str(model_output), full_check=True)
     return model_output
+
+
+def suggest_first_layer_nodes(onnx_path: Path | str, limit: int = 2) -> list[str]:
+    """Leading ``Conv`` node names of an ONNX graph (first-layer-fp32 recipe).
+
+    ``quantize_static``'s ``nodes_to_exclude`` matches the FP32 graph's NODE
+    names. Some stems (e.g. a ``Conv+Relu+MaxPool`` fusion) have no TensorRT
+    int8 tactic, and the supported recipe is keeping the first layers in
+    fp32::
+
+        from autovision.export.quantization import (
+            Int8QuantizationConfig, suggest_first_layer_nodes,
+        )
+        nodes = suggest_first_layer_nodes("model.int8.fp32.onnx")
+        config = Int8QuantizationConfig(nodes_to_exclude=tuple(nodes))
+
+    Enumeration order is the graph's topological order, so the names are the
+    stem layers. Best-effort by design: a missing file or an unreadable graph
+    returns ``[]`` — callers use the list for the supported first-layer fp32
+    recipe and for build-failure hints, never as a gate input.
+    """
+    path = Path(onnx_path)
+    if not path.is_file():
+        return []
+    try:
+        import onnx
+
+        graph = onnx.load(str(path), load_external_data=False).graph
+    except Exception:  # noqa: BLE001 - hint-only helper, never raises
+        return []
+    return [
+        node.name
+        for node in graph.node
+        if node.op_type == "Conv" and node.name
+    ][: max(0, int(limit))]
 
 
 def image_folder_calibration_reader(

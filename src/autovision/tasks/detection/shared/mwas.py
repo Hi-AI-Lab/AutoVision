@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """MWAS: Masked Window Attention Sparsification (Dome-DETR port, doc 13 §4.2).
 
 Port of the baseline ``src/zoo/dome/get_roi_features.py`` (Dome-DETR,

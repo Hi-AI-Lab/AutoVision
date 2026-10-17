@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """RF-DETR object detection: model configuration."""
 
 from __future__ import annotations
@@ -279,7 +279,7 @@ class RFDETRObjectDetectionTrainArgs(TrainModelArgs, PydanticConfig):
                     f"({divisor} for '{self.model}'). Try {suggestion}."
                 )
 
-    def resolve_auto(
+    def resolve_auto_fields(
         self, total_steps: int, train_num_batches: int, gradient_accumulation_steps: int
     ) -> None:
         self.resolve_image_size()

@@ -1,5 +1,5 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
-"""Modules that participate in optimization."""
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
+"""Which model parts the optimizer drives, and weight-decay exemptions."""
 
 from __future__ import annotations
 
@@ -8,16 +8,16 @@ from dataclasses import dataclass, field
 
 from torch import nn
 
-__all__ = ["TrainableModules"]
+__all__ = ["OptimizationTargets"]
 
 
 @dataclass
-class TrainableModules:
-    """Modules whose parameters are optimized.
+class OptimizationTargets:
+    """The parameters the optimizer drives.
 
-    ``modules_no_weight_decay`` modules are always excluded from weight decay
-    regardless of the name/shape rules.
+    ``decay_free`` modules never receive weight decay, regardless of the
+    name/shape rules applied to everything else.
     """
 
-    modules: Iterable[nn.Module]
-    modules_no_weight_decay: Iterable[nn.Module] = field(default_factory=tuple)
+    targets: Iterable[nn.Module]
+    decay_free: Iterable[nn.Module] = field(default_factory=tuple)

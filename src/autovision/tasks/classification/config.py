@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Arguments for image classification training."""
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ class ImageClassificationTrainArgs(TrainModelArgs):
 
     model_config = {"extra": "forbid"}
 
-    def resolve_auto(self, **kwargs: Any) -> None:
+    def resolve_auto_fields(self, **kwargs: Any) -> None:
         """Resolve any auto fields."""
         total_steps = kwargs.get("total_steps", 0)
         if self.lr_warmup_steps == "auto":

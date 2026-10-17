@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import ClassVar, Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from autovision.augment.transform_args import NormalizeArgs
 from autovision.tasks.train_model import TrainModelArgs
@@ -30,8 +30,11 @@ class GTRPoseEstimationTrainArgs(TrainModelArgs):
     variant: Literal["s", "m", "l", "x"] = "s"
     image_size: tuple[int, int] = (640, 640)
     num_queries: int = 60
-    num_decoder_layers: int = 3
-    dim_feedforward: int = 512
+    #: ``None`` keeps the variant's official decoder shape (S: 3 layers /
+    #: 512 FFN; M: 4 / 512; L: 4 / 1024; X: 4 / 2048 — the task-model
+    #: variant table is authoritative).
+    num_decoder_layers: int | None = None
+    dim_feedforward: int | None = None
     num_body_points: int = 17
     checkpoint: str | None = None
     load_checkpoint: bool = True
@@ -51,8 +54,42 @@ class GTRPoseEstimationTrainArgs(TrainModelArgs):
     horizontal_flip_prob: float = 0.5
     normalize: NormalizeArgs = Field(default_factory=NormalizeArgs)
     fused_optimizer: bool = False
+    # ── keypoint-aware augmentation (roadmap C4) ────────────────────────
+    #: 2x2 mosaic + mixup over a rolling cache of recent samples. Both are
+    #: OFF (``None``) by default — the resize/flip pipeline stays
+    #: bit-for-bit — and honor optional step windows: ``start`` inclusive,
+    #: ``stop`` exclusive, both optional (detection-family semantics).
+    mosaic_prob: float | None = Field(default=None, ge=0.0, le=1.0)
+    mosaic_output_size: int = Field(default=640, ge=32)
+    mosaic_step_start: int | None = Field(default=None, ge=0)
+    mosaic_step_stop: int | None = Field(default=None, ge=1)
+    mixup_prob: float | None = Field(default=None, ge=0.0, le=1.0)
+    mixup_step_start: int | None = Field(default=None, ge=0)
+    mixup_step_stop: int | None = Field(default=None, ge=1)
 
     model_config = {"extra": "forbid"}
+
+    @model_validator(mode="after")
+    def _validate_augment_windows(self) -> "GTRPoseEstimationTrainArgs":
+        self.validate_augment_windows()
+        return self
+
+    def validate_augment_windows(self) -> None:
+        """Fail loud on an empty/inverted step window."""
+        for name in ("mosaic", "mixup"):
+            start = getattr(self, f"{name}_step_start")
+            stop = getattr(self, f"{name}_step_stop")
+            prob = getattr(self, f"{name}_prob")
+            if prob is None and (start is not None or stop is not None):
+                raise ValueError(
+                    f"{name}_step_start/_stop are set but {name}_prob is None "
+                    "— the window would never activate."
+                )
+            if start is not None and stop is not None and stop <= start:
+                raise ValueError(
+                    f"{name}_step_stop ({stop}) must be greater than "
+                    f"{name}_step_start ({start})."
+                )
 
     def resolve_auto_fields(self, **kwargs) -> None:
         total_steps = kwargs.get("total_steps", 0)

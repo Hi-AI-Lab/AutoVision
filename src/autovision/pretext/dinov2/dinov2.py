@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """DINOv2: DINO + iBOT masked-patch prediction + KoLeo regularizer.
 
 Recipe (design doc §7.5, blueprint in volume 12 §4.2):
@@ -34,7 +34,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from autovision.optim import AdamWArgs, TrainableModules, get_weight_decay_parameters
+from autovision.optim import AdamWArgs, OptimizationTargets, get_weight_decay_parameters
 from autovision.optim.schedulers import CosineWarmupScheduler
 from autovision.pretext.dino.dino import (
     DINOProjectionHead,
@@ -54,8 +54,8 @@ logger = logging.getLogger("autovision")
 class DINOv2Args(PretextArgs):
     """Arguments for the DINOv2 method."""
 
-    default_steps: ClassVar[int | None] = 125_000
-    default_epochs: ClassVar[int | None] = None
+    auto_steps: ClassVar[int | None] = 125_000
+    auto_epochs: ClassVar[int | None] = None
 
     gradient_clip_val: float = 3.0
     # projection head (shared with the DINO recipe)
@@ -89,14 +89,14 @@ class DINOv2Args(PretextArgs):
     warmup_steps: int = 12500
     warmup_max_steps_fraction: float = 0.1
 
-    def resolve_auto(
+    def resolve_auto_fields(
         self,
-        scaling_info: ScalingInfo | None = None,
+        scaling: ScalingInfo | None = None,
         optimizer_args: Any = None,
         wrapped_model: Any = None,
     ) -> None:
-        super().resolve_auto(
-            scaling_info=scaling_info,
+        super().resolve_auto_fields(
+            scaling=scaling,
             optimizer_args=optimizer_args,
             wrapped_model=wrapped_model,
         )
@@ -261,9 +261,9 @@ class DINOv2(PretextRecipe):
         self.teacher_projection_head.eval()
         return self
 
-    def trainable_modules(self) -> TrainableModules:
-        return TrainableModules(
-            modules=[self.embedding_model, self.student_projection_head]
+    def trainable_modules(self) -> OptimizationTargets:
+        return OptimizationTargets(
+            targets=[self.embedding_model, self.student_projection_head]
         )
 
     # ── forward ─────────────────────────────────────────────────────────
@@ -439,7 +439,7 @@ class DINOv2(PretextRecipe):
 
     # ── optimization ────────────────────────────────────────────────────
     def _student_num_layers(self) -> int | None:
-        wrapped = self.embedding_model.wrapped_model
+        wrapped = self.embedding_model._inner
         config = getattr(wrapped, "config", None)
         value = getattr(config, "num_hidden_layers", None)
         return value if isinstance(value, int) else None

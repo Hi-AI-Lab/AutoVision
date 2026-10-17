@@ -19,10 +19,27 @@ __all__ = [
     "get_global_batch_size",
     "get_num_workers",
     "get_out_dir",
+    "resolve_num_devices",
     "validate_trainer_args",
 ]
 
 logger = logging.getLogger("autovision")
+
+
+def resolve_num_devices(devices: int | str) -> int:
+    """Process count for the batch-size math, from a ``devices`` spec.
+
+    ``"auto"`` follows ``WORLD_SIZE`` (torchrun); an int (or digit string)
+    is the process count; any other device spec (``"cpu"``, ``"cuda:1"``,
+    ``"npu:0"``) is a SINGLE device — the spec itself is resolved by
+    ``engine.resolve_device``, so it contributes one process here.
+    """
+    if devices == "auto":
+        return int(os.getenv("WORLD_SIZE", "1"))
+    if isinstance(devices, int):
+        return devices
+    text = str(devices)
+    return int(text) if text.isdigit() else 1
 
 
 def validate_trainer_args(trainer_args: dict | None, *, allowed: set[str]) -> None:
@@ -154,8 +171,27 @@ def resolve_gradient_accumulation(
     return resolved
 
 
-def build_task_dataloader(dataset, batch_size: int, num_workers: int, train: bool):
-    """Train/val task dataloaders (global batch already split per device)."""
+def build_task_dataloader(
+    dataset,
+    batch_size: int,
+    num_workers: int,
+    train: bool,
+    persistent_workers: bool | None = None,
+):
+    """Train/val task dataloaders (global batch already split per device).
+
+    ``persistent_workers`` defaults to ``num_workers > 0``; the CLIs whose
+    dataset carries a step-scheduled transform (mosaic/mixup windows) pass
+    ``False``: persistent workers survive iterator resets, so the engine's
+    reinitialization handshake could never re-pickle the transform with the
+    current step, and the windows would silently never open. The gate is
+    deliberately fail-closed (always non-persistent for those loaders, at
+    the cost of one worker respawn per epoch) rather than keyed off the
+    configured window names — a renamed/re-added window arg must not be
+    able to reintroduce the silent no-op. NOTE: a respawn also resets the
+    transforms' per-worker donor caches, so mosaic/mixup donors never span
+    epochs (a minor augmentation-diversity change, documented here).
+    """
     import math
 
     from torch.utils.data import DataLoader
@@ -184,5 +220,12 @@ def build_task_dataloader(dataset, batch_size: int, num_workers: int, train: boo
         num_workers=num_workers,
         timeout=Env.DATALOADER_TIMEOUT_SEC.value if num_workers > 0 else 0.0,
         pin_memory=torch.cuda.is_available(),
-        persistent_workers=num_workers > 0,
+        # See the signature note: step-scheduled transforms pass
+        # persistent_workers=False so every iterator reset re-pickles the
+        # transform with the current step.
+        persistent_workers=(
+            num_workers > 0
+            if persistent_workers is None
+            else bool(persistent_workers) and num_workers > 0
+        ),
     )

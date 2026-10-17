@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Compatibility shims for known third-party defects.
 
 Imported once by :mod:`autovision` (see package ``__init__``) so that every

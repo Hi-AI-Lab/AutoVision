@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """RF-DETR wrapper on top of ``transformers``.
 
 Per framework policy (see the DINOv2/DINOv3 packages), RF-DETR is provided
@@ -20,7 +20,7 @@ masked-token forwards (the HF backbone drops ``bool_masked_pos``), so
 DINOv2-style masked methods fail fast with an informative error.
 
 transformers gained RF-DETR support in 5.9.0 (2026-05), which the package
-gates on at runtime (see ``rfdetr_package``).
+gates on at runtime (see ``rfdetr_source``).
 """
 
 from __future__ import annotations
@@ -31,10 +31,10 @@ import torch
 from torch import Tensor, nn
 
 from autovision.encoders.model_wrapper import (
-    ArchitectureInfo,
-    ForwardFeaturesOutput,
-    ForwardPoolOutput,
+    ArchTraits,
+    FeatureMapsOut,
     PatchSize,
+    PoolOut,
 )
 
 __all__ = ["RFDETRModelWrapper"]
@@ -72,7 +72,7 @@ class RFDETRModelWrapper(nn.Module, PatchSize):
     def hf_model(self) -> nn.Module:
         return self._model
 
-    def get_model(self) -> nn.Module:
+    def raw_module(self) -> nn.Module:
         return self._model
 
     @property
@@ -85,7 +85,7 @@ class RFDETRModelWrapper(nn.Module, PatchSize):
         return _dinov2_backbone(self._model)
 
     # ── EncoderProtocol protocol ───────────────────────────────────────────
-    def forward_features(self, x: Tensor, **kwargs: Any) -> ForwardFeaturesOutput:
+    def feature_maps(self, x: Tensor, **kwargs: Any) -> FeatureMapsOut:
         if kwargs.get("bool_masked_pos") is not None:
             raise ValueError(
                 "RF-DETR models do not support masked-token forwards: the "
@@ -103,13 +103,13 @@ class RFDETRModelWrapper(nn.Module, PatchSize):
             )
         return {"features": features}
 
-    def forward_pool(self, x: ForwardFeaturesOutput) -> ForwardPoolOutput:
+    def pool_features(self, x: FeatureMapsOut) -> PoolOut:
         pooled = torch.nn.functional.adaptive_avg_pool2d(
             x["features"], output_size=1
         )
         return {"pooled_features": pooled}
 
-    def feature_dim(self) -> int:
+    def encoder_dim(self) -> int:
         backbone_config = getattr(self.config, "backbone_config", None)
         hidden_size = getattr(backbone_config, "hidden_size", None)
         if hidden_size is None:
@@ -122,7 +122,7 @@ class RFDETRModelWrapper(nn.Module, PatchSize):
     def patch_size(self) -> int:
         return int(self.config.backbone_config.patch_size)
 
-    def architecture_info(self) -> ArchitectureInfo:
+    def arch_traits(self) -> ArchTraits:
         return {"model_type": "transformer", "norm_type": "layernorm"}
 
     def make_teacher(self) -> "RFDETRModelWrapper":

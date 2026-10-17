@@ -237,3 +237,17 @@ class GTRDepthEstimation(ONNXExportMixin, TaskNetwork):
                 )
             }
         )
+
+    def verify_onnx_export_outputs(
+        self, torch_outputs: Any, onnx_outputs: list
+    ) -> None:
+        # Single graph output: the dense depth map (B, H, W).
+        torch.testing.assert_close(
+            torch_outputs.sum(dim=1),
+            torch.as_tensor(onnx_outputs[0]).float().sum(dim=1),
+            atol=5e-3,
+            rtol=1e-1,
+            equal_nan=True,
+            check_device=False,
+            check_dtype=False,
+        )

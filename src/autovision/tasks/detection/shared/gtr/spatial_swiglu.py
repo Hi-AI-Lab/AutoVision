@@ -6,8 +6,7 @@ Re-port from Intellindust-AI-Lab GTR
 Copyright (c) 2026 The GTR Authors), adapted by AutoVision per MIT
 sections 2-4 (module placement/registration cleanup only — the GTR
 original leaves ``vit_adapter.py`` untouched apart from the
-``_build_vit`` hook this module overrides); ledger:
-``docs/provenance/LEDGER.md`` (roadmap design doc 31 G2).
+``_build_vit`` hook this module overrides); provenance ledger entry (roadmap design doc 31 G2).
 """
 
 from __future__ import annotations

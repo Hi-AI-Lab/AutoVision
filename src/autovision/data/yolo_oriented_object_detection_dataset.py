@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """YOLO-OBB (oriented) object detection dataset.
 
 Ultralytics YOLO-OBB layout: ``<split>/images/...`` with per-image label
@@ -17,7 +17,7 @@ from typing import Any
 import torch
 
 from autovision.data.file_helpers import open_image
-from autovision.data.label_helpers import get_class_id_to_internal_class_id_mapping
+from autovision.data.label_helpers import contiguous_class_id_map
 from autovision.data.object_detection_dataset import ObjectDetectionDataset
 from autovision.data.yolo_object_detection_dataset import (
     YOLOObjectDetectionDataArgs,
@@ -39,7 +39,7 @@ class YOLOOrientedObjectDetectionDataArgs(YOLOObjectDetectionDataArgs):
         images_dir = getattr(self, split)
         labels_dir = yolo_images_to_labels_path(images_dir)
         included = set(self.names) - set(self.ignore_classes or [])
-        internal = get_class_id_to_internal_class_id_mapping(sorted(included))
+        internal = contiguous_class_id_map(sorted(included))
 
         for image_path in sorted(images_dir.rglob("*")):
             if not image_path.is_file() or image_path.suffix.lower() not in {

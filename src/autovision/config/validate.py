@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Validation gateway and error prettification for all configuration models.
 
 Every config in the framework is built through :func:`pydantic_model_validate`
@@ -102,7 +102,7 @@ def no_auto(value: Any) -> Any:
     if _has_auto(value):
         raise UnresolvedAutoError(
             "Got unresolved 'auto' value. This is not a user error, "
-            "please report this issue to the Autovision team."
+            "please report this issue to the AutoVision team."
         )
     return value
 
@@ -112,5 +112,5 @@ def assert_config_resolved(config: Any) -> None:
     if _has_auto(config):
         raise UnresolvedAutoError(
             "Config contains unresolved 'auto' values. This is not a user error, "
-            "please report this issue to the Autovision team."
+            "please report this issue to the AutoVision team."
         )

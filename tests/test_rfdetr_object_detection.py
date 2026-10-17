@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Tests for the RF-DETR object detection task model.
 
 The real detector needs transformers >= 5.9 (RfDetr classes), so the logic
@@ -233,9 +233,9 @@ class TestConfig:
         with pytest.raises(ValueError, match="not divisible"):
             base.resolve_image_size()
 
-    def test_resolve_auto_scheduler(self):
+    def test_resolve_auto_fields_scheduler(self):
         args = RFDETRObjectDetectionTrainArgs(model="rf-detr-nano")
-        args.resolve_auto(
+        args.resolve_auto_fields(
             total_steps=1000, train_num_batches=100, gradient_accumulation_steps=1
         )
         assert args.lr_scheduler == "cosine"

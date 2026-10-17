@@ -4,8 +4,6 @@
 from __future__ import annotations
 
 import logging
-import os
-import warnings
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +32,7 @@ from autovision.data.object_detection_dataset import ObjectDetectionDataset
 from autovision.data.yolo_object_detection_dataset import (
     YOLOObjectDetectionDataArgs,
 )
-from autovision.engine import TaskEngine
+from autovision.engine import TaskEngine, seed_everything
 from autovision.runtime.accelerator import accelerator_supports_bf16
 from autovision.runtime.logging import set_up_console_logging, set_up_file_logging
 from autovision.tasks.detection.rtdetr import (
@@ -101,6 +99,10 @@ def train_object_detection(
         trainer_args, allowed={"val_every_num_steps", "log_every_n_steps"}
     )
     trainer_args_resolved = dict(trainer_args or {})
+    # The seed must be applied before the assembly builds random
+    # modules (model init, transform parameters): the engine re-seeds
+    # inside fit(), which is already too late for construction.
+    seed_everything(seed)
     out_dir = common_helpers.get_out_dir(out, resume_interrupted, overwrite)
     set_up_file_logging(out_dir / "train.log")
     # Mirror the progress lines (step summary, validation tables, best-
@@ -126,23 +128,11 @@ def train_object_detection(
     # (SSL-backbone DETR), "dfine/*" (distributional refinement),
     # "rfdetr/*" (RF-DETR via HF transformers) or "picodet/*" (dense
     # anchor-point PicoDet).
-    # "ltdetr/*" is the deprecated pre-R16 family key, kept as an alias.
-    is_detr = isinstance(model, str) and (
-        model.startswith("detr/") or model.startswith("ltdetr/")
-    )
+    is_detr = isinstance(model, str) and model.startswith("detr/")
     is_dfine = isinstance(model, str) and model.startswith("dfine/")
     is_picodet = isinstance(model, str) and model.startswith("picodet/")
     is_rfdetr = isinstance(model, str) and model.startswith("rfdetr/")
     if is_detr:
-        if isinstance(model, str) and (
-            model.startswith("avdetr/") or model.startswith("ltdetr/")
-        ):
-            warnings.warn(
-                f'Model family key "{model.split("/", 1)[0]}/..." is '
-                'deprecated; use "detr/..." instead.',
-                DeprecationWarning,
-                stacklevel=2,
-            )
         from autovision.tasks.detection.detr import (
             DETRObjectDetectionTrain,
             DETRObjectDetectionTrainArgs,
@@ -225,11 +215,7 @@ def train_object_detection(
 
     # 5. datasets (mmap-managed) — built without transforms first so the
     # loader length is known for the step-window resolution.
-    num_devices = (
-        int(os.getenv("WORLD_SIZE", "1"))
-        if devices == "auto"
-        else int(devices)
-    )
+    num_devices = common_helpers.resolve_num_devices(devices)
     global_batch_size = common_helpers.get_global_batch_size(
         batch_size_resolved, max(1, _dataset_size(data_args, "train")), num_devices
     )
@@ -269,6 +255,8 @@ def train_object_detection(
         train_loader = common_helpers.build_task_dataloader(
             train_dataset, batch_size=per_device_batch,
             num_workers=num_workers_resolved, train=True,
+            # Step-windowed augmentation: see build_task_dataloader's note.
+            persistent_workers=False,
         )
         val_loader = common_helpers.build_task_dataloader(
             val_dataset, batch_size=per_device_batch,

@@ -9,7 +9,7 @@ DINOv2 sizes accept the package suffixes (``-noreg``, ``-notpretrained``).
 (mirrors the baseline ``ViTTest``).
 
 Variants mirror the published baseline registry (lineage:
-``docs/provenance/LEDGER.md``):
+the provenance ledger):
 
 - **DINOv2 ViT** (patch 14): NoSTA wrapper — no spatial-prior fusion, the
   semantic taps are projected straight to ``hidden_dim``.
@@ -29,7 +29,6 @@ registry helpers so ``config`` stays the single import surface.
 
 from __future__ import annotations
 
-import warnings
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -344,9 +343,10 @@ def _build_registry() -> dict[str, DETRVariantSpec]:
     # lineage) + GTREncoder pyramid. Requires the "gtr" extra
     # (flash-linear-attention) at construction; Triton kernels need CUDA.
     # Widths from the official coco_finetune configs (S: 192/3 heads).
-    # NOT a frozen spectrum tier — G2 acceptance (COCO trend + export)
-    # pending; assembly variant "gtr-s" (HGNetV2 backbone) stays the
-    # decoder-only path.
+    # NOT a frozen spectrum tier — G2 acceptance pending: COCO trend open,
+    # and ONNX/TRT export is blocked on the GLA kernel lowering (see
+    # GTRViTBackbone.export_blocker); assembly variant "gtr-s" (HGNetV2
+    # backbone) stays the decoder-only path.
     registry["gtrvit-s"] = DETRVariantSpec(
         backbone_package="gtr",
         backbone_name="gtr_tiny_spatial_swiglu",
@@ -412,7 +412,7 @@ SPECTRUM: dict[str, SpectrumTier] = {
             "D1b: dfine_n official weights do not exist — N is the "
             "distillation-first tier (12ep). Teacher candidates: RF-DETR-n "
             "(Apache, HF), dfine_s decoder knowledge, or GTR-S COCO (MIT, "
-            "local: Dino-Dome-Research/weight/gtr/det — Intellindust "
+            "user-held store — see registry/gtr_assets.py — Intellindust "
             "Gated-Token-Recurrence, decoder shape-compatible with "
             "dfine_official at hidden 192)."
         ),
@@ -434,8 +434,14 @@ SPECTRUM: dict[str, SpectrumTier] = {
         route="assembly-finetune",
         benchmark_anchor="YOLOv8m / RT-DETR-R18",
         note=(
-            "Backbone line pending a timm/torchvision ConvNeXt-T family "
-            "implementation (current convnext-* entries are DINOv3-ConvNeXt)."
+            "Backbone-line decision (2026-10-16): M/L/X run the timm "
+            "ConvNeXt family (tiny→m / small→l / base→x, family "
+            "\"timm_cnn\") — chosen for ONNX/TRT exportability (plain "
+            "CNN, no custom kernels) and license cleanliness. The GTR "
+            "GLA line does NOT carry M/L/X (its export is blocked on the "
+            "kernel lowering, doc 31 G2). Implementation pending; the "
+            "current convnext-* entries are DINOv3-ConvNeXt (user-held "
+            "weights, not the product line)."
         ),
     ),
     "l": SpectrumTier(
@@ -443,14 +449,14 @@ SPECTRUM: dict[str, SpectrumTier] = {
         variant_key="",
         route="assembly-finetune",
         benchmark_anchor="RT-DETR-R34 / YOLOv8l",
-        note="Backbone line pending (see m).",
+        note="Same backbone line as M (see the M note); implementation pending.",
     ),
     "x": SpectrumTier(
         tier="x",
         variant_key="",
         route="assembly-finetune",
         benchmark_anchor="RT-DETR-R50 / YOLOv8x",
-        note="Optional tier; ConvNeXt-B / DINOv2-S backbone candidates.",
+        note="Optional tier on the same timm ConvNeXt line (see the M note).",
     ),
     # Planned tier WITH a component key (unlike m/l/x): the gtr-s width
     # recipe exists and assembles (doc 31 G1), but the tier freeze awaits
@@ -492,10 +498,6 @@ def resolve_spectrum_tier(tier: str) -> SpectrumTier:
     return entry
 
 
-#: Deprecated family keys, each accepted with a DeprecationWarning for
-#: one release after its rename: "avdetr/" (2026-10-15 detr rename),
-#: "ltdetr/" (R16 rename).
-_LEGACY_FAMILY_PREFIXES = ("avdetr/", "ltdetr/")
 FAMILY_PREFIX = "detr/"
 
 
@@ -504,19 +506,10 @@ def resolve_detr_variant(name: str) -> tuple[str, DETRVariantSpec]:
 
     Idempotent: accepts ``detr/<backbone>`` (public model name) and
     ``<backbone>`` (init-args form, e.g. from exported checkpoints). The
-    pre-rename family keys ``avdetr/<backbone>`` and ``ltdetr/<backbone>``
-    are accepted as deprecated aliases.
+    pre-rename family-key aliases completed their deprecation window and are
+    no longer accepted here; artifacts that embed one are rewritten by the
+    export loader's model-name migration before reaching this resolver.
     """
-    for legacy in _LEGACY_FAMILY_PREFIXES:
-        if name.startswith(legacy):
-            warnings.warn(
-                f'Model family key "{legacy}..." is deprecated; '
-                f'use "{FAMILY_PREFIX}..." instead.',
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            name = FAMILY_PREFIX + name[len(legacy) :]
-            break
     key = name[len(FAMILY_PREFIX) :] if name.startswith(FAMILY_PREFIX) else name
     if not key or key.startswith(FAMILY_PREFIX) or "/" in key:
         raise ValueError(

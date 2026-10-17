@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """AVWarmStart v1: the framework's own warm-start checkpoint format.
 
 Design doc 28, sections 4.3 (format) and 6.2 (self-built COCO warm-start

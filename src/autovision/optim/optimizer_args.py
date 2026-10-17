@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Optimizer configuration models and the optimizer registry."""
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ import torch
 from pydantic import Field
 
 from autovision.config.base import PydanticConfig
-from autovision.optim.optimizer_type import OptimizerType
+from autovision.optim.optimizer_type import OptimizerKind
 
 __all__ = [
     "AdamWArgs",
@@ -29,20 +29,20 @@ _WEIGHT_DECAY_CONV_BATCHNORM = 1e-6
 class OptimizerArgs(PydanticConfig):
     """Base class for optimizer configs."""
 
-    def type(self) -> OptimizerType:
+    def kind(self) -> OptimizerKind:
         raise NotImplementedError
 
     def get_optimizer(self, params: ParamsT, lr_scale: float) -> torch.optim.Optimizer:
         """Instantiate the optimizer; ``lr`` is scaled by ``lr_scale``."""
         raise NotImplementedError
 
-    def resolve_auto(self, wrapped_model: Any = None) -> None:
+    def resolve_auto_fields(self, wrapped_model: Any = None) -> None:
         """Resolve any ``"auto"`` fields (default: nothing to resolve)."""
 
 
 def _is_probably_conv(module: Any) -> bool:
     """Heuristic architecture guess from module class names (fallback when the
-    model wrapper does not implement ``architecture_info``)."""
+    model wrapper does not implement ``arch_traits``)."""
     names = " ".join(type(m).__name__.lower() for m in module.modules())
     has_attention = "attn" in names or "attention" in names
     if "layernorm" in names and has_attention:
@@ -56,7 +56,7 @@ def _is_probably_conv(module: Any) -> bool:
 
 def _resolve_auto_weight_decay(wrapped_model: Any) -> float:
     """Resolve ``weight_decay="auto"`` from the model architecture."""
-    info_fn = getattr(wrapped_model, "architecture_info", None)
+    info_fn = getattr(wrapped_model, "arch_traits", None)
     if callable(info_fn):
         info = info_fn()
         model_type: str = info["model_type"]
@@ -83,15 +83,14 @@ class AdamWArgs(OptimizerArgs):
     eps: float = 1e-8
     weight_decay: float | Literal["auto"] = 0.01
 
-    def type(self) -> OptimizerType:
-        return OptimizerType.ADAMW
+    def kind(self) -> OptimizerKind:
+        return "adamw"
 
     def get_optimizer(self, params: ParamsT, lr_scale: float) -> torch.optim.Optimizer:
-        kwargs = self.model_dump()
-        kwargs["lr"] = self.lr * lr_scale
-        return torch.optim.AdamW(params=params, **kwargs)
+        settings = self.model_dump(exclude={"lr"})
+        return torch.optim.AdamW(params=params, lr=self.lr * lr_scale, **settings)
 
-    def resolve_auto(self, wrapped_model: Any = None) -> None:
+    def resolve_auto_fields(self, wrapped_model: Any = None) -> None:
         if self.weight_decay == "auto":
             self.weight_decay = _resolve_auto_weight_decay(wrapped_model)
 
@@ -101,13 +100,12 @@ class SGDArgs(OptimizerArgs):
     momentum: float = 0.9
     weight_decay: float = 1e-4
 
-    def type(self) -> OptimizerType:
-        return OptimizerType.SGD
+    def kind(self) -> OptimizerKind:
+        return "sgd"
 
     def get_optimizer(self, params: ParamsT, lr_scale: float) -> torch.optim.Optimizer:
-        kwargs = self.model_dump()
-        kwargs["lr"] = self.lr * lr_scale
-        return torch.optim.SGD(params=params, **kwargs)
+        settings = self.model_dump(exclude={"lr"})
+        return torch.optim.SGD(params=params, lr=self.lr * lr_scale, **settings)
 
 
 class LARSArgs(OptimizerArgs):
@@ -119,35 +117,33 @@ class LARSArgs(OptimizerArgs):
     trust_coefficient: float = 0.001
     eps: float = 1e-8
 
-    def type(self) -> OptimizerType:
-        return OptimizerType.LARS
+    def kind(self) -> OptimizerKind:
+        return "lars"
 
     def get_optimizer(self, params: ParamsT, lr_scale: float) -> torch.optim.Optimizer:
         from autovision.optim.lars import LARS
 
-        kwargs = self.model_dump()
-        kwargs["lr"] = self.lr * lr_scale
-        return LARS(params=params, **kwargs)
+        settings = self.model_dump(exclude={"lr"})
+        return LARS(params=params, lr=self.lr * lr_scale, **settings)
 
 
-# String -> config class registry ("adamw" -> AdamWArgs, ...).
-_OPTIM_TYPE_TO_ARGS: dict[str, type[OptimizerArgs]] = {
-    OptimizerType.ADAMW.value: AdamWArgs,
-    OptimizerType.SGD.value: SGDArgs,
-    OptimizerType.LARS.value: LARSArgs,
+# Config ``type`` value -> settings class.
+_KIND_TO_ARGS: dict[str, type[OptimizerArgs]] = {
+    "adamw": AdamWArgs,
+    "sgd": SGDArgs,
+    "lars": LARSArgs,
 }
 
 
-def get_optimizer_args_cls(optim_type: str) -> type[OptimizerArgs]:
-    """Look up the optimizer args class for an optimizer type string."""
-    if optim_type == "adamw8bit":
-        from autovision.optim.adamw8bit_args import AdamW8bitArgs
+def get_optimizer_args_cls(kind: str) -> type[OptimizerArgs]:
+    """Look up the optimizer settings class for a config ``type`` value."""
+    if kind in _KIND_TO_ARGS:
+        return _KIND_TO_ARGS[kind]
+    if kind == "adamw8bit":
+        from autovision.optim.adamw8bit_args import AdamW8BitArgs
 
-        return AdamW8bitArgs
-    try:
-        return _OPTIM_TYPE_TO_ARGS[OptimizerType(optim_type).value]
-    except ValueError:
-        valid = ", ".join(sorted(_OPTIM_TYPE_TO_ARGS))
-        raise ValueError(
-            f"Unknown optimizer type: '{optim_type}'. Valid types: {valid}"
-        ) from None
+        return AdamW8BitArgs
+    raise ValueError(
+        f"Unknown optimizer type: '{kind}'. Valid types: "
+        f"{', '.join(sorted((*_KIND_TO_ARGS, 'adamw8bit')))}"
+    )

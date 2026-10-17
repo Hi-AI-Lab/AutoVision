@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """VisDrone LT-DETR at 1280x1280 — FULL COCO-detector warm start (no eraser).
 
 1280 twin of ``visdrone_ltdetr_800_baseline_coco.py`` (COCO-full warm start,

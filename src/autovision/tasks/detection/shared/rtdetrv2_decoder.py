@@ -1,8 +1,8 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Full RT-DETRv2 decoder: encoder proposal selection + denoising + refinement.
 
 Source lineage: RT-DETRv2 (``lyuwenyu/RT-DETR`` @ ``df2a96c``, Apache-2.0), re-expressed
-by Autovision; ledger ``docs/provenance/LEDGER.md`` (P1-4).
+by AutoVision; provenance ledger entry (P1-4).
 
 Faithful port of the baseline ``rtdetrv2_decoder.py`` (originally by
 lyuwenyu, RT-DETR; Apache-2.0). This replaces an earlier simplified decoder

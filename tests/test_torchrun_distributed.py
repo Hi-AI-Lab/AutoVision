@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Multi-process DDP end-to-end tests launched through torchrun.
 
 Closes the gap documented in booklet 12 §3 item 1: single-process DDP

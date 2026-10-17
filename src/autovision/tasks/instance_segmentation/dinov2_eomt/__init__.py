@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """EOMT instance segmentation (DINOv2 variant): encoder-only mask
 transformer with class-agnostic queries and Hungarian mask matching."""
 

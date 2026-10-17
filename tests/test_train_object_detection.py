@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """End-to-end tests: object detection finetuning -> artifacts -> resume -> load."""
 
 import json

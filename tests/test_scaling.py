@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 import pytest
 
 from autovision.scaling import (
@@ -89,3 +89,49 @@ def test_scaling_info_frozen():
         pass
     else:
         raise AssertionError("ScalingInfo must be frozen")
+
+
+class TestGetEpochs:
+    """The ``epochs="auto"`` resolution reads the recipe args' ClassVars
+    (``auto_steps``/``auto_epochs``) — regression guard for the 2026-10-15
+    rename, which a string-based getattr had silently detached."""
+
+    def test_step_recipe_wins(self):
+        from autovision.cli.train_helpers import get_epochs
+
+        class Args:
+            auto_steps: int = 125_000
+
+        class Recipe:
+            @staticmethod
+            def method_args_cls():
+                return Args
+
+        assert get_epochs(Recipe, "auto", dataset_size=50_000, batch_size=64) == 160  # ceil(125_000 * 64 / 50_000)
+
+    def test_falls_back_to_auto_epochs(self):
+        from autovision.cli.train_helpers import get_epochs
+
+        class Args:
+            auto_epochs: int = 100
+
+        class Recipe:
+            @staticmethod
+            def method_args_cls():
+                return Args
+
+        assert get_epochs(Recipe, "auto", dataset_size=50_000, batch_size=64) == 100
+
+    def test_neither_defined_raises(self):
+        from autovision.cli.train_helpers import get_epochs
+
+        class Args:
+            pass
+
+        class Recipe:
+            @staticmethod
+            def method_args_cls():
+                return Args
+
+        with pytest.raises(ValueError, match="auto_steps"):
+            get_epochs(Recipe, "auto", dataset_size=50_000, batch_size=64)

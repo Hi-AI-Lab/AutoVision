@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 r"""Ultralytics (YOLO/RT-DETR) backbone wrapper.
 
 The ``YOLO``/``RTDETR`` objects are *not* ``nn.Module``\ s, so this wrapper
@@ -15,8 +15,8 @@ from torch import Tensor, nn
 
 from autovision.encoders._non_module_wrapper import NonModuleModelWrapper
 from autovision.encoders.model_wrapper import (
-    ArchitectureInfo,
-    ForwardFeaturesOutput,
+    ArchTraits,
+    FeatureMapsOut,
 )
 
 __all__ = ["UltralyticsModelWrapper"]
@@ -111,16 +111,16 @@ class UltralyticsModelWrapper(NonModuleModelWrapper):
     def inner_model(self) -> nn.Module:
         return self._model[0].model
 
-    def forward_features(self, x: Tensor) -> ForwardFeaturesOutput:
+    def feature_maps(self, x: Tensor) -> FeatureMapsOut:
         features = x
         for layer in self._backbone_layers:
             features = layer(features)
         return {"features": features}
 
-    def feature_dim(self) -> int:
+    def encoder_dim(self) -> int:
         return self._feature_dim
 
-    def architecture_info(self) -> ArchitectureInfo:
+    def arch_traits(self) -> ArchTraits:
         return {"model_type": "convolutional", "norm_type": "batchnorm"}
 
     # ── gradients ───────────────────────────────────────────────────────

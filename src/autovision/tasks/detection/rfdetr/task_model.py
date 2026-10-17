@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """RF-DETR object detection task model (inference/export facing).
 
 Per framework policy (see ``autovision.encoders.rfdetr``), the detector is
@@ -42,10 +42,10 @@ __all__ = ["RFDETRObjectDetection", "RFDETRObjectDetectionOutput"]
 
 # Reuse the SSL package's variant table (HF repo ids + decoder depths +
 # backbone layouts — same checkpoints, verified supply chain).
-from autovision.encoders.rfdetr.rfdetr_package import (  # noqa: E402
+from autovision.encoders.rfdetr.rfdetr_source import (  # noqa: E402
     _MODEL_INFO as _SSL_MODEL_INFO,
 )
-from autovision.encoders.rfdetr.rfdetr_package import (  # noqa: E402
+from autovision.encoders.rfdetr.rfdetr_source import (  # noqa: E402
     _support_error as _ssl_support_error,
 )
 

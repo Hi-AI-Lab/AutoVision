@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Security contract of ``load_task_model`` on untrusted exported files.
 
 Exported ``*.pt`` files are treated as untrusted input: they must be

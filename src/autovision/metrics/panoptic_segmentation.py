@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Panoptic Quality (PQ/SQ/RQ) over accumulated (class, segment) maps.
 
 Self-contained implementation of the panoptic segmentation metric

@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Tests for the MLflow registry backend (same contract as ModelRegistry).
 
 The contract tests run against an in-memory fake client implementing the
@@ -353,7 +353,7 @@ class TestClientSeam:
 
 
 def _require_real_mlflow() -> None:
-    pytest.importorskip("mlflow", reason="mlflow extra not installed")
+    pytest.importorskip("mlflow", reason="mlflow extra not installed (pip install -e '.[mlflow]')")
     if os.environ.get("AUTOVISION_MLFLOW_TESTS") != "1":
         pytest.skip("set AUTOVISION_MLFLOW_TESTS=1 to run real-mlflow tests")
 

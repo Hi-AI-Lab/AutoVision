@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Tests for the DINOv2 pretraining method (DINO + iBOT + KoLeo)."""
 
 import pytest
@@ -40,7 +40,7 @@ class TinyMaskedViTWrapper(nn.Module):
         self.mask_token = nn.Parameter(torch.zeros(dim))
         self.config = type("Config", (), {"num_hidden_layers": num_layers})()
 
-    def forward_features(self, x, bool_masked_pos=None):
+    def feature_maps(self, x, bool_masked_pos=None):
         hidden = self.embeddings.patch_embeddings(x)
         if bool_masked_pos is not None:
             tokens = hidden.flatten(2).transpose(1, 2)
@@ -55,20 +55,20 @@ class TinyMaskedViTWrapper(nn.Module):
             hidden = hidden + block(hidden)
         return {"features": hidden, "cls_token": hidden.mean(dim=(2, 3))}
 
-    def forward_pool(self, x):
+    def pool_features(self, x):
         pooled = torch.nn.functional.adaptive_avg_pool2d(x["features"], 1)
         return {"pooled_features": pooled}
 
-    def feature_dim(self) -> int:
+    def encoder_dim(self) -> int:
         return self.dim
 
     def patch_size(self) -> int:
         return 32 // self.grid
 
-    def get_model(self):
+    def raw_module(self):
         return self.embeddings.patch_embeddings
 
-    def architecture_info(self):
+    def arch_traits(self):
         return {"model_type": "transformer", "norm_type": "layernorm"}
 
 
@@ -81,9 +81,9 @@ def make_method(**args_overrides) -> DINOv2:
         warmup_teacher_temp=0.04,
         **args_overrides,
     )
-    args.resolve_auto(scaling_info=ScalingInfo(dataset_size=64, epochs=10))
+    args.resolve_auto_fields(scaling=ScalingInfo(dataset_size=64, epochs=10))
     optimizer_args = DINOv2AdamWArgs()
-    optimizer_args.resolve_auto(wrapped_model=None)
+    optimizer_args.resolve_auto_fields(wrapped_model=None)
     student = FeatureExtractor(
         wrapped_model=TinyMaskedViTWrapper(grid=4),
         embed_dim=8,
@@ -111,7 +111,7 @@ def test_registered():
 class TestArgs:
     def test_defaults(self):
         args = DINOv2Args()
-        assert args.default_steps == 125_000
+        assert args.auto_steps == 125_000
         assert args.ibot_loss_weight == 1.0
         assert args.koleo_loss_weight == 0.1
         assert args.mask_ratio_min == 0.1
@@ -123,11 +123,11 @@ class TestArgs:
 
     def test_bad_mask_ratio_raises(self):
         with pytest.raises(ValueError, match="Mask ratios"):
-            DINOv2Args(mask_ratio_min=0.5, mask_ratio_max=0.1).resolve_auto()
+            DINOv2Args(mask_ratio_min=0.5, mask_ratio_max=0.1).resolve_auto_fields()
 
     def test_bad_layerwise_decay_raises(self):
         with pytest.raises(ValueError, match="layerwise_decay"):
-            DINOv2Args(layerwise_decay=1.5).resolve_auto()
+            DINOv2Args(layerwise_decay=1.5).resolve_auto_fields()
 
 
 class TestMaskGenerator:
@@ -189,8 +189,8 @@ class TestDinoPairLoss:
 class TestConstruction:
     def test_teacher_is_ema_copy_sharing_patch_grid(self):
         method = make_method()
-        assert method.teacher_embedding_model.wrapped_model.patch_size() == 8
-        assert method.embedding_model.wrapped_model.patch_size() == 8
+        assert method.teacher_embedding_model._inner.patch_size() == 8
+        assert method.embedding_model._inner.patch_size() == 8
 
     def test_centers_initialized_to_zero(self):
         method = make_method()

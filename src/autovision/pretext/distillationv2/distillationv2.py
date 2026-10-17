@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Distillation V2: intermediate-layer feature MSE.
 
 Recipe (design doc §7.3, blueprint in volume 12 §4.2):
@@ -34,7 +34,7 @@ from autovision.augment.transform_args import (
     RandomResizeArgs,
 )
 from autovision.augment.view_transform import ViewTransform
-from autovision.optim import AdamWArgs, LARSArgs, OptimizerArgs, TrainableModules
+from autovision.optim import AdamWArgs, LARSArgs, OptimizationTargets, OptimizerArgs
 from autovision.pretext.method_args import PretextArgs
 from autovision.pretext.recipe import PretextRecipe, StepOutput
 from autovision.scaling import ScalingInfo
@@ -45,8 +45,8 @@ __all__ = ["DistillationV2", "DistillationV2Args"]
 class DistillationV2Args(PretextArgs):
     """Arguments for the DistillationV2 method."""
 
-    default_steps: ClassVar[int | None] = None
-    default_epochs: ClassVar[int] = 100
+    auto_steps: ClassVar[int | None] = None
+    auto_epochs: ClassVar[int] = 100
 
     teacher: str | Any = "dinov2/vits14"
     teacher_args: dict | None = None
@@ -57,14 +57,14 @@ class DistillationV2Args(PretextArgs):
     lr_scale_method: Literal["linear", "sqrt"] = "sqrt"
     reference_batch_size: int = 1536
 
-    def resolve_auto(
+    def resolve_auto_fields(
         self,
-        scaling_info: ScalingInfo | None = None,
+        scaling: ScalingInfo | None = None,
         optimizer_args: OptimizerArgs | None = None,
         wrapped_model: Any = None,
     ) -> None:
-        super().resolve_auto(
-            scaling_info=scaling_info,
+        super().resolve_auto_fields(
+            scaling=scaling,
             optimizer_args=optimizer_args,
             wrapped_model=wrapped_model,
         )
@@ -133,9 +133,9 @@ class DistillationV2Transform(MultiViewTransform):
 def _num_hidden_layers(wrapped_model: Any) -> int | None:
     """Best-effort block count from the wrapper's config (ViT backbones)."""
     candidates = [wrapped_model]
-    get_model = getattr(wrapped_model, "get_model", None)
-    if callable(get_model):
-        candidates.append(get_model())
+    raw_module = getattr(wrapped_model, "raw_module", None)
+    if callable(raw_module):
+        candidates.append(raw_module())
     for candidate in candidates:
         config = getattr(candidate, "config", None)
         value = getattr(config, "num_hidden_layers", None)
@@ -197,7 +197,7 @@ class DistillationV2(PretextRecipe):
         self.teacher_embedding_model = build_teacher(
             method_args, num_input_channels=num_input_channels
         )
-        self.teacher_embedding_dim: int = self.teacher_embedding_model.feature_dim()
+        self.teacher_embedding_dim: int = self.teacher_embedding_model.encoder_dim()
         if embedding_model.embed_dim != self.teacher_embedding_dim:
             raise ValueError(
                 "DistillationV2 has no projection head: the student embed dim "
@@ -213,7 +213,7 @@ class DistillationV2(PretextRecipe):
         self.student_layers: tuple[int, int] = (
             self.teacher_layers
             if isinstance(method_args.teacher_layers, tuple)
-            else _resolve_teacher_layers(embedding_model.wrapped_model, "auto")
+            else _resolve_teacher_layers(embedding_model._inner, "auto")
         )
         # Explicit indices must exist in both backbones (depths may differ).
         if isinstance(method_args.teacher_layers, tuple):
@@ -221,7 +221,7 @@ class DistillationV2(PretextRecipe):
                 self.teacher_layers, self.teacher_embedding_model, "teacher"
             )
             _validate_layers_within_depth(
-                self.student_layers, embedding_model.wrapped_model, "student"
+                self.student_layers, embedding_model._inner, "student"
             )
 
     # ── contract ────────────────────────────────────────────────────────
@@ -248,8 +248,8 @@ class DistillationV2(PretextRecipe):
         self.teacher_embedding_model.eval()
         return self
 
-    def trainable_modules(self) -> TrainableModules:
-        return TrainableModules(modules=[self.embedding_model])
+    def trainable_modules(self) -> OptimizationTargets:
+        return OptimizationTargets(targets=[self.embedding_model])
 
     # ── forward ─────────────────────────────────────────────────────────
     @staticmethod
@@ -274,14 +274,14 @@ class DistillationV2(PretextRecipe):
 
     @torch.no_grad()
     def _forward_teacher(self, x: Tensor) -> tuple[Tensor, tuple[int, int]]:
-        outputs = self.teacher_embedding_model.forward_multiscale_features(
+        outputs = self.teacher_embedding_model.stage_feature_maps(
             x, self.teacher_layers
         )
         tokens, grid = self._concat_patches(outputs)
         return tokens, grid
 
     def _forward_student(self, x: Tensor) -> tuple[Tensor, tuple[int, int]]:
-        outputs = self.embedding_model.forward_multiscale_features(
+        outputs = self.embedding_model.stage_feature_maps(
             x, self.student_layers
         )
         tokens, grid = self._concat_patches(outputs)

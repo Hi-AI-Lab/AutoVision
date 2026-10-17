@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Asset licensing metadata (design doc 28, section 6.3 / rule R7).
 
 Every downloadable binary asset must carry an explicit license reference.

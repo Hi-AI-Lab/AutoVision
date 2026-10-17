@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """COCO object detection dataset.
 
 Rows are built once from the COCO json and serialized into the mmap cache;
@@ -15,7 +15,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from autovision.data.label_helpers import get_class_id_to_internal_class_id_mapping
+from autovision.data.label_helpers import contiguous_class_id_map
 
 __all__ = ["COCOObjectDetectionDataArgs"]
 
@@ -57,7 +57,7 @@ class COCOObjectDetectionDataArgs(BaseModel):
         """Class id -> name (internal contiguous ids)."""
         user_classes = self._classes()
         included = _included_class_ids(user_classes, self.ignore_classes)
-        internal = get_class_id_to_internal_class_id_mapping(sorted(included))
+        internal = contiguous_class_id_map(sorted(included))
         return {internal[class_id]: user_classes[class_id] for class_id in sorted(included)}
 
     def train_data_mmap_hash(self) -> str:
@@ -103,7 +103,7 @@ class COCOObjectDetectionDataArgs(BaseModel):
 
         user_classes = self._classes()
         included = _included_class_ids(user_classes, self.ignore_classes)
-        internal = get_class_id_to_internal_class_id_mapping(sorted(included))
+        internal = contiguous_class_id_map(sorted(included))
 
         for image_id, (image_path, width, height) in image_id_to_file.items():
             image_annotations = annotations_by_image.get(image_id, [])

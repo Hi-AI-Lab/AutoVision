@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """EOMT panoptic segmentation (DINOv2 variant): encoder-only mask
 transformer decoding queries into per-pixel (class, segment) maps."""
 

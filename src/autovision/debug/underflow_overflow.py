@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Per-module activation overflow tracing (HF DebugUnderflowOverflow style).
 
 Forward hooks record abs-min/max statistics per module; on the first inf/nan

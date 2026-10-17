@@ -1,9 +1,9 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Acceptance tests for the clean-provenance P0 rewrites (design doc 28).
 
 Each rewritten unit is checked against an *independently constructed*
 oracle (naive loops / closed-form math), not against the previous
-implementation. Specs: docs/provenance/specs/S{1,2,3,4}-*.md.
+implementation. Specs: the clean-room specs S1-S4 (private provenance copy).
 """
 
 import math

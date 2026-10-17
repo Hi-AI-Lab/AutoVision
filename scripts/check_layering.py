@@ -32,6 +32,9 @@ PACKAGE_ROOT = REPO_ROOT / "src" / "autovision"
 LAYERS: dict[str, int] = {
     "cli": 0,
     "engine": 1,
+    "hpo": 1,  # hyperparameter search driver (orchestrates training runs)
+    "inference": 1,  # reference inference runtime (engine's serving sibling)
+    "serving": 1,  # reference inference serving (wraps the inference engine)
     "pretext": 2,
     "tasks": 2,
     "augment": 3,
@@ -40,6 +43,7 @@ LAYERS: dict[str, int] = {
     "data": 5,
     "optim": 5,
     "metrics": 5,
+    "tracking": 5,  # ByteTrack association (pure math over detections)
     "config": 5,
     "registry": 5,
     "scaling": 5,
@@ -62,6 +66,10 @@ HARD_BANS: set[tuple[str, str]] = {
 #: Sanctioned upward imports: (source module prefix, target module prefix,
 #: reason). Keep this table SHORT — entries are debt markers, not policy.
 ALLOWED_UPWARD: dict[tuple[str, str], str] = {
+    ("hpo", "cli"): (
+        "task_trial drives the cli.train_task training entries (the same "
+        "wired-with-Pydantic surface the CLI exposes)"
+    ),
     ("features.embed", "cli.common_helpers"): (
         "embed is a command implementation reusing CLI helpers"
     ),

@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """JSONL metrics logger: one JSON object per line in ``<out>/metrics.jsonl``."""
 
 from __future__ import annotations

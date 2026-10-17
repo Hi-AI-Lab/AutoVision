@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 import json
 import math
 from pathlib import Path
@@ -48,24 +48,24 @@ class TestDistillationV3Args:
         assert args.loss_local_weight == 1.0
         assert args.lr_scale_method == "sqrt"
         assert args.reference_batch_size == 1536
-        assert args.default_epochs == 100
+        assert args.auto_epochs == 100
 
     def test_queue_auto_bucketing(self):
         args = DistillationV3Args()
-        args.resolve_auto(scaling_info=ScalingInfo(dataset_size=800, epochs=100))
+        args.resolve_auto_fields(scaling=ScalingInfo(dataset_size=800, epochs=100))
         assert args.queue_size == 256  # bucket <1000
         args = DistillationV3Args()
-        args.resolve_auto(scaling_info=ScalingInfo(dataset_size=50_000, epochs=100))
+        args.resolve_auto_fields(scaling=ScalingInfo(dataset_size=50_000, epochs=100))
         assert args.queue_size == 8192
 
     def test_queue_larger_than_dataset_raises(self):
         args = DistillationV3Args(queue_size=100)
         with pytest.raises(ValueError, match="cannot be larger"):
-            args.resolve_auto(scaling_info=ScalingInfo(dataset_size=50, epochs=10))
+            args.resolve_auto_fields(scaling=ScalingInfo(dataset_size=50, epochs=10))
 
     def test_explicit_queue_ok(self):
         args = DistillationV3Args(queue_size=16)
-        args.resolve_auto(scaling_info=ScalingInfo(dataset_size=50, epochs=10))
+        args.resolve_auto_fields(scaling=ScalingInfo(dataset_size=50, epochs=10))
         assert args.queue_size == 16
 
     def test_optimizer_recipes(self):
@@ -110,10 +110,10 @@ def make_method(
     queue_size: int | str = 16,
 ) -> DistillationV3:
     args = DistillationV3Args(queue_size=queue_size, teacher="unused")
-    args.resolve_auto(scaling_info=ScalingInfo(dataset_size=dataset_size, epochs=100))
+    args.resolve_auto_fields(scaling=ScalingInfo(dataset_size=dataset_size, epochs=100))
     # Follow the real flow: method-specific optimizer args, then resolve auto.
     optimizer_args = DistillationV3.optimizer_args_cls("auto")()
-    optimizer_args.resolve_auto(
+    optimizer_args.resolve_auto_fields(
         wrapped_model=TinyWrapper(dim=teacher_dim, model_type="convolutional")
     )
     student = FeatureExtractor(
@@ -157,7 +157,7 @@ class TestDistillationV3Method:
         modules = method.trainable_modules()
         all_named = dict(method.named_parameters())
         trainable_ids = {
-            id(p) for m in modules.modules for p in m.parameters()
+            id(p) for m in modules.targets for p in m.parameters()
         }
         for name, param in all_named.items():
             if name.startswith("teacher_embedding_model."):
@@ -213,8 +213,8 @@ class TestDistillationV3Method:
         # evaluation: two forwards would double-update BN running stats and
         # sample dropout twice.
         method = make_method()
-        wrapper = method.student_embedding_model.wrapped_model
-        original = wrapper.forward_features
+        wrapper = method.student_embedding_model._inner
+        original = wrapper.feature_maps
         calls = 0
 
         def counting(x, **kwargs):
@@ -222,11 +222,11 @@ class TestDistillationV3Method:
             calls += 1
             return original(x, **kwargs)
 
-        wrapper.forward_features = counting
+        wrapper.feature_maps = counting
         try:
             method.training_step(make_batch(), batch_idx=0)
         finally:
-            wrapper.forward_features = original
+            wrapper.feature_maps = original
         assert calls == 1
 
     def test_loss_is_zero_when_student_matches_teacher(self):
@@ -236,7 +236,7 @@ class TestDistillationV3Method:
         method = make_method(
             student_dim=8, embed_dim=8, teacher_dim=8, queue_size=16
         )
-        method.student_embedding_model.wrapped_model.load_state_dict(
+        method.student_embedding_model._inner.load_state_dict(
             method.teacher_embedding_model.state_dict()
         )
         for head in (
@@ -258,8 +258,8 @@ class TestDistillationV3Method:
             if p.grad is not None
         }
         assert any(
-            name.startswith("embedding_model.wrapped_model")
-            or name.startswith("embedding_model.embed_head")
+            name.startswith("embedding_model._inner")
+            or name.startswith("embedding_model._embed")
             for name in grads
         )
         assert any("projection_head" in name for name in grads)

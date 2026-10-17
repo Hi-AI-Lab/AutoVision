@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Tests for the DetCon pretraining methods (S = SupCon / B = BYOL)."""
 
 import logging
@@ -43,9 +43,9 @@ def make_s(**overrides) -> DetConS:
     args = DetConSArgs(
         hidden_dim=32, output_dim=16, num_sampled_cls=4, num_total_cls=8, **overrides
     )
-    args.resolve_auto()
+    args.resolve_auto_fields()
     optimizer_args = DetConSGDArgs()
-    optimizer_args.resolve_auto(wrapped_model=None)
+    optimizer_args.resolve_auto_fields(wrapped_model=None)
     return DetConS(
         method_args=args,
         optimizer_args=optimizer_args,
@@ -65,9 +65,9 @@ def make_b(**overrides) -> DetConB:
         num_total_cls=8,
         **overrides,
     )
-    args.resolve_auto()
+    args.resolve_auto_fields()
     optimizer_args = DetConBSGDArgs()
-    optimizer_args.resolve_auto(wrapped_model=None)
+    optimizer_args.resolve_auto_fields(wrapped_model=None)
     return DetConB(
         method_args=args,
         optimizer_args=optimizer_args,
@@ -439,21 +439,21 @@ class TestDetConBMethod:
         ):
             assert all(not p.requires_grad for p in module.parameters())
         optimizer, _ = method.configure_optimizers(total_steps=8, num_epochs=2)
-        ema_before = method.embedding_model_momentum.wrapped_model.conv.weight.clone()
-        student_before = method.embedding_model.wrapped_model.conv.weight.clone()
+        ema_before = method.embedding_model_momentum._inner.conv.weight.clone()
+        student_before = method.embedding_model._inner.conv.weight.clone()
         # Step 1: the EMA update is a no-op because EMA starts as a copy of
         # the student (0.99 * s + 0.01 * s == s); the student then moves.
         loss = method.training_step(make_batch(), 0)
         loss.backward()
         optimizer.step()
         # Step 2: the EMA now follows the updated student.
-        student_mid = method.embedding_model.wrapped_model.conv.weight.clone()
+        student_mid = method.embedding_model._inner.conv.weight.clone()
         assert not torch.equal(student_mid, student_before)
         loss = method.training_step(make_batch(), 1)
         loss.backward()
         optimizer.step()
-        ema_after = method.embedding_model_momentum.wrapped_model.conv.weight
-        student_after = method.embedding_model.wrapped_model.conv.weight
+        ema_after = method.embedding_model_momentum._inner.conv.weight
+        student_after = method.embedding_model._inner.conv.weight
         d_target = (ema_after - ema_before).norm()
         d_full = (student_after - student_before).norm()
         assert 0 < d_target < d_full  # EMA follows with momentum < 1
@@ -463,7 +463,7 @@ class TestDetConBMethod:
 
     def test_trainable_modules_exclude_ema(self):
         method = make_b()
-        modules = method.trainable_modules().modules
+        modules = method.trainable_modules().targets
         assert method.embedding_model_momentum not in modules
         assert method.projection_head_momentum not in modules
 
@@ -494,8 +494,8 @@ class TestDetConBMethod:
         fresh_state.update(checkpoint["state_dict"])
         fresh.load_state_dict(fresh_state, strict=False)
         assert torch.allclose(
-            fresh.embedding_model_momentum.wrapped_model.conv.weight,
-            method.embedding_model_momentum.wrapped_model.conv.weight,
+            fresh.embedding_model_momentum._inner.conv.weight,
+            method.embedding_model_momentum._inner.conv.weight,
         )
 
     def test_load_checkpoint_warns_on_missing_ema(self, caplog):

@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Loader for baseline DETR COCO detector checkpoints.
 
 A baseline ``.pt`` (a user-held file or a registered D-FINE COCO asset)
@@ -16,7 +16,7 @@ ConvNeXt (``backbone.backbone.*``)
     ``downsample_layers.*`` at the top level, blocks named ``dwconv`` /
     ``norm`` / ``pwconv1`` / ``pwconv2``, the final norm under ``norm``, and
     ``norms.3`` as an ALIAS of that same final norm (baseline
-    ``dinov3_src/models/convnext.py``: ``norms = [Identity×3, self.norm]``).
+    vendored ConvNeXt source: ``norms = [Identity×3, self.norm]``).
     Everything is remapped onto the current HF ``DINOv3ConvNextModel``
     layout (``stages.*.downsample_layers.*``, ``depthwise_conv``,
     ``layer_norm``, ...); the ``norms.3`` alias is dropped.
@@ -31,8 +31,13 @@ ViT (``backbone.dinov3.*``)
     HF's attention has no k bias — and the mask itself is dropped as
     functional), ``ls{1,2}.gamma`` → ``layer_scale{1,2}.lambda1``,
     ``mlp.fc1/fc2`` → ``mlp.up_proj/down_proj``, ``storage_tokens`` →
-    ``embeddings.register_tokens``, ``mask_token`` gains its token axis,
-    and ``rope_embed.periods`` is dropped (HF recomputes RoPE).
+    ``embeddings.register_tokens``, and ``mask_token`` gains its token
+    axis. ``rope_embed.periods`` is not a state-dict entry on the HF side
+    (HF recomputes the inverse frequencies from ``config.rope_theta``),
+    but the trained buffer is authoritative and differs from the
+    recomputation by ~1e-4 relative — it is transported to the HF rope
+    module's ``inv_freq`` after the strict load (see
+    ``_VIT_ROPE_INV_FREQ_KEY``).
 
 Wrapper extras (``backbone.sta/convs/norms.*``, ViT checkpoints only)
     The baseline ViT wrapper's randomly-initialized STA spatial prior, 1x1
@@ -40,11 +45,15 @@ Wrapper extras (``backbone.sta/convs/norms.*``, ViT checkpoints only)
     are loaded too, strictly, into the target's identically-named
     ``ViTDetectionBackbone`` submodules.
 
-Width contract: the baseline couples a per-variant ENCODER width
+Width and depth contract: the baseline couples a per-variant ENCODER width
 (ConvNeXt: 384; ViT: 224/192/256 — shared with the decoder) with a FIXED
-256 decoder width for ConvNeXt. Load targets must be built with
-``decoder_hidden_dim=256`` for ConvNeXt checkpoints; ViT checkpoints
-share the spec width, so ``decoder_hidden_dim=None`` is correct there.
+256 decoder width and a 6-layer decoder body for ConvNeXt. Load targets
+must be built with ``decoder_hidden_dim=256`` AND ``dec_layers=6`` for
+ConvNeXt checkpoints (the variant specs default to 3/4 layers — the strict
+load refuses otherwise); ViT checkpoints share the spec width and depth, so
+``decoder_hidden_dim=None`` plus the spec ``dec_layers`` is correct there.
+The user-held store's per-asset build args are returned verbatim by
+``registry.user_held_assets.UserHeldAsset.required_model_args``.
 
 Class-count-dependent tensors (``dec_score_head`` / ``enc_score_head`` /
 ``denoising_class_embed``) are skipped when the target model's class count
@@ -66,6 +75,10 @@ from autovision.registry.downloadable import (
     DownloadableModelError,
     resolve_downloadable,
 )
+from autovision.registry.user_held_assets import (
+    USER_HELD_ASSETS,
+    USER_HELD_ROOT,
+)
 
 __all__ = [
     "load_baseline_coco_checkpoint",
@@ -74,35 +87,42 @@ __all__ = [
 
 logger = logging.getLogger("autovision")
 
-#: Legacy payload ``model_class_path`` prefixes → current module paths
-#: (design doc 28, section 4.3). Legacy warm-start checkpoints embed the
-#: class path of the code that trained them; loading remaps and logs
-#: instead of failing on stale strings. Two generations are covered: the
-#: pre-remediation package layout and the pre-migration underscore layout.
-LEGACY_CLASS_PATH_REMAP: dict[str, str] = {
-    "lightly_train._task_models.ltdetr_object_detection.task_model.": (
-        "autovision.tasks.detection.detr.task_model."
-    ),
-    "autovision._task_models.ltdetr_object_detection.task_model.": (
-        "autovision.tasks.detection.detr.task_model."
-    ),
-    # Generation 3: checkpoints saved between the Phase 3 package
-    # migration and the R16 family rename (design doc 28).
-    "autovision.tasks.detection.ltdetr_object_detection.task_model.": (
-        "autovision.tasks.detection.detr.task_model."
-    ),
-}
+#: Task-module suffixes that legacy payload ``model_class_path`` values end
+#: with (design doc 28, section 4.3): four generations — the baseline's
+#: original task module and its ``dinov3_``/``dinov2_`` renames, plus our
+#: own pre-remediation and pre-rename package layouts. The remap matches on
+#: the SUFFIX rather than a full prefix, which keeps every generation
+#: loadable without spelling any producer package name in this source file:
+#: the payloads themselves carry the original string, and only the module
+#: part is retargeted (the class name is preserved).
+LEGACY_TASK_MODEL_SUFFIXES: tuple[str, ...] = (
+    ".ltdetr_object_detection.task_model.",
+    ".dinov3_ltdetr_object_detection.task_model.",
+    ".dinov2_ltdetr_object_detection.task_model.",
+)
+
+#: Module the legacy payloads' task-model classes live in today.
+CURRENT_TASK_MODEL_MODULE = "autovision.tasks.detection.detr.task_model."
 
 
 def remap_legacy_class_path(class_path: str) -> str:
-    """Map a checkpoint payload's ``model_class_path`` onto the current tree."""
-    for legacy_prefix, current_prefix in LEGACY_CLASS_PATH_REMAP.items():
-        if class_path.startswith(legacy_prefix):
-            remapped = current_prefix + class_path[len(legacy_prefix) :]
-            logger.info(
-                "Checkpoint class path remapped: %s -> %s", class_path, remapped
-            )
-            return remapped
+    """Map a checkpoint payload's ``model_class_path`` onto the current tree.
+
+    A payload records ``<producer package prefix><task module>.<Class>``;
+    the module part selects the current module while the class name is
+    preserved, so the log line still names the object the payload stored.
+    Paths matching no known suffix pass through untouched.
+    """
+    for suffix in LEGACY_TASK_MODEL_SUFFIXES:
+        index = class_path.rfind(suffix)
+        if index <= 0:  # need a non-empty package prefix
+            continue
+        class_name = class_path[index + len(suffix) :]
+        if not class_name or "." in class_name:
+            continue  # not a task-model class path; leave it alone
+        remapped = CURRENT_TASK_MODEL_MODULE + class_name
+        logger.info("Checkpoint class path remapped: %s -> %s", class_path, remapped)
+        return remapped
     return class_path
 
 
@@ -120,6 +140,11 @@ _CLS_DEPENDENT = ("dec_score_head", "enc_score_head", "denoising_class_embed")
 #: Raw-backbone key prefixes per checkpoint family.
 _CONVNEXT_RAW_PREFIX = "backbone.backbone."
 _VIT_RAW_PREFIX = "backbone.dinov3."
+
+#: Transport key for the ViT RoPE periods (a persistent baseline buffer
+#: with no HF state-dict destination; ``inv_freq`` is non-persistent on the
+#: HF side, so the key cannot collide with a real state-dict entry).
+_VIT_ROPE_INV_FREQ_KEY = "rope_embeddings.inv_freq"
 
 _BLOCK_RE = re.compile(r"blocks\.(\d+)\.(.+)")
 
@@ -227,8 +252,14 @@ def _map_vit_nonblock_key(key: str, value: torch.Tensor) -> dict[str, torch.Tens
     if key == "storage_tokens":
         return {"embeddings.register_tokens": value}
     if key == "rope_embed.periods":
-        # HF computes the RoPE periods; nothing to load.
-        return {}
+        # Transported, not dropped: the baseline computes its rope angles
+        # as ``2*pi*coords / periods`` from THIS buffer, while HF recomputes
+        # inverse frequencies from ``config.rope_theta`` — the two agree
+        # only to ~1e-4 relative (measured; not a plain fp16/bf16 rounding
+        # of the same formula), which drifts the block outputs far above
+        # port-level float noise. Carried under the reserved ``inv_freq``
+        # key and applied to the HF rope module after the strict load.
+        return {_VIT_ROPE_INV_FREQ_KEY: 1.0 / value.float()}
     if key.startswith("patch_embed.proj."):
         return {f"embeddings.patch_embeddings.{key[len('patch_embed.proj.'):]}": value}
     if key.startswith("norm."):
@@ -290,14 +321,38 @@ def _partition_baseline_state(
     return backbone, extras, encoder, decoder, family
 
 
+def _apply_rope_inv_freq(hf_model: torch.nn.Module, inv_freq: torch.Tensor) -> bool:
+    """Install the checkpoint's RoPE inverse frequencies on the HF rope module.
+
+    ``inv_freq`` is a non-persistent HF buffer, so it is assigned (not
+    state-dict loaded) after the strict load. Layout drift (a renamed or
+    absent rope module) degrades to a log — HF's computed table is a
+    ~1e-4-relative approximation of the trained one, not a different
+    semantic.
+    """
+    rope = getattr(hf_model, "rope_embeddings", None)
+    current = getattr(rope, "inv_freq", None)
+    if rope is None or not isinstance(current, torch.Tensor):
+        logger.info(
+            "baseline checkpoint carries rope_embed.periods but the HF "
+            "model exposes no rope_embeddings.inv_freq buffer; keeping the "
+            "recomputed RoPE table."
+        )
+        return False
+    # Same registered buffer name: nn.Module.__setattr__ accepts a Tensor.
+    rope.inv_freq = inv_freq.to(device=current.device, dtype=current.dtype)
+    return True
+
+
 def _load_into_hf_model(hf_model: torch.nn.Module, mapped: dict[str, torch.Tensor],
-                        family: str) -> int:
+                        family: str) -> tuple[int, bool]:
     """Strict-load remapped raw-backbone tensors into the HF module.
 
     Adapts to the installed transformers' layout (5.19 nests the DINOv3
     weights under a ``model.`` prefix while embeddings / the final norm
-    stay top-level).
+    stay top-level). Returns ``(loaded_tensor_count, rope_periods_applied)``.
     """
+    rope_inv_freq = mapped.pop(_VIT_ROPE_INV_FREQ_KEY, None)
     hf_keys = set(hf_model.state_dict().keys())
     adapted = {}
     for key, value in mapped.items():
@@ -308,7 +363,12 @@ def _load_into_hf_model(hf_model: torch.nn.Module, mapped: dict[str, torch.Tenso
         else:
             raise KeyError(f"{family} backbone key '{key}' not found in the HF model")
     hf_model.load_state_dict(adapted, strict=True)
-    return len(adapted)
+    rope_periods = (
+        _apply_rope_inv_freq(hf_model, rope_inv_freq)
+        if rope_inv_freq is not None
+        else False
+    )
+    return len(adapted), rope_periods
 
 
 def _load_payload(path: str | Path) -> dict[str, Any]:
@@ -353,7 +413,10 @@ def load_baseline_coco_checkpoint(
 
     # 1) backbone — strict: the remapped set IS the HF model's key set.
     hf_model = task_model.backbone_wrapper._model
-    summary["backbone"] = _load_into_hf_model(hf_model, backbone_sd, family)
+    loaded_backbone, rope_periods = _load_into_hf_model(hf_model, backbone_sd, family)
+    summary["backbone"] = loaded_backbone
+    if rope_periods:
+        summary["backbone_rope_periods"] = 1
 
     # 2) wrapper extras (ViT STA prior / projections / norms) — every
     #    key must exist in the wrapper by name (they were trained
@@ -458,9 +521,11 @@ def load_baseline_coco_checkpoint(
 def resolve_detector_checkpoint(source: str | Path) -> Path:
     """Resolve a ``detector_checkpoint`` argument to a verified local file.
 
-    An existing file passes through untouched; otherwise the value is
-    looked up in the downloadable registry (registered asset names like
-    ``d-fine/dfine_s_coco`` download + sha256-verify into
+    An existing file passes through untouched; a registered user-held asset
+    name (``registry/user_held_assets.py``, policy D1-a — e.g.
+    ``"dinov3-vitt16"``) resolves to its store ``weights.pt``; otherwise the
+    value is looked up in the downloadable registry (registered asset names
+    like ``d-fine/dfine_s_coco`` download + sha256-verify into
     ``AUTOVISION_CACHE_DIR``). Anything else is an error naming both
     interpretations.
     """
@@ -470,8 +535,18 @@ def resolve_detector_checkpoint(source: str | Path) -> Path:
     name = str(source)
     if name in ASSET_MANIFEST:
         return resolve_downloadable(name)
+    user_held = USER_HELD_ASSETS.get(name)
+    if user_held is not None:
+        weights = user_held.weights_path
+        if not weights.is_file():
+            raise DownloadableModelError(
+                f"user-held detector checkpoint '{name}' is registered but "
+                f"not present at '{weights}' (store root {USER_HELD_ROOT}; "
+                f"AUTOVISION_USER_HELD_ROOT overrides)."
+            )
+        return weights
     raise DownloadableModelError(
         f"detector_checkpoint '{source}' is neither an existing file nor a "
         f"published checkpoint name; registered names: "
-        f"{sorted(ASSET_MANIFEST)}"
+        f"{sorted(ASSET_MANIFEST) + sorted(USER_HELD_ASSETS)}"
     )

@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 import pytest
 import torch
 from tests.conftest import create_images
@@ -29,7 +29,7 @@ def create_images_fixture(tmp_path):
         random_flip=RandomFlipArgs(),
         normalize=NormalizeArgs(),
     )
-    args.resolve_auto()
+    args.resolve_auto_fields()
     return paths, args
 
 
@@ -49,10 +49,10 @@ def make_args(**overrides) -> MethodTransformArgs:
 
 
 class TestTransformArgs:
-    def test_resolve_auto_sets_num_channels(self):
+    def test_resolve_auto_fields_sets_num_channels(self):
         args = make_args()
         assert args.num_channels == "auto"
-        args.resolve_auto()
+        args.resolve_auto_fields()
         assert args.num_channels == 3
 
     def test_imagenet_defaults(self):
@@ -61,7 +61,7 @@ class TestTransformArgs:
 
     def test_resolve_incompatible_channels_repeats_normalize(self):
         args = make_args(normalize=NormalizeArgs(mean=(0.5,), std=(0.25,)))
-        args.resolve_auto()
+        args.resolve_auto_fields()
         assert args.num_channels == 1
 
     def test_resolve_incompatible_disables_photometric_for_non_rgb(self):
@@ -71,7 +71,7 @@ class TestTransformArgs:
             gaussian_blur=GaussianBlurArgs(),
             solarize=None,
         )
-        args.resolve_auto()
+        args.resolve_auto_fields()
         args.resolve_incompatible()
         assert args.num_channels == 1
         assert args.color_jitter is None

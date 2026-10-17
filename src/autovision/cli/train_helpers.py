@@ -1,10 +1,10 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Pretraining command helpers: ordered config resolution and assembly.
 
 Resolution order (design doc §5.3, mirrors the baseline):
 
     transform_args -> epochs -> strategy/precision -> batch_size/num_workers
-    -> optimizer_args(wrapped_model) -> method_args(scaling_info, optimizer_args,
+    -> optimizer_args(wrapped_model) -> method_args(scaling, optimizer_args,
     wrapped_model)
 
 Each resolver validates its input against the method-provided config class,
@@ -48,7 +48,7 @@ def get_transform_args(
 ) -> MethodTransformArgs:
     args_cls = method_cls.transform_cls().transform_args_cls()
     args = pydantic_model_validate(args_cls, dict(transform_args or {}))
-    args.resolve_auto()
+    args.resolve_auto_fields()
     args.resolve_incompatible()
     assert_config_resolved(args)
     return args
@@ -80,16 +80,16 @@ def get_epochs(
     if epochs != "auto":
         return int(epochs)
     args_cls = method_cls.method_args_cls()
-    default_steps = getattr(args_cls, "default_steps", None)
-    if default_steps is not None:
-        return epochs_from_steps(default_steps, batch_size, dataset_size)
-    default_epochs = getattr(args_cls, "default_epochs", None)
-    if default_epochs is None:
+    recipe_steps = getattr(args_cls, "auto_steps", None)
+    if recipe_steps is not None:
+        return epochs_from_steps(recipe_steps, batch_size, dataset_size)
+    recipe_epochs = getattr(args_cls, "auto_epochs", None)
+    if recipe_epochs is None:
         raise ValueError(
-            f"{args_cls.__name__} defines neither 'default_steps' nor "
-            f"'default_epochs'; set epochs explicitly."
+            f"{args_cls.__name__} defines neither 'auto_steps' nor "
+            f"'auto_epochs'; set epochs explicitly."
         )
-    return int(default_epochs)
+    return int(recipe_epochs)
 
 
 def get_scaling_info(dataset_size: int, epochs: int) -> ScalingInfo:
@@ -104,7 +104,7 @@ def get_optimizer_args(
 ) -> Any:
     args_cls = method_cls.optimizer_args_cls(optim)
     args = pydantic_model_validate(args_cls, dict(optim_args or {}))
-    args.resolve_auto(wrapped_model=wrapped_model)
+    args.resolve_auto_fields(wrapped_model=wrapped_model)
     assert_config_resolved(args)
     return args
 
@@ -112,14 +112,14 @@ def get_optimizer_args(
 def get_method_args(
     method_cls: type[PretextRecipe],
     method_args: dict | Any | None,
-    scaling_info: ScalingInfo,
+    scaling: ScalingInfo,
     optimizer_args: Any,
     wrapped_model: Any,
 ) -> Any:
     args_cls = method_cls.method_args_cls()
     args = pydantic_model_validate(args_cls, dict(method_args or {}))
-    args.resolve_auto(
-        scaling_info=scaling_info,
+    args.resolve_auto_fields(
+        scaling=scaling,
         optimizer_args=optimizer_args,
         wrapped_model=wrapped_model,
     )

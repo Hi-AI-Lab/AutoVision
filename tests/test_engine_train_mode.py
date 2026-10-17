@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Regression test: the engine must force train mode UP FRONT.
 
 HF ``from_pretrained``-built task models start in eval mode, and the only

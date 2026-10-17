@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Image classification training wrapper."""
 
 from __future__ import annotations
@@ -105,7 +105,7 @@ class ImageClassificationTrain(TrainModel):
         gradient_accumulation_steps: int = 1,
     ) -> tuple[torch.optim.Optimizer, Any]:
         args = self.model_args
-        args.resolve_auto(total_steps=total_steps)
+        args.resolve_auto_fields(total_steps=total_steps)
         lr = args.lr
         param_groups: list[dict[str, Any]] = [
             {"name": "head", "params": list(self.model.head.parameters()), "lr": lr},

@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """load_model: rebuild a TaskNetwork from an exported model file."""
 
 from __future__ import annotations
@@ -85,6 +85,24 @@ for _module, _names in {
         _new = f"autovision.tasks.detection.detr.{_module}.{_name}"
         _CLASS_PATH_MIGRATIONS.setdefault(_old, _new)
 del _module, _names, _name, _old, _new
+
+
+#: Family-key generations: pre-rename exports embedded the old family key
+#: in ``model_init_args``. The public aliases completed their deprecation
+#: window (``resolve_detr_variant`` no longer accepts them), so artifacts
+#: are rewritten here instead (design doc 28 §4.3).
+_FAMILY_KEY_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("avdetr/", "detr/"),
+    ("ltdetr/", "detr/"),
+)
+
+
+def _migrate_family_key(model_name: str) -> str:
+    """Rewrite a payload's family key onto the current ``detr/`` prefix."""
+    for old_prefix, new_prefix in _FAMILY_KEY_MIGRATIONS:
+        if model_name.startswith(old_prefix):
+            return new_prefix + model_name[len(old_prefix) :]
+    return model_name
 
 
 def _migrate_class_path(class_path: str) -> str:
@@ -209,7 +227,7 @@ def load_task_model(
         ) from error
     if not isinstance(checkpoint, dict) or "model_class_path" not in checkpoint:
         raise CheckpointError(
-            f"File '{path}' is not an exported Autovision task model."
+            f"File '{path}' is not an exported AutoVision task model."
         )
     class_path: str = _migrate_class_path(checkpoint["model_class_path"])
     if not isinstance(class_path, str) or not class_path.startswith(
@@ -241,6 +259,8 @@ def load_task_model(
 
     init_args = dict(checkpoint.get("model_init_args", {}))
     init_args.pop("load_weights", None)
+    if isinstance(init_args.get("model_name"), str):
+        init_args["model_name"] = _migrate_family_key(init_args["model_name"])
     model = model_class(**init_args)
     state_dict = checkpoint["train_model"]
     if hasattr(model, "load_train_state_dict"):

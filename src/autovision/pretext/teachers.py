@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """PretextRecipe registry and lookup helpers."""
 
 from __future__ import annotations
@@ -62,7 +62,7 @@ def build_teacher(method_args: Any, num_input_channels: int = 3) -> Any:
         state_dict = torch.load(
             method_args.teacher_weights, map_location="cpu", weights_only=True
         )
-        load_state_dict_compat(teacher.get_model(), state_dict)
+        load_state_dict_compat(teacher.raw_module(), state_dict)
     # eval + no grads + zeroed dropout/drop-path when the wrapper supports
     # it.
     prepare_teacher(teacher)

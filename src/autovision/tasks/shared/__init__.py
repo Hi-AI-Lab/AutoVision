@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Cross-task shared code, two kinds:
 
 - flat modules: task-agnostic training infrastructure (schedules, EMA,

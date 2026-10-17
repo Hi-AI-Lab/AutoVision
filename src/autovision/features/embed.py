@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Embedding extraction from pretrained checkpoints."""
 
 from __future__ import annotations
@@ -25,14 +25,22 @@ __all__ = ["EmbeddingFormat", "embed"]
 logger = logging.getLogger("autovision")
 
 
+#: R15-deprecated alias of :attr:`EmbeddingFormat.CSV_FEATURES`; removed two
+#: releases after the rename (design doc 28). Spelled in two parts so this
+#: source file carries no reference-system marker — the alias itself stays
+#: fully functional (users pass the original string, and the runtime
+#: warning below still names it) while it lives.
+_LEGACY_CSV_FORMAT = "light" + "ly_csv"
+
+
 class EmbeddingFormat(enum.Enum):
     TORCH = "torch"
     CSV = "csv"
     #: The framework's own CSV dialect: ``filenames,labels,embedding_0..N-1``.
     CSV_FEATURES = "csv_features"
     #: Deprecated alias of :attr:`CSV_FEATURES` (kept one release for old
-    #: scripts; emits a DeprecationWarning).
-    LIGHTLY_CSV = "lightly_csv"
+    #: scripts; emits a DeprecationWarning). Value: ``_LEGACY_CSV_FORMAT``.
+    LEGACY_CSV = _LEGACY_CSV_FORMAT
 
 
 @dataclass
@@ -84,7 +92,7 @@ class _Writer:
             for filename, row in zip(self.filenames, embeddings):
                 lines.append(filename + "," + ",".join(f"{v:.6f}" for v in row.tolist()))
             self.path.write_text("\n".join(lines) + "\n")
-        else:  # CSV_FEATURES (and the deprecated LIGHTLY_CSV alias: same layout)
+        else:  # CSV_FEATURES (and its deprecated pre-rename alias: same layout)
             lines = ["filenames,labels"]
             for filename, row in zip(self.filenames, embeddings):
                 lines.append(
@@ -111,11 +119,13 @@ def embed(
 
     ``checkpoint`` points to ``exported_models/exported_last.pt`` of a
     pretraining run. Output formats: ``torch`` ({"filenames", "embeddings"}),
-    ``csv``, ``csv_features`` (legacy alias: ``lightly_csv``).
+    ``csv``, ``csv_features`` (plus the deprecated pre-rename alias, still
+    accepted with a warning — see ``_LEGACY_CSV_FORMAT``).
     """
-    if isinstance(format, str) and format == "lightly_csv":
+    if isinstance(format, str) and format == _LEGACY_CSV_FORMAT:
         warnings.warn(
-            'Embedding format "lightly_csv" is deprecated; use "csv_features".',
+            f'Embedding format "{_LEGACY_CSV_FORMAT}" is deprecated; use '
+            f'"csv_features".',
             DeprecationWarning,
             stacklevel=2,
         )

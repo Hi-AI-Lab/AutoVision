@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """RT-DETR oriented object detection family (YOLO-OBB training)."""
 
 from autovision.tasks.oriented_detection.rtdetr.config import (

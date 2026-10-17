@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Tests for the in-training kNN probe (design §7.5)."""
 
 from pathlib import Path
@@ -59,19 +59,19 @@ class TestLabelsForFilenames:
 class TestKnnEvalArgs:
     def test_auto_resolves_small_dataset_on(self):
         args = KnnEvalArgs(enabled="auto")
-        args.resolve_auto(dataset_size=100)
+        args.resolve_auto_fields(dataset_size=100)
         assert args.enabled is True
         assert args.was_auto is True
 
     def test_auto_resolves_large_dataset_off(self):
         args = KnnEvalArgs(enabled="auto")
-        args.resolve_auto(dataset_size=500_001)
+        args.resolve_auto_fields(dataset_size=500_001)
         assert args.enabled is False
 
     def test_auto_requires_dataset_size(self):
         args = KnnEvalArgs(enabled="auto")
         with pytest.raises(ValueError, match="dataset size"):
-            args.resolve_auto(dataset_size=None)
+            args.resolve_auto_fields(dataset_size=None)
 
 
 class TestKnnAccuracy:
@@ -135,16 +135,16 @@ class _ClusterEmbedding(nn.Module):
             return pooled
         return features
 
-    def forward_features(self, x):
+    def feature_maps(self, x):
         return {"features": self.proj(x)}
 
-    def forward_pool(self, x):
+    def pool_features(self, x):
         return {"pooled_features": x["features"].mean(dim=(2, 3), keepdim=True)}
 
-    def feature_dim(self):
+    def encoder_dim(self):
         return 8
 
-    def get_model(self):
+    def raw_module(self):
         return self
 
 
@@ -200,7 +200,7 @@ class TestAttachKnnEvalRunner:
         overrides = {"queue_size": 16}
         overrides.update(method_args_overrides)
         args = DistillationV3Args(**overrides)
-        args.resolve_auto(scaling_info=None)
+        args.resolve_auto_fields(scaling=None)
         return args
 
     def test_attached_when_enabled(self, tmp_path: Path):
@@ -243,7 +243,7 @@ class TestAttachKnnEvalRunner:
         filenames = [str(create_image(flat / f"img_{i}.jpg", seed=i)) for i in range(4)]
         method = nn.Module()
         args = self._make_method_args(knn_eval={"enabled": "auto"})
-        args.knn_eval.resolve_auto(dataset_size=10)  # auto -> enabled=True
+        args.knn_eval.resolve_auto_fields(dataset_size=10)  # auto -> enabled=True
         assert args.knn_eval.enabled is True
         runner = attach_knn_eval_runner(
             method=method,

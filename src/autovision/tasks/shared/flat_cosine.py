@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Flat-cosine LR schedule used by the detection task family.
 
 Linear warmup -> constant plateau -> cosine decay -> constant tail. The
@@ -7,8 +7,8 @@ disable window), mirroring the baseline detection recipes.
 
 Source lineage: the DEIM flat-cosine schedule (``Intellindust-AI-Lab/DEIM``,
 Apache-2.0, Copyright (c) 2024 The DEIM Authors; also vendored in the local
-DEIMv2 mirror ``engine/optim/lr_scheduler.py``), re-implemented by Autovision
-on a step-based interface; ledger ``docs/provenance/LEDGER.md`` (P1-5).
+DEIMv2 mirror ``engine/optim/lr_scheduler.py``), re-implemented by AutoVision
+on a step-based interface; provenance ledger entry (P1-5).
 """
 
 from __future__ import annotations

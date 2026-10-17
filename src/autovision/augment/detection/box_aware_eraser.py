@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Box-aware background erasure for detection training views.
 
 Foreground-preserving erasure ported from the rf-detr-ssl-v2 design

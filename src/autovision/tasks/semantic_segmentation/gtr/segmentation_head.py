@@ -5,8 +5,7 @@ Re-port from Intellindust-AI-Lab GTR (``engine/gtr/semseg/gtrsemseg.py``,
 class ``SemSegHead``, MIT License, Copyright (c) 2026 The GTR Authors;
 the head itself is the mmseg ``FCNHead`` convention — conv3x3-BN-ReLU →
 dropout → conv1x1 — which their base config SyncBN-converts), adapted by
-AutoVision per MIT sections 2-4 (registration cleanup, typing); ledger:
-``docs/provenance/LEDGER.md`` (GTR multi-task integration, roadmap design
+AutoVision per MIT sections 2-4 (registration cleanup, typing); provenance ledger entry (GTR multi-task integration, roadmap design
 doc 31 §11 S1).
 
 Module names (``conv``/``bn``/``act``/``dropout``/``classifier``) are kept

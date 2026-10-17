@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Tests for the SIGReg regularizer (design doc 16, LeVJEPA R1-A1).
 
 Covers the Epps–Pulley statistic's distribution sensitivity, the raw-output

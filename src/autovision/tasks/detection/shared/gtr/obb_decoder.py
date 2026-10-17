@@ -4,7 +4,7 @@
 Re-port from Intellindust-AI-Lab GTR (``engine/gtr/obb/decoder.py``, MIT
 License, Copyright (c) 2026 The GTR Authors), adapted by AutoVision per
 MIT sections 2-4 (registration cleanup, typing, deploy helpers trimmed to
-the parts this tree uses); ledger: ``docs/provenance/LEDGER.md`` (GTR
+the parts this tree uses); provenance ledger entry (GTR
 multi-task S3, roadmap design doc 31 §11).
 
 Deltas vs the HBB decoder (verbatim from the upstream docstring):

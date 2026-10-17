@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """COCO instance segmentation dataset (in-memory, eval-oriented).
 
 Reads a COCO json (annotations carry ``segmentation`` polygons or RLE),

@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Generic name -> object registry with conflict detection.
 
 Used for methods, optimizers, dataset formats, and task models. Third-party

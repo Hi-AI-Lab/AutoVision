@@ -5,7 +5,7 @@ Re-port from Intellindust-AI-Lab GTR (``engine/gtr/pose/keypoint_loss.py``
 + ``matcher.py`` + ``criterion.py``, MIT License, Copyright (c) 2026 The
 GTR Authors; those files are "Modified from DETRPose", itself from
 DINO/DN-DETR and DETR), adapted by AutoVision per MIT/Apache-2.0 terms;
-ledger: ``docs/provenance/LEDGER.md`` (GTR multi-task S5b, roadmap design
+ledger: (GTR multi-task S5b, roadmap design
 doc 31 §11).
 
 Official pose recipe (``gtrpose_base.yml``): losses ``['vfl',

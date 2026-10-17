@@ -1,8 +1,8 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Exponential moving average of model weights (baseline semantics).
 
 Source lineage: D-FINE ``src/optim/ema.py`` (Apache-2.0, ``Peterande/D-FINE`` @ ``956d170``),
-rewritten by Autovision; ledger ``docs/provenance/LEDGER.md`` (P1-4).
+rewritten by AutoVision; provenance ledger entry (P1-4).
 
 ``decay=0.9999`` with a linear warmup from 0 over ``warmup_steps``; updated
 once per optimizer step via :meth:`update`.

@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """The ``pretrain`` command: public API and the ordered assembly flow."""
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from autovision.data import ImageDataset
 from autovision.data.file_helpers import list_image_filenames_from_dir
 from autovision.data.mmap_helpers import dataset_mmap_context
 from autovision.encoders import FeatureExtractor, get_wrapped_model
-from autovision.engine import Engine
+from autovision.engine import Engine, seed_everything
 from autovision.pretext.teachers import get_method_cls
 from autovision.runtime.accelerator import accelerator_supports_bf16
 from autovision.runtime.checkpoint import CheckpointMetadata
@@ -153,6 +153,10 @@ def pretrain(
 
 def train_from_config(config: PretrainConfig) -> PretrainResult:
     """Ordered assembly flow (design doc §5.3)."""
+    # The seed must be applied before the assembly builds random modules
+    # (model init, transform parameters): the engine re-seeds inside fit(),
+    # which is already too late for construction.
+    seed_everything(config.seed)
     method_cls = get_method_cls(config.method)
 
     # 1. out dir + logging
@@ -161,7 +165,7 @@ def train_from_config(config: PretrainConfig) -> PretrainResult:
     )
     set_up_file_logging(out_dir / "train.log")
     system = get_system_information()
-    logger.info("Autovision %s | torch %s | device %s", system.autovision_version, system.torch_version, system.gpus or "cpu")
+    logger.info("AutoVision %s | torch %s | device %s", system.autovision_version, system.torch_version, system.gpus or "cpu")
 
     # 2. transform args (resolved first: num_channels feeds the model build)
     transform_args = train_helpers.get_transform_args(
@@ -205,11 +209,7 @@ def train_from_config(config: PretrainConfig) -> PretrainResult:
             )
 
         # 5. batch size (clamped first: epochs=auto must see the final value)
-        num_devices = (
-            int(os.getenv("WORLD_SIZE", "1"))
-            if config.devices == "auto"
-            else int(config.devices)
-        )
+        num_devices = common_helpers.resolve_num_devices(config.devices)
         global_batch_size = common_helpers.get_global_batch_size(
             config.batch_size, dataset_size, num_devices
         )
@@ -218,14 +218,14 @@ def train_from_config(config: PretrainConfig) -> PretrainResult:
         epochs = train_helpers.get_epochs(
             method_cls, config.epochs, dataset_size, global_batch_size
         )
-        scaling_info = train_helpers.get_scaling_info(dataset_size, epochs)
+        scaling = train_helpers.get_scaling_info(dataset_size, epochs)
 
         # 7. optimizer + method args (order matters: optim before method)
         optimizer_args = train_helpers.get_optimizer_args(
             method_cls, config.optim, config.optim_args, wrapped_model
         )
         method_args = train_helpers.get_method_args(
-            method_cls, config.method_args, scaling_info, optimizer_args, wrapped_model
+            method_cls, config.method_args, scaling, optimizer_args, wrapped_model
         )
 
         # 8. workers + dataloader

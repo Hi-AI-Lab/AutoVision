@@ -4,8 +4,10 @@
 The Intellindust GTR checkpoints ({model, ema, last_epoch} payloads) are
 registered here with pinned sha256 digests so consumption is verifiable
 end to end (``verify_gtr_asset``). Checkpoints are MIT-licensed
-(HuggingFace ``Phoenix8125/GTR`` front matter); the files stay at their
-research-repo location — this registry pins identity, not distribution.
+(HuggingFace ``Phoenix8125/GTR`` front matter); the files stay in the
+user-held store (:data:`GTR_ASSET_ROOT`: ``AUTOVISION_GTR_ROOT`` override,
+else the first existing known location) — this registry pins identity, not
+distribution.
 
 Task groups (roadmap doc 31 §11): the whole family shares one backbone
 (``ViTAdapterSpatialSwiGLU``) + ``GTREncoder``; per-task deltas are the
@@ -17,6 +19,7 @@ semseg/depth = small heads, pose = own decoder).
 from __future__ import annotations
 
 import hashlib
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,7 +35,28 @@ __all__ = [
     "resolve_gtr_asset",
 ]
 
-GTR_ASSET_ROOT = Path.home() / "Research/Project/Dino-Dome-Research/weight/gtr"
+#: Known user-held locations for the GTR checkpoints, in preference order:
+#: the consolidated model store first, then the historical research-tree
+#: download dir. Resolution: ``AUTOVISION_GTR_ROOT`` env override, else the
+#: first existing candidate, else the first candidate as the reported
+#: default (error messages point at the primary location).
+_GTR_ROOT_CANDIDATES = (
+    Path.home() / "Research/Model/gtr",
+    Path.home() / "Research/Project/Dino-Dome-Research/weight/gtr",
+)
+
+
+def _resolve_asset_root() -> Path:
+    override = os.environ.get("AUTOVISION_GTR_ROOT")
+    if override:
+        return Path(override).expanduser()
+    for candidate in _GTR_ROOT_CANDIDATES:
+        if candidate.is_dir():
+            return candidate
+    return _GTR_ROOT_CANDIDATES[0]
+
+
+GTR_ASSET_ROOT = _resolve_asset_root()
 _GTR_HF = "https://huggingface.co/Phoenix8125/GTR"
 
 

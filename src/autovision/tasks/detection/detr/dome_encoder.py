@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Density-guided DETR encoder: DeFE + MWAS wiring (doc 13 §4.2/§4.6).
 
 Subclasses the shared :class:`HybridEncoder` and mirrors the baseline Dome

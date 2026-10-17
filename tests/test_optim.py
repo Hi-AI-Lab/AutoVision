@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 import math
 
 import pytest
@@ -9,9 +9,8 @@ from autovision.optim import (
     AdamWArgs,
     CosineWarmupScheduler,
     LARSArgs,
-    OptimizerType,
+    OptimizationTargets,
     SGDArgs,
-    TrainableModules,
     get_optimizer,
     get_optimizer_args_cls,
     get_weight_decay_parameters,
@@ -109,7 +108,7 @@ class TestGetOptimizer:
         model = DummyModel()
         optimizer = get_optimizer(
             optim_args=args_cls(),
-            trainable_modules=TrainableModules(modules=[model]),
+            trainable_modules=OptimizationTargets(targets=[model]),
             lr_scale=4.0,
         )
         base_lr = args_cls().lr
@@ -120,7 +119,7 @@ class TestGetOptimizer:
         model = DummyModel()
         optimizer = get_optimizer(
             optim_args=AdamWArgs(),
-            trainable_modules=TrainableModules(modules=[model]),
+            trainable_modules=OptimizationTargets(targets=[model]),
             lr_scale=1.0,
         )
         names = [group["name"] for group in optimizer.param_groups]
@@ -132,17 +131,17 @@ class TestGetOptimizer:
         model = nn.Sequential(nn.Linear(4, 4))  # has biases -> no wd group exists
         optimizer = get_optimizer(
             optim_args=AdamWArgs(),
-            trainable_modules=TrainableModules(modules=[model]),
+            trainable_modules=OptimizationTargets(targets=[model]),
             lr_scale=1.0,
         )
         assert len(optimizer.param_groups) == 2
 
-    def test_modules_no_weight_decay_override(self):
+    def test_decay_free_override(self):
         model = DummyModel()
         optimizer = get_optimizer(
             optim_args=AdamWArgs(),
-            trainable_modules=TrainableModules(
-                modules=[model], modules_no_weight_decay=[model.linear]
+            trainable_modules=OptimizationTargets(
+                targets=[model], decay_free=[model.linear]
             ),
             lr_scale=1.0,
         )
@@ -163,17 +162,17 @@ class TestOptimizerArgs:
             get_optimizer_args_cls("sgdm")
 
     def test_types(self):
-        assert AdamWArgs().type() is OptimizerType.ADAMW
-        assert SGDArgs().type() is OptimizerType.SGD
-        assert LARSArgs().type() is OptimizerType.LARS
+        assert AdamWArgs().kind() == "adamw"
+        assert SGDArgs().kind() == "sgd"
+        assert LARSArgs().kind() == "lars"
 
     def test_weight_decay_auto_transformer(self):
         class TransformerModel(nn.Module):
-            def architecture_info(self):
+            def arch_traits(self):
                 return {"model_type": "transformer", "norm_type": "layernorm"}
 
         args = AdamWArgs(weight_decay="auto")
-        args.resolve_auto(wrapped_model=TransformerModel())
+        args.resolve_auto_fields(wrapped_model=TransformerModel())
         assert args.weight_decay == 0.04
 
     def test_weight_decay_auto_conv_batchnorm(self):
@@ -183,26 +182,26 @@ class TestOptimizerArgs:
                 self.conv = nn.Conv2d(3, 4, 3)
                 self.bn = nn.BatchNorm2d(4)
 
-            def architecture_info(self):
+            def arch_traits(self):
                 return {"model_type": "convolutional", "norm_type": "batchnorm"}
 
         args = AdamWArgs(weight_decay="auto")
-        args.resolve_auto(wrapped_model=ConvModel())
+        args.resolve_auto_fields(wrapped_model=ConvModel())
         assert args.weight_decay == 1e-6
 
     def test_weight_decay_auto_unknown_architecture_raises(self):
         class WeirdModel(nn.Module):
-            def architecture_info(self):
+            def arch_traits(self):
                 return {"model_type": "convolutional", "norm_type": "rmsnorm"}
 
         args = AdamWArgs(weight_decay="auto")
         with pytest.raises(ValueError, match="Cannot resolve weight_decay"):
-            args.resolve_auto(wrapped_model=WeirdModel())
+            args.resolve_auto_fields(wrapped_model=WeirdModel())
 
     def test_weight_decay_auto_fallback_heuristic(self):
         conv = nn.Sequential(nn.Conv2d(3, 4, 3), nn.BatchNorm2d(4))
         args = AdamWArgs(weight_decay="auto")
-        args.resolve_auto(wrapped_model=conv)
+        args.resolve_auto_fields(wrapped_model=conv)
         assert args.weight_decay == 1e-6
 
     def test_optimizer_kwargs_forwarded(self):

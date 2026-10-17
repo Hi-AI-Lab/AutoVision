@@ -3,8 +3,7 @@
 
 Re-port from Intellindust-AI-Lab GTR (``engine/gtr/obb/rbox_ops.py``,
 MIT License, Copyright (c) 2026 The GTR Authors), adapted by AutoVision
-per MIT sections 2-4 (typing, docstring placement); ledger:
-``docs/provenance/LEDGER.md`` (GTR multi-task S3, roadmap design doc 31
+per MIT sections 2-4 (typing, docstring placement); provenance ledger entry (GTR multi-task S3, roadmap design doc 31
 §11).
 
 Conventions (official):

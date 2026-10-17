@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """TrainModel base class: training wrapper around a TaskNetwork."""
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ class TrainModelArgs(PydanticConfig):
 
     model_config = {"extra": "forbid"}
 
-    def resolve_auto(self, **kwargs: Any) -> None:
+    def resolve_auto_fields(self, **kwargs: Any) -> None:
         """Resolve any auto fields."""
 
 

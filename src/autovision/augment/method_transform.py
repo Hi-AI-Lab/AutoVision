@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """PretextRecipe transform protocol: maps one decoded image to a list of views."""
 
 from __future__ import annotations

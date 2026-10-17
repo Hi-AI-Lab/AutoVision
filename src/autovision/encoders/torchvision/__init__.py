@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
-from autovision.encoders.torchvision.torchvision_package import TORCHVISION_PACKAGE
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
+from autovision.encoders.torchvision.torchvision_source import TORCHVISION_SOURCE
 
-__all__ = ["TORCHVISION_PACKAGE"]
+__all__ = ["TORCHVISION_SOURCE"]

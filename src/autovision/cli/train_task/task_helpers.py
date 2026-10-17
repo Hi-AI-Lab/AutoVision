@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Shared task-training helpers: result type, save-checkpoint args, dataset sizing."""
 
 from __future__ import annotations

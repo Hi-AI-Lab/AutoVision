@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """DenseCL: single-image contrastive learning with dense correspondence.
 
 Recipe (design doc §7.6, blueprint in volume 12 §4.2):
@@ -28,7 +28,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from autovision.optim import SGDArgs, TrainableModules
+from autovision.optim import OptimizationTargets, SGDArgs
 from autovision.pretext.method_args import PretextArgs
 from autovision.pretext.recipe import PretextRecipe, StepOutput
 from autovision.pretext.simclr.simclr import (
@@ -63,22 +63,22 @@ class DenseCLArgs(PretextArgs):
     dense_loss_weight: float = 1.0
     queue_size: int | Literal["auto"] = "auto"
 
-    def resolve_auto(
+    def resolve_auto_fields(
         self,
-        scaling_info: ScalingInfo | None = None,
+        scaling: ScalingInfo | None = None,
         optimizer_args: Any = None,
         wrapped_model: Any = None,
     ) -> None:
-        super().resolve_auto(
-            scaling_info=scaling_info,
+        super().resolve_auto_fields(
+            scaling=scaling,
             optimizer_args=optimizer_args,
             wrapped_model=wrapped_model,
         )
         if self.queue_size == "auto":
-            if scaling_info is None:
+            if scaling is None:
                 raise ValueError("queue_size='auto' requires the dataset size.")
             self.queue_size = get_bucket_value(
-                input=scaling_info.dataset_size, buckets=_QUEUE_SIZE_BUCKETS
+                input=scaling.dataset_size, buckets=_QUEUE_SIZE_BUCKETS
             )
         if self.queue_size < 1:
             raise ValueError(f"queue_size must be >= 1, got {self.queue_size}.")
@@ -187,9 +187,9 @@ class DenseCL(PretextRecipe):
         # The augmentation recipe is identical to SimCLR's.
         return SimCLRTransform
 
-    def trainable_modules(self) -> TrainableModules:
-        return TrainableModules(
-            modules=[
+    def trainable_modules(self) -> OptimizationTargets:
+        return OptimizationTargets(
+            targets=[
                 self.embedding_model,
                 self.global_projection_head,
                 self.dense_projection_head,

@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """DeFE density head: Density-Focal Extractor (Dome-DETR port, doc 13 §4.1).
 
 Port of the baseline ``src/zoo/dome/defe.py`` (Dome-DETR, ACM MM 2025,

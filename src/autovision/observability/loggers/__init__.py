@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Experiment loggers.
 
 :func:`get_loggers` builds a logger set from a spec dict. JSONL is always

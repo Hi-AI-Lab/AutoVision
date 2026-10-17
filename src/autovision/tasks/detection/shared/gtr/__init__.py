@@ -31,6 +31,7 @@ from autovision.tasks.detection.shared.gtr.spatial_swiglu import (  # noqa: E402
 from autovision.tasks.detection.shared.gtr.vit_adapter import ViTAdapter  # noqa: E402
 
 __all__ = [
+    "GTR_ONNX_EXPORT_BLOCKER",
     "GTREncoder",
     "ViTAdapter",
     "ViTAdapterSpatialSwiGLU",
@@ -38,6 +39,17 @@ __all__ = [
     "get_activation",
     "gtr_available",
 ]
+
+#: Export surface of the GLA backbone. ``GTRViTBackbone`` carries this as
+#: its ``export_blocker``, so any model composed with it (the ``gtr/*``
+#: task families and ``detr/gtrvit-*``) is refused by the ONNX/TensorRT
+#: export pipeline with this message instead of an opaque tracer error.
+GTR_ONNX_EXPORT_BLOCKER = (
+    "ONNX/TensorRT export is unavailable for the GTR GLA backbone: its "
+    "chunk_gla and fused RMSNorm+gate kernels are custom CUDA ops without "
+    "an ONNX lowering yet (deployment engineering, design doc 31 G2; "
+    "TensorRT additionally needs the official gla_plugin.cu)."
+)
 
 
 def gtr_available() -> bool:

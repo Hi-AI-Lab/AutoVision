@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """VisDrone LT-DETR at 1280x1280 — DINOv3 ViT-S/16, COCO-full warm start.
 
 ViT-family twin of ``visdrone_ltdetr_1280_convnextb_baseline_coco.py`` (NO

@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Parameter grouping: weight-decay exclusion rules and optimizer building."""
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ import torch
 from torch import nn
 from torch.nn.parameter import Parameter
 
-from autovision.optim.trainable_modules import TrainableModules
+from autovision.optim.trainable_modules import OptimizationTargets
 
 __all__ = ["build_adamw", "get_optimizer", "get_weight_decay_parameters"]
 
@@ -162,7 +162,7 @@ def get_weight_decay_parameters(
 
 def get_optimizer(
     optim_args,
-    trainable_modules: TrainableModules,
+    trainable_modules: OptimizationTargets,
     lr_scale: float,
 ):
     """Build the optimizer with standard parameter groups.
@@ -171,13 +171,13 @@ def get_optimizer(
     non-empty). ``lr_scale`` is applied by the optimizer args themselves.
     """
     params_weight_decay, params_no_weight_decay = get_weight_decay_parameters(
-        modules=trainable_modules.modules
+        modules=trainable_modules.targets
     )
     # Modules marked as no-weight-decay move ALL their parameters out of the
     # decay group (never duplicated across groups).
     forced_no_wd_ids = {
         id(p)
-        for module in trainable_modules.modules_no_weight_decay
+        for module in trainable_modules.decay_free
         for p in module.parameters()
     }
     if forced_no_wd_ids:
@@ -185,7 +185,7 @@ def get_optimizer(
             p for p in params_weight_decay if id(p) not in forced_no_wd_ids
         ]
         existing = {id(p) for p in params_no_weight_decay}
-        for module in trainable_modules.modules_no_weight_decay:
+        for module in trainable_modules.decay_free:
             for param in module.parameters():
                 if id(param) not in existing:
                     existing.add(id(param))

@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Model layer: wrapper protocols, package registry, embedding model."""
 
 from autovision.encoders import (
@@ -12,34 +12,34 @@ from autovision.encoders import (
 )
 from autovision.encoders.embedding_model import FeatureExtractor
 from autovision.encoders.model_wrapper import (
-    ArchitectureInfo,
-    ArchitectureInfoGettable,
+    ArchTraits,
+    ArchTraitsSource,
     EncoderProtocol,
-    missing_model_wrapper_attrs,
+    missing_encoder_members,
 )
 from autovision.encoders.package_helpers import (
-    get_package,
-    get_package_from_model,
+    catalog_names,
+    get_source,
     get_wrapped_model,
-    list_model_names,
     parse_model_name,
-    register_package,
+    register_source,
+    source_for_model,
 )
 
 __all__ = [
-    "ArchitectureInfo",
-    "ArchitectureInfoGettable",
+    "ArchTraits",
+    "ArchTraitsSource",
     "FeatureExtractor",
     "EncoderProtocol",
-    "get_package",
-    "get_package_from_model",
+    "get_source",
+    "source_for_model",
     "get_wrapped_model",
-    "list_model_names",
-    "missing_model_wrapper_attrs",
+    "catalog_names",
+    "missing_encoder_members",
     "parse_model_name",
-    "register_package",
+    "register_source",
 ]
 
 def list_models() -> list[str]:
-    """Public alias for :func:`list_model_names`."""
-    return list_model_names()
+    """Public alias for :func:`catalog_names`."""
+    return catalog_names()

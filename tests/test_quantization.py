@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Tests for int8 post-training quantization (PTQ) of exported ONNX models."""
 
 import json
@@ -13,13 +13,14 @@ from autovision.export import (
     Int8QuantizationConfig,
     image_folder_calibration_reader,
     quantize_onnx_int8,
+    suggest_first_layer_nodes,
 )
 from autovision.tasks import (
     RTDETRObjectDetection,
 )
 
-onnxruntime = pytest.importorskip("onnxruntime", reason="onnxruntime not installed")
-pytest.importorskip("onnxslim", reason="onnxslim not installed")
+onnxruntime = pytest.importorskip("onnxruntime", reason="onnxruntime not installed (pip install -e '.[export]')")
+pytest.importorskip("onnxslim", reason="onnxslim not installed (pip install -e '.[export]')")
 
 OPSET = 18
 
@@ -157,6 +158,41 @@ class TestInt8QuantizationConfig:
                 fp32_onnx, tmp_path / "q.onnx", reader,
                 Int8QuantizationConfig(calibrate_method="nope"),
             )
+
+
+class TestSuggestFirstLayerNodes:
+    def test_lists_leading_convs_in_graph_order(self, tmp_path):
+        import onnx
+        from onnx import TensorProto, helper
+
+        inputs = helper.make_tensor_value_info("images", TensorProto.FLOAT, [1, 3, 8, 8])
+        outputs = helper.make_tensor_value_info("out", TensorProto.FLOAT, [1, 4, 6, 6])
+        weight1 = helper.make_tensor("w1", TensorProto.FLOAT, [4, 3, 3, 3], [0.1] * 108)
+        weight2 = helper.make_tensor("w2", TensorProto.FLOAT, [4, 4, 3, 3], [0.1] * 144)
+        nodes = [
+            helper.make_node("Conv", ["images", "w1"], ["c1"], name="/stem/conv1/Conv"),
+            helper.make_node("Relu", ["c1"], ["r1"], name="/stem/relu/Relu"),
+            helper.make_node("Conv", ["r1", "w2"], ["c2"], name="/stem/conv2/Conv"),
+        ]
+        graph = helper.make_graph(nodes, "stem", [inputs], [outputs], [weight1, weight2])
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+        path = tmp_path / "stem.onnx"
+        onnx.save(model, path)
+
+        assert suggest_first_layer_nodes(path) == [
+            "/stem/conv1/Conv", "/stem/conv2/Conv",
+        ]
+        assert suggest_first_layer_nodes(path, limit=1) == ["/stem/conv1/Conv"]
+        # The recipe is exactly the config shape the failure hint suggests.
+        config = Int8QuantizationConfig(nodes_to_exclude=tuple(suggest_first_layer_nodes(path)))
+        assert config.to_dict()["nodes_to_exclude"] == ["/stem/conv1/Conv", "/stem/conv2/Conv"]
+
+    def test_best_effort_never_raises(self, tmp_path):
+        assert suggest_first_layer_nodes(tmp_path / "missing.onnx") == []
+        corrupt = tmp_path / "corrupt.onnx"
+        corrupt.write_bytes(b"not an onnx graph")
+        assert suggest_first_layer_nodes(corrupt) == []
+        assert suggest_first_layer_nodes("/dev/null", limit=0) == []
 
 
 class TestQuantizeOnnxInt8:

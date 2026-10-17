@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Linear semantic segmentation task model package."""
 
 from autovision.tasks.semantic_segmentation.linear.config import (

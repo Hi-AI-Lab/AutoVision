@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Tests for the RT-DETR raw-module wrapper and the custom package export."""
 
 import pytest
@@ -6,7 +6,7 @@ import torch
 from tests.helpers_models import TinyWrapper
 from torch import nn
 
-from autovision.encoders.custom import CustomPackage
+from autovision.encoders.custom import CustomSource
 from autovision.encoders.rtdetr import RTDETRModelWrapper
 
 
@@ -43,29 +43,29 @@ class TestRTDETRModelWrapper:
         with pytest.raises(ValueError, match="out_channels"):
             RTDETRModelWrapper(NoChannels())
 
-    def test_forward_features_last_scale(self):
+    def test_feature_maps_last_scale(self):
         wrapper = RTDETRModelWrapper(FakeRTDETRModel())
-        out = wrapper.forward_features(torch.randn(2, 3, 64, 64))
+        out = wrapper.feature_maps(torch.randn(2, 3, 64, 64))
         assert out["features"].shape == (2, 128, 16, 16)
 
     def test_feature_dim(self):
-        assert RTDETRModelWrapper(FakeRTDETRModel()).feature_dim() == 128
+        assert RTDETRModelWrapper(FakeRTDETRModel()).encoder_dim() == 128
 
     def test_pool(self):
         wrapper = RTDETRModelWrapper(FakeRTDETRModel())
-        out = wrapper.forward_features(torch.randn(1, 3, 64, 64))
-        pooled = wrapper.forward_pool(out)
+        out = wrapper.feature_maps(torch.randn(1, 3, 64, 64))
+        pooled = wrapper.pool_features(out)
         assert pooled["pooled_features"].shape == (1, 128, 1, 1)
 
-    def test_architecture_info(self):
-        assert RTDETRModelWrapper(FakeRTDETRModel()).architecture_info() == {
+    def test_arch_traits(self):
+        assert RTDETRModelWrapper(FakeRTDETRModel()).arch_traits() == {
             "model_type": "convolutional",
             "norm_type": "batchnorm",
         }
 
     def test_get_model(self):
         model = FakeRTDETRModel()
-        assert RTDETRModelWrapper(model).get_model() is model
+        assert RTDETRModelWrapper(model).raw_module() is model
 
     def test_public_module(self):
         import autovision.encoders.rtdetr as package
@@ -73,11 +73,11 @@ class TestRTDETRModelWrapper:
         assert package.RTDETRModelWrapper is RTDETRModelWrapper
 
 
-class TestCustomPackageExport:
+class TestCustomSourceExport:
     def test_export_wrapper_state_dict(self, tmp_path):
         wrapper = TinyWrapper()
         out = tmp_path / "exported" / "custom.pt"
-        CustomPackage.export_model(wrapper, out, log_example=False)
+        CustomSource.export_weights(wrapper, out, log_example=False)
         state = torch.load(out, weights_only=True)
         assert "conv.weight" in state  # TinyWrapper's conv
 
@@ -87,9 +87,9 @@ class TestCustomPackageExport:
                 super().__init__()
                 self.inner = nn.Linear(4, 4)
 
-            def get_model(self):
+            def raw_module(self):
                 return self.inner
 
         out = tmp_path / "custom.pt"
-        CustomPackage.export_model(Holder(), out, log_example=False)
+        CustomSource.export_weights(Holder(), out, log_example=False)
         assert "inner.weight" in torch.load(out, weights_only=True)

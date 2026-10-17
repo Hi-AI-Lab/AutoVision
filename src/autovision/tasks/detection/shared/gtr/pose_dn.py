@@ -4,7 +4,7 @@
 Re-port from Intellindust-AI-Lab GTR (``engine/gtr/pose/dn_component.py``,
 MIT License, Copyright (c) 2026 The GTR Authors; that file is "Modified
 from DETRPose", itself from DINO/DN-DETR), adapted by AutoVision per
-MIT/Apache-2.0 terms; ledger: ``docs/provenance/LEDGER.md`` (GTR
+MIT/Apache-2.0 terms; provenance ledger entry (GTR
 multi-task S5b, roadmap design doc 31 §11).
 
 Upstream semantics kept verbatim, including their two documented fixes:

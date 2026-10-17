@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Representation-quality probes for the per-object SSL branch (design doc 14 §4.5).
 
 The NLP analogue is SimCSE's STS-B/SICK-R development selection: these

@@ -1,69 +1,139 @@
-# VTrain 企业级视觉训练框架设计文档（实现蓝图）· 总览
+# AutoVision 架构与设计总览（as-built）
 
 | 文档属性 | 内容 |
 |---|---|
-| 版本 | v3.1（实现蓝图；自 v3.0 起按子系统拆分为 11 个分册，本文件为总览与索引） |
-| 状态 | 评审稿 → 开发基线 |
-| 日期 | 2026-09-25 |
-| 参考基线 | lightly-train 0.17.0 源码全量剖析（415 个源文件，7 个子系统，关键机制逐条核验，出处标注到 `文件:行`） |
-| 读者 | 框架研发团队、算法团队负责人、平台/基础设施团队、安全合规 |
-| 占位名 | VTrain（正式命名待定） |
+| 版本 | v4.0（as-built 总览） |
+| 状态 | v0.2.0 发布基线 |
+| 日期 | 2026-10-16 |
+| 读者 | 框架研发、算法团队、平台 / MLOps、安全合规 |
+| 关联 | [模型库](model_zoo.md)、[基准](benchmarks.md)、[发布流程](release_process.md)、[贡献指南](contributing.md) |
 
-> **设计目标一句话**：构建一个对标 lightly-train 的企业级视觉模型训练框架——一条命令覆盖「自监督预训练/蒸馏 → 下游微调 → 统一评测 → 导出部署」，且在质量工程、安全合规、可观测性、发布治理四个维度达到企业内部可长期维护、多团队共用、可交付生产的标准。
->
-> **v3.0 相对 v2.0 的变化**：以 lightly-train 0.17.0 的**实测源码**为基线重写为实现蓝图。每个子系统先给出「基线是怎么实现的」（精确到签名、公式、默认值、调用链），再给出「VTrain 怎么实现」（模块布局、类契约、数据结构）。v2.0 中与源码不符的表述已修正（修正清单见分册 11 附录 A.0）。
->
-> **v3.1 变化**：按子系统拆分为分册。正文 § 编号保持**全局章节编号**不变，跨册引用（如「见 §7.3」「附录 A」）仍然有效；章节与分册的映射见下表。
+本文档描述**建成后**（as-built）的系统结构与工程契约，以代码为唯一事实来源
+（模块路径与门禁脚本为准）。用户面的用法看 [首页](index.md)；早期 v2/v3
+设计蓝图分册（按子系统拆分的历史文档）不随公开树分发，其中的运行时行为以
+本总览与代码 docstring 为准。
 
-**标注约定**（全部分册适用）：
+## 1. 分层契约（机器强制）
 
-- **【基线】** lightly-train 0.17.0 已验证事实，附源码出处（路径相对 `src/lightly_train/`）。
-- **【设计】** VTrain 自己的决策，基线中不存在。
-- **【差异】** 有意偏离基线的决策，附理由与 ADR 编号。
+`autovision` 包按单向依赖分层，由 `scripts/check_layering.py` 以无依赖的
+AST 静态扫描在 CI 强制（数字越小越高层，高层可依赖低层）：
 
----
-
-## 分册目录
-
-| 册 | 文件 | 内容 | 全局章节 |
-|---|---|---|---|
-| 01 | [01-overview-and-architecture.md](design/01-overview-and-architecture.md) | 愿景与定位、干系人、范围、技术选型、成功指标；NFR 十条（含基线差距）；分层架构、八条架构原则、核心领域模型、ADR 治理 | §1–§3 |
-| 02 | [02-public-api-and-config.md](design/02-public-api-and-config.md) | 基线 API 面与启示、VTrain API 面、版本弃用、插件系统；Pydantic 严格校验、三配置方言、auto 解析链与顺序、四类注册表 | §4–§5 |
-| 03 | [03-model-layer.md](design/03-model-layer.md) | ModelWrapper 协议族、Package 注册表与 9 包机制、DINOv2/v3 vendoring 与权重供应链、检测任务协议 | §6 |
-| 04 | [04-pretraining-methods.md](design/04-pretraining-methods.md) | Method 基类契约（含 lr 缩放/无 wd 清单）、方法注册表、DistillationV3 完整数值规格、其他方法速览、kNN 探针设计 | §7 |
-| 05 | [05-task-models.md](design/05-task-models.md) | TaskModel/TrainModel 双层契约、检测家族损失与训练参数、参数组结构、类别头迁移、评测指标与 EvalProtocol | §8 |
-| 06 | [06-data-layer.md](design/06-data-layer.md) | 格式与统一标注表示、mmap 文件清单方案、批组装与 dataloader、规模分桶桶表、检测变换与 StepScheduledCompose | §9 |
-| 07 | [07-runtime-and-experiments.md](design/07-runtime-and-experiments.md) | 双引擎事实与单引擎决策（四原语）、分布式 rank 链、精度与数值健康、回调、checkpoint/状态格式、容错、run 目录与 logger 体系 | §10–§11 |
-| 08 | [08-assets-and-deployment.md](design/08-assets-and-deployment.md) | 便携模型格式与 load_model、ONNX 导出管线（FP16 黑名单+对拍门禁）、TensorRT、SAHI、embed、模型注册表 | §12 |
-| 09 | [09-quality-security-observability.md](design/09-quality-security-observability.md) | 基线测试体系实况与七层测试策略、门禁；安全合规基线反例与 VTrain 措施；观测能力与 OTel 设计 | §13–§15 |
-| 10 | [10-process-roadmap-risks.md](design/10-process-roadmap-risks.md) | 支持矩阵与交付形态、工程组织、里程碑与基线移植映射、风险登记册 | §16–§19 |
-| 11 | [11-appendix-baseline-analysis.md](design/11-appendix-baseline-analysis.md) | 机制对照总表（含 v2.0→v3.0 修正清单）、基线源码地图、环境变量全表、术语表 | 附录 A–D |
-
-## 章节快速定位
-
-| 章节 | 分册 | 章节 | 分册 |
-|---|---|---|---|
-| §1 概述 · §2 NFR · §3 总体架构 | [01](design/01-overview-and-architecture.md) | §9 数据层与数据治理 | [06](design/06-data-layer.md) |
-| §4 公共 API · §5 配置系统 | [02](design/02-public-api-and-config.md) | §10 训练运行时 · §11 实验管理 | [07](design/07-runtime-and-experiments.md) |
-| §6 模型层 | [03](design/03-model-layer.md) | §12 模型资产与部署 | [08](design/08-assets-and-deployment.md) |
-| §7 预训练方法层 | [04](design/04-pretraining-methods.md) | §13 质量 · §14 安全 · §15 可观测 | [09](design/09-quality-security-observability.md) |
-| §8 任务模型层 | [05](design/05-task-models.md) | §16–§19 交付/流程/路线图/风险 · 附录 A–D | [10](design/10-process-roadmap-risks.md) / [11](design/11-appendix-baseline-analysis.md) |
-
-## 阅读指引（按角色）
-
-| 读者 | 建议路径 |
+| 层（rank） | 包 |
 |---|---|
-| 框架研发（实现） | 01 → 02 → 按负责子系统精读 03–08 → 09/10（门禁与路线图）→ 11（实现时逐条对照基线） |
-| 算法团队 | 01 §1（定位与范围）、04（蒸馏配方与数值）、05（任务模型）、11 附录 A.0（修正清单） |
-| 平台 / MLOps | 01 §2（NFR）、07（运行时/容错/run 目录）、09 §15（可观测）、10 §16（交付形态） |
-| 安全合规 | 09 §14（安全合规基线反例）、06 §9.1（数据治理）、11 附录 C（环境变量面） |
+| 0 | `cli` |
+| 1 | `engine`（训练引擎）、`hpo`（超参搜索驱动）、`inference`（参考推理运行时）、`serving`（参考推理 serving） |
+| 2 | `pretext`（自监督 / 蒸馏方法）、`tasks`（任务层） |
+| 3 | `augment`、`features` |
+| 4 | `encoders`（模型层） |
+| 5 | `data`、`optim`、`metrics`、`config`、`registry`、`scaling`、`observability`、`export`、`debug`、`visualize`、`tracking` |
+| 6 | `errors`、`geometry` 等基础单模块（叶层） |
 
-## 维护约定
+**两条硬禁**（不因 rank 豁免）：
 
-- 分册内修改按各分册自评审；**跨章影响**（如 checkpoint/导出格式、公共 API 签名、全局章节编号）必须同步受影响分册并按 §3.4 落 ADR。
-- 新增内容优先扩展既有分册；只有新子系统才新增分册，并同步更新本索引的「分册目录」「章节快速定位」。
-- 引用规范：`§N.M` 一律用全局章节编号；基线出处写 `文件:行`（相对 `src/lightly_train/`）；分册间链接用相对路径 `xx.md`。
+- `tasks` 不得 import `pretext`（蒸馏教师注入走协议，不走直接依赖）；
+- `encoders` 不得 import 其上的任何框架层（模型层必须自包含，`tasks`/`pretext`/`engine`/`cli` 全禁）。
 
----
+**`ALLOWED_UPWARD` 债务表**：个别经批准的反向 import 登记在门禁脚本内
+（附理由），是待收敛的技术债清单而非白名单机制——新增条目需评审。
 
-*本文档为 VTrain 实现蓝图。所有【基线】条目已在 lightly-train 0.17.0 源码上核验（含数值与行号），实现期可直接作为移植与对照基准；【设计】条目按 §18 路线图落入里程碑，关键决策按 §3.4 落 ADR；NFR 表（§2）是 GA 验收的唯一标准来源。*
+## 2. 模块地图
+
+| 包 / 模块 | 职责 | 关键入口 |
+|---|---|---|
+| `cli` | 25 条命令；参数校验与 Python API 完全同源 | `cli/_app.py` |
+| `engine` | step 循环、DDP / AMP、原子 checkpoint + resume、回调编排（`Engine` / `TaskEngine` 双引擎） | `engine/engine.py` |
+| `hpo` | 超参搜索：空间规格（分布 / 网格）、随机 / 网格 / ASHA 驱动、报告与断点复用 | `hpo/space.py`、`hpo/search.py`、`hpo/asha.py` |
+| `inference` | 视频 / 流推理运行时：batch 聚合、后端切换（torch / ONNX / TRT）、同源前后处理；可选 ByteTrack 跟踪 | `inference/engine.py`、`inference/stream.py` |
+| `tracking` | 多目标跟踪：ByteTrack 关联（卡尔曼 + 三阶段 IoU 与官方门限，class-aware） | `tracking/byte_track.py` |
+| `serving` | 参考推理 serving：FastAPI `/predict`（批处理）+ `/healthz` + Prometheus `/metrics` | `serving/app.py`、`serving/metrics.py` |
+| `pretext` | 自监督预训练与蒸馏方法（method 契约 + 注册表） | `pretext/`（DistillationV3、DINO(v2/v3)、SimCLR、DenseCL、DetCon） |
+| `tasks` | 8 个任务面；TaskModel / TrainModel 双层契约、损失、训练配方；伪标注 `tasks/detection/shared/pseudo_label.py` | `tasks/<task>/`，检测谱系 `tasks/detection/detr/variants.py` |
+| `augment` | 检测增广全套（mosaic / mixup / copyblend / box-aware eraser）+ 逐 step 窗口调度；多视图协议；mosaic 几何共享模块（关键点感知 pose mosaic 复用） | `augment/detection/`、`augment/mosaic_geometry.py` |
+| `features` | 功能面（embed） | `features/embed.py` |
+| `encoders` | 包装协议、包注册表（7 个注册源）、权重清单（revision + sha256 + 许可） | `encoders/weight_hashes.py` |
+| `data` | 11 类数据集、mmap 文件清单（缓存指纹 / 引用计数 / 原子发布）、数据下载与转换（YOLO / COCO / VOC / YOLO-pose / YOLO-seg、COCO 合并）、内容寻址数据集快照与漂移校验 | `data/`、`data/versioning.py` |
+| `optim` | 优化器 / 调度器 / 参数组（含 8-bit AdamW） | `optim/optimizer_args.py` |
+| `metrics` | 任务指标（COCO AP + `map_small/medium/large` 面积分档）+ 跨 rank 状态汇聚（DDP 验证）；误差分析（匹配 / 归因 / 画廊） | `metrics/map_evaluator.py`、`metrics/error_analysis.py` |
+| `config` | Pydantic 严格校验配置（API / CLI / YAML 三方言同源） | `config/` |
+| `registry` | 资产注册表（HF 权重 / GTR / 自持）+ 模型注册表（dev / staging / prod + MLflow + model card） | `registry/model_registry.py`、`registry/*_assets.py` |
+| `scaling` | 规模策略（batch `auto` 解析等） | `scaling.py` |
+| `observability` | JSONL / TensorBoard / MLflow / W&B 记录器、OTel（opt-in，遥测默认关闭） | `observability/` |
+| `export` | ONNX / TensorRT 导出管线（对拍门禁）、int8 QDQ、benchmark、参数量 / FLOPs 统计 | `export/` |
+| `debug` | NaN 捕获、underflow / overflow 检查 | `debug/nan_capture.py` |
+| `visualize` | 检测可视化与预测渲染 | `visualize/detection.py` |
+| `geometry`、`errors` | 几何工具与异常类型（叶层） | `geometry/`、`errors.py` |
+
+## 3. 任务面
+
+| 任务 | model 键（示例） | 指标 |
+|---|---|---|
+| 检测 | `rtdetr/*`、`detr/*`（39 变体）、`dfine/*`、`picodet/*`、`rfdetr/*` | COCO AP |
+| 旋转框 | `rtdetr-obb/*`、`gtr/*` | AP50（DOTA 口径） |
+| 实例分割 | `gtr/*`、mask 系列 | mask AP |
+| 全景分割 | panoptic 系列 | PQ |
+| 语义分割 | `gtr/*` 等 | mIoU |
+| 姿态 | `gtr/*`（COCO 关键点） | keypoint AP（OKS） |
+| 深度 | `gtr/*` | absRel 等深度指标 |
+| 分类 | `torchvision/*`、`timm/*` 等 | top-1 / top-5 |
+
+检测档位谱系（`detr/n` … `detr/x`）的产品冻结状态与方向决策机器可读地记录在
+`tasks/detection/detr/variants.py` 的 `SPECTRUM` 表（`frozen` / `planned`）。
+
+## 4. 权重与许可模型
+
+仓库**不携带权重二进制**；一切权重经三个注册表钉身份（sha256），许可边界
+逐条登记（完整表格见[模型库](model_zoo.md)）：
+
+- **HF 权重清单**（`encoders/weight_hashes.py`，31 个资产）：revision + 每文件
+  sha256 + 许可；CC-BY-NC / 自定义 License 默认不下载，需显式自证
+  （`AUTOVISION_DINOV2_WEIGHTS` / `AUTOVISION_DINOV3_WEIGHTS`）。
+- **GTR 家族**（`registry/gtr_assets.py`，26 个官方权重，MIT）：整族 sha256
+  钉住，`resolve_gtr_asset` 解析、`verify_gtr_asset` 离线核验。
+- **用户自持库**（`registry/user_held_assets.py`，7 个检测器）：仓库外存储、
+  不可再分发、不注册进可下载清单（`redistributable=False`）。
+
+AGPL 组件（`ultralytics`）与超许可依赖策略一致：仅 extras 隔离加载，不进核心
+依赖、不在模块级 import。全仓禁词与许可扫描见 §5 门禁。
+
+## 5. 质量门禁与测试策略
+
+CI（GitHub Actions / GitLab CI 同款）逐项强制：
+
+| 门禁 | 命令 | 保证 |
+|---|---|---|
+| 测试 | `pytest tests -q` | 功能与回归（含金标准快照） |
+| lint | `ruff check src tests scripts` | pycodestyle / pyflakes / import 排序 |
+| 溯源 | `python scripts/check_provenance.py` | 禁词零命中 + allowlist 卫生 |
+| 分层 | `python scripts/check_layering.py` | §1 的依赖契约 |
+| 断链 | `python scripts/check_docs_links.py` | 公开树相对链接全部可解析 |
+| 文档构建 | `mkdocs build --strict` | 站点零警告（导航 / 站内链接） |
+| 模型库一致性 | `scripts/gen_model_zoo.py --check` | 模型库页面与注册表零漂移 |
+
+**测试策略**：单测覆盖行为；数值类改动一律对拍（与官方实现 bit-equal 优先 /
+独立 oracle / 数值容差），不满足于「跑通」；金标准快照（`tests/golden/`）在
+有意配方变更后重录并在 PR 说明；需网络 / GPU 的测试用门控环境变量
+（`AUTOVISION_HF_TESTS` / `AUTOVISION_DDP_TESTS`），默认路径 CPU-only。
+
+**数值一致性承诺**（导出与加载面）：
+
+- ONNX fp32 / fp16 导出默认执行 torch ↔ onnxruntime 数值对拍门禁，超容差即
+  拒绝产出；TensorRT 后端纳入 benchmark parity 对比。
+- 官方权重直载做加载对拍（张量逐位 / 前向逐位，按资产能力）；重打包容器附
+  逐位忠实性对拍。
+- GLA 骨干（`detr/gtrvit-*` 与 `gtr/*`）当前不可导出：导出入口以明确报错
+  拒绝（自定义 CUDA 核无 ONNX 降级），见 `GTRViTBackbone.export_blocker`。
+- **动态 H/W**（`dynamic_spatial=True`）仅在 dynamo 导出路径可用（fail-closed：
+  legacy 图会把尺寸烘成常量），并内置"第二尺寸 parity 探针"；HF 骨干
+  （`detr/dinov2-*`、`detr/dinov3-*`）在上游 transformers 的输入尺寸分支上
+  不可符号化，以可读错误拒绝——支持面 = torchvision/CNN 骨干与 HGNetV2 谱系。
+- 静态导出在严格 trace 失败时回退 legacy TorchScript（记录告警，`verify`
+  门禁照常执行）。
+
+## 6. 事实来源与维护
+
+- 用户面用法：README（仓库根）与[首页](index.md)；模型与许可：[模型库](model_zoo.md)；
+  数字：[基准](benchmarks.md)（协议不可变）。
+- 行为细节：代码 docstring 与注册表定义；架构决策记录在提交历史与代码注释
+  （如 `SPECTRUM`、`export_blocker`、`ALLOWED_UPWARD`）。
+- 本文件与站点导航的一致性由 `tests/test_infrastructure.py` 与
+  `mkdocs build --strict` 强制。

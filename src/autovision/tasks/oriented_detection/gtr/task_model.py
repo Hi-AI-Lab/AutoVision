@@ -288,3 +288,26 @@ class GTRROBBOrientedDetection(ONNXExportMixin, TaskNetwork):
                 )
             }
         )
+
+    def verify_onnx_export_outputs(
+        self, torch_outputs: tuple, onnx_outputs: list
+    ) -> None:
+        # Two graph outputs: pred_logits, then pred_boxes (cx, cy, w, h, a).
+        torch.testing.assert_close(
+            torch_outputs[0].sum(dim=1),
+            torch.as_tensor(onnx_outputs[0]).float().sum(dim=1),
+            atol=5e-3,
+            rtol=1e-1,
+            equal_nan=True,
+            check_device=False,
+            check_dtype=False,
+        )
+        torch.testing.assert_close(
+            torch_outputs[1].sum(dim=1),
+            torch.as_tensor(onnx_outputs[1]).float().sum(dim=1),
+            atol=5e-3,
+            rtol=1e-1,
+            equal_nan=True,
+            check_device=False,
+            check_dtype=False,
+        )

@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Oriented (rotated-box) RT-DETRv2 decoder + OBB output decoding.
 
 The oriented variant reuses the RT-DETRv2 box pipeline verbatim (encoder

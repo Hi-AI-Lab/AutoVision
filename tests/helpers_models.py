@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Shared test model helpers."""
 
 from types import SimpleNamespace
@@ -16,23 +16,23 @@ class TinyWrapper(nn.Module):
         self._model_type = model_type
         self.conv = nn.Conv2d(3, dim, 3, padding=1)
 
-    def forward_features(self, x):
+    def feature_maps(self, x):
         return {
             "features": self.conv(x),
             "cls_token": self.conv(x).mean(dim=(2, 3)),
         }
 
-    def forward_pool(self, x):
+    def pool_features(self, x):
         pooled = torch.nn.functional.adaptive_avg_pool2d(x["features"], 1)
         return {"pooled_features": pooled}
 
-    def feature_dim(self) -> int:
+    def encoder_dim(self) -> int:
         return self.dim
 
-    def get_model(self):
+    def raw_module(self):
         return self.conv
 
-    def architecture_info(self):
+    def arch_traits(self):
         return {"model_type": self._model_type, "norm_type": "batchnorm"}
 
 
@@ -40,7 +40,7 @@ class TinyMultiscaleWrapper(nn.Module):
     """Minimal ViT-like wrapper with intermediate-layer taps for tests.
 
     Each "block" is a residual 1×1-conv MLP over the patch grid;
-    ``forward_multiscale_features`` taps the requested block outputs
+    ``stage_feature_maps`` taps the requested block outputs
     (0-based, like the real ViT wrappers).
     """
 
@@ -62,26 +62,26 @@ class TinyMultiscaleWrapper(nn.Module):
             outputs.append(hidden)
         return outputs
 
-    def forward_multiscale_features(self, x, layer_indices):
+    def stage_feature_maps(self, x, layer_indices):
         outputs = self._block_outputs(x)
         return [{"features": outputs[i]} for i in layer_indices]
 
-    def forward_features(self, x):
+    def feature_maps(self, x):
         features = self._block_outputs(x)[-1]
         return {"features": features, "cls_token": features.mean(dim=(2, 3))}
 
-    def forward_pool(self, x):
+    def pool_features(self, x):
         pooled = torch.nn.functional.adaptive_avg_pool2d(x["features"], 1)
         return {"pooled_features": pooled}
 
-    def feature_dim(self) -> int:
+    def encoder_dim(self) -> int:
         return self.dim
 
     def patch_size(self) -> int:
         return 32 // self.grid
 
-    def get_model(self):
+    def raw_module(self):
         return self.proj
 
-    def architecture_info(self):
+    def arch_traits(self):
         return {"model_type": "transformer", "norm_type": "layernorm"}

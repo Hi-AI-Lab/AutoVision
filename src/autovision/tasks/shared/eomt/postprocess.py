@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """EOMT inference decode (query class x query mask -> semantic map).
 
 Self-contained re-implementation of the HF image-processor semantic

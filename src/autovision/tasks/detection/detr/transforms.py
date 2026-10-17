@@ -1,8 +1,8 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """DETR detection transform recipe.
 
 Two things set the DETR family apart from the generic RT-DETR recipe
-(baseline ``ltdetr_transforms``):
+(baseline detector transforms):
 
 - **Patch-grid arithmetic**: the image size is divisible by ``2 ×
   patch_size`` (the model args snap the default 640 -> 644 for patch-14

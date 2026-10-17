@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """PicoDet losses (GFL family): Varifocal classification, DFL box
 distribution regression, GIoU box regression (shared ``box_ops``), plus the
 :class:`PicoCriterion` that ties them to the head outputs via a dynamic

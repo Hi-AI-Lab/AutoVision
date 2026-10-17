@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """DetCon transforms: two views with image + region mask jointly augmented.
 
 The region masks must follow the exact geometry of the image views (crop /

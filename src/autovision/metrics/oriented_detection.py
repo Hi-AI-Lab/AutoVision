@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Oriented detection mAP (self-contained rotated-box COCO-style metric).
 
 pycocotools cannot represent rotated boxes, so this evaluator runs the

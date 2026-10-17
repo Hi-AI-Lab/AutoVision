@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Memory-mapped file-list serialization via PyArrow IPC.
 
 The dataset row list is written once (by local rank zero) to an IPC file and

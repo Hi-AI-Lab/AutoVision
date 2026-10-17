@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Base class for wrapping models that are not ``torch.nn.Module``\ s.
 
 Some providers (ultralytics ``YOLO``, ...) expose model
@@ -17,8 +17,8 @@ import torch
 from torch import nn
 
 from autovision.encoders.model_wrapper import (
-    ForwardFeaturesOutput,
-    ForwardPoolOutput,
+    FeatureMapsOut,
+    PoolOut,
 )
 
 __all__ = ["NonModuleModelWrapper"]
@@ -37,7 +37,7 @@ class NonModuleModelWrapper(nn.Module):
         """The ``nn.Module`` that actually holds the weights."""
         raise NotImplementedError
 
-    def get_model(self) -> Any:
+    def raw_module(self) -> Any:
         return self._model[0]
 
     # ── nn.Module plumbing delegated to the inner model ────────────────
@@ -86,7 +86,7 @@ class NonModuleModelWrapper(nn.Module):
         return self
 
     # ── shared EncoderProtocol pieces ──────────────────────────────────────
-    def forward_pool(self, x: ForwardFeaturesOutput) -> ForwardPoolOutput:
+    def pool_features(self, x: FeatureMapsOut) -> PoolOut:
         pooled = torch.nn.functional.adaptive_avg_pool2d(
             x["features"], output_size=1
         )

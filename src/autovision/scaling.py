@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Dataset-size-based scaling: linear interpolation and bucket lookup.
 
 These helpers are the single source of truth for "auto" hyperparameters that

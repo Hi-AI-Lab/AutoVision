@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """SimCLR: NT-Xent over two augmented views with an MLP projection head.
 
 Recipe (design doc §7.4, mirroring the baseline):
@@ -29,7 +29,7 @@ from autovision.augment.transform_args import (
     RandomResizeArgs,
 )
 from autovision.augment.view_transform import ViewTransform
-from autovision.optim import SGDArgs, TrainableModules
+from autovision.optim import OptimizationTargets, SGDArgs
 from autovision.pretext.method_args import PretextArgs
 from autovision.pretext.recipe import PretextRecipe, StepOutput
 
@@ -154,9 +154,9 @@ class SimCLR(PretextRecipe):
     def transform_cls() -> type[SimCLRTransform]:
         return SimCLRTransform
 
-    def trainable_modules(self) -> TrainableModules:
-        return TrainableModules(
-            modules=[self.embedding_model, self.projection_head]
+    def trainable_modules(self) -> OptimizationTargets:
+        return OptimizationTargets(
+            targets=[self.embedding_model, self.projection_head]
         )
 
     def training_step_impl(self, batch: dict, batch_idx: int) -> StepOutput:

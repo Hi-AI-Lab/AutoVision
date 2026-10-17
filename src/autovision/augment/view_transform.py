@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Single-view transform pipeline built on torchvision transforms v2.
 
 Op order (fixed, mirrors the baseline ViewTransform):

@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """FDConv — Fourier-Disjoint Weight convolution (FSDC-DETR paper §3.1).
 
 DEVIATION (G4-class, design doc 22 §4.4): the official FDConv sources

@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Distributed rank detection without requiring an initialized process group.
 
 Rank detection is based on environment variables so that helpers work before

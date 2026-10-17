@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Tests for the DINO pretraining method."""
 
 import pytest
@@ -38,12 +38,12 @@ def make_dino(embed_dim: int = 8, **args_overrides) -> DINO:
     overrides = dict(SMALL_DATASET_ARGS)
     overrides.update(args_overrides)
     method_args = DINOArgs(**overrides)
-    method_args.resolve_auto(
-        scaling_info=ScalingInfo(dataset_size=64, epochs=10),
+    method_args.resolve_auto_fields(
+        scaling=ScalingInfo(dataset_size=64, epochs=10),
         optimizer_args=DINOSGDArgs(),
     )
     optimizer_args = DINO.optimizer_args_cls("auto")()
-    optimizer_args.resolve_auto(wrapped_model=None)
+    optimizer_args.resolve_auto_fields(wrapped_model=None)
     embedding_model = FeatureExtractor(
         wrapped_model=TinyWrapper(dim=embed_dim), embed_dim=None
     )
@@ -76,8 +76,8 @@ def test_registered():
 class TestDINOArgs:
     def test_auto_resolution_small_dataset(self):
         args = DINOArgs()
-        args.resolve_auto(
-            scaling_info=ScalingInfo(dataset_size=10_000, epochs=100),
+        args.resolve_auto_fields(
+            scaling=ScalingInfo(dataset_size=10_000, epochs=100),
             optimizer_args=DINOSGDArgs(),
         )
         assert args.output_dim == 1024  # < 20k bucket
@@ -89,8 +89,8 @@ class TestDINOArgs:
 
     def test_auto_resolution_large_dataset(self):
         args = DINOArgs()
-        args.resolve_auto(
-            scaling_info=ScalingInfo(dataset_size=1_000_000, epochs=100),
+        args.resolve_auto_fields(
+            scaling=ScalingInfo(dataset_size=1_000_000, epochs=100),
             optimizer_args=DINOAdamWArgs(),
         )
         assert args.output_dim == 65536
@@ -101,15 +101,15 @@ class TestDINOArgs:
     def test_auto_requires_dataset_size(self):
         args = DINOArgs()
         with pytest.raises(ValueError, match="dataset size"):
-            args.resolve_auto(
-                scaling_info=None, optimizer_args=DINOSGDArgs()
+            args.resolve_auto_fields(
+                scaling=None, optimizer_args=DINOSGDArgs()
             )
 
     def test_non_numeric_weight_decay_rejected(self):
         args = DINOArgs()
         with pytest.raises(ValueError, match="weight decay"):
-            args.resolve_auto(
-                scaling_info=ScalingInfo(dataset_size=100, epochs=10),
+            args.resolve_auto_fields(
+                scaling=ScalingInfo(dataset_size=100, epochs=10),
                 optimizer_args=None,
             )
 

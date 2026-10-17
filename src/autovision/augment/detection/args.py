@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Detection transform arguments with step-window policies."""
 
 from __future__ import annotations
@@ -117,7 +117,7 @@ class RTDETRDetectionTransformArgs(TaskTransformArgs):
     iou_crop_step_start: int | str = "auto"
     iou_crop_step_stop: int | None | str = "auto"
 
-    def resolve_auto(self, **kwargs) -> None:
+    def resolve_auto_fields(self, **kwargs) -> None:
         num_channels = kwargs.get("num_channels")
         if self.image_size == "auto":
             default = kwargs.get("default_image_size", (640, 640))

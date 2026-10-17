@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """COCO-style evaluation for object detection (pycocotools backend)."""
 
 from __future__ import annotations
@@ -161,6 +161,9 @@ class COCOMAPEvaluator:
                 "map": 0.0,
                 "map_50": 0.0,
                 "map_75": 0.0,
+                "map_small": 0.0,
+                "map_medium": 0.0,
+                "map_large": 0.0,
                 "mar": 0.0,
                 "f1": 0.0,
                 "precision": 0.0,
@@ -226,6 +229,9 @@ class COCOMAPEvaluator:
                 "map": 0.0,
                 "map_50": 0.0,
                 "map_75": 0.0,
+                "map_small": 0.0,
+                "map_medium": 0.0,
+                "map_large": 0.0,
                 "mar": 0.0,
                 "f1": 0.0,
                 "precision": 0.0,
@@ -266,6 +272,15 @@ class COCOMAPEvaluator:
             "map_75": _mean(precision[tind75, :, :, aind, mind]),
             "mar": _mean(recall[:, :, aind, mind]),
         }
+        # Per-area slices (COCO protocol: small < 32², medium 32²–96²,
+        # large > 96² px²) — the areaRng ladder pycocotools always builds,
+        # previously pinned to "all"; additive keys, headline numbers are
+        # numerically unchanged.
+        for area_label in ("small", "medium", "large"):
+            area_index = params.areaRngLbl.index(area_label)
+            metrics[f"map_{area_label}"] = _mean(
+                precision[tind:, :, :, area_index, mind]
+            )
 
         # F1 sweep at IoU 0.5 across pycocotools' operating-point axis: the
         # precision array varies along it, recall does not (it is fixed by

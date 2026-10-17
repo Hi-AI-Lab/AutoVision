@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Dataset mmap file orchestration: naming, rank-0 write, refcount cleanup."""
 
 from __future__ import annotations

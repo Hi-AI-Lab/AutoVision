@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """LARS optimizer (You et al., 2017, "Large Batch Training of Convolutional
 Networks").
 

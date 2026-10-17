@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Step-scheduled detection transform pipeline (torchvision v2 based).
 
 The active augmentation set is recomputed per step from the step windows;
@@ -16,7 +16,6 @@ keeps photometric distort, flips, and the resize.
 
 from __future__ import annotations
 
-import math
 import random
 from typing import Any
 
@@ -27,6 +26,12 @@ from torchvision.transforms.v2 import functional as TF
 
 from autovision.augment.detection.box_aware_eraser import (
     erase_background,
+)
+from autovision.augment.mosaic_geometry import (
+    apply_affine_to_boxes as _apply_affine_to_boxes,
+)
+from autovision.augment.mosaic_geometry import (
+    mosaic_canvas_box_clamp as _mosaic_canvas_box_clamp,
 )
 
 __all__ = ["RTDETRDetectionTransform", "StepScheduledCompose"]
@@ -172,69 +177,7 @@ class StepScheduledCompose:
         self._reinit_pending = False
 
 
-def _mosaic_canvas_box_clamp(
-    boxes: torch.Tensor, canvas_size: tuple[int, int]
-) -> torch.Tensor:
-    """Clamp xyxy boxes to the mosaic canvas (baseline paste semantics)."""
-    height, width = canvas_size
-    if boxes.numel() == 0:
-        return boxes
-    boxes = boxes.clone()
-    boxes[:, [0, 2]] = boxes[:, [0, 2]].clamp(0.0, float(width))
-    boxes[:, [1, 3]] = boxes[:, [1, 3]].clamp(0.0, float(height))
-    return boxes
 
-
-def _mosaic_affine_matrix(
-    canvas_size: tuple[int, int],
-    angle: float,
-    translate: tuple[int, int],
-    scale: float,
-) -> torch.Tensor:
-    """Pillow-compatible affine matrix matching torchvision geometry.
-
-    Torch port of the baseline _get_affine_matrix (inverted=False): the
-    returned 2x3 maps BOX coordinates into the affine-transformed canvas.
-    """
-    rot = math.radians(angle)
-    cos, sin = math.cos(rot), math.sin(rot)
-    height, width = canvas_size
-    cx, cy = width * 0.5, height * 0.5
-    tx, ty = translate
-    a, b = cos * scale, -sin * scale
-    c, d = sin * scale, cos * scale
-    tx_out = a * (-cx) + b * (-cy) + cx + tx
-    ty_out = c * (-cx) + d * (-cy) + cy + ty
-    return torch.tensor(
-        [[a, b, tx_out], [c, d, ty_out]], dtype=torch.float64
-    )
-
-
-def _apply_affine_to_boxes(
-    boxes: torch.Tensor,
-    canvas_size: tuple[int, int],
-    angle: float,
-    translate: tuple[int, int],
-    scale: float,
-) -> torch.Tensor:
-    """Transform xyxy boxes through the mosaic affine (baseline math):
-    map the four corners, re-form min/max, clip to the canvas, KEEP
-    degenerate boxes (filtered by the caller)."""
-    if boxes.numel() == 0:
-        return boxes
-    matrix = _mosaic_affine_matrix(canvas_size, angle, translate, scale)
-    corners = boxes.to(torch.float64)[:, [[0, 1], [2, 1], [2, 3], [0, 3]]]
-    corners = corners.reshape(-1, 2)
-    ones = torch.ones(corners.shape[0], 1, dtype=torch.float64)
-    points = torch.cat([corners, ones], dim=1) @ matrix.T
-    points = points.reshape(-1, 4, 2)
-    mins = points.min(dim=1).values
-    maxs = points.max(dim=1).values
-    out = torch.cat([mins, maxs], dim=1)
-    height, width = canvas_size
-    out[:, [0, 2]] = out[:, [0, 2]].clamp(0.0, float(width))
-    out[:, [1, 3]] = out[:, [1, 3]].clamp(0.0, float(height))
-    return out.to(torch.float32)
 
 
 class RTDETRDetectionTransform:

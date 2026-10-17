@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Transforms: argument models, view pipelines, and method transforms."""
 
 from autovision.augment.method_transform import MethodTransform, MultiViewTransform

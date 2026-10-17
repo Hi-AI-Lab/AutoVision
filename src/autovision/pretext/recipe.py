@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Pretraining method base class.
 
 A method owns the self-supervised loss: it declares its args class, its
@@ -18,7 +18,7 @@ import torch
 from torch import Tensor, nn
 
 from autovision.augment.method_transform import MethodTransform
-from autovision.optim import TrainableModules, get_optimizer
+from autovision.optim import OptimizationTargets, get_optimizer
 from autovision.optim.schedulers import CosineWarmupScheduler
 
 __all__ = ["PretextRecipe", "StepOutput", "prepare_teacher"]
@@ -42,11 +42,11 @@ def prepare_teacher(module: nn.Module) -> nn.Module:
     ``make_teacher`` (when the backbone wrapper provides it) zeroes
     dropout/drop-path in place: ``eval()`` alone only keeps them dormant,
     and any later ``train()`` call would silently re-enable them. Works on
-    ``FeatureExtractor`` instances (delegates to ``wrapped_model``), bare
+    ``FeatureExtractor`` instances (delegates through ``_inner``), bare
     backbone wrappers, and plain heads (no-op for the dropout part).
     """
     module.eval()
-    owner = getattr(module, "wrapped_model", module)
+    owner = getattr(module, "_inner", module)
     make_teacher = getattr(owner, "make_teacher", None)
     if make_teacher is not None:
         make_teacher()
@@ -100,7 +100,7 @@ class PretextRecipe(nn.Module):
     def transform_cls() -> type[MethodTransform]:
         raise NotImplementedError
 
-    def trainable_modules(self) -> TrainableModules:
+    def trainable_modules(self) -> OptimizationTargets:
         raise NotImplementedError
 
     def training_step_impl(self, batch: dict, batch_idx: int) -> StepOutput:

@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """EOMT semantic segmentation (DINOv3 variant): encoder-only mask
 transformer backed by the HF ``EomtDinov3`` implementation."""
 

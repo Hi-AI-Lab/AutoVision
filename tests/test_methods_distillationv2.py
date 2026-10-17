@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Tests for the DistillationV2 pretraining method."""
 
 import pytest
@@ -26,9 +26,9 @@ def make_method(
     **args_overrides,
 ) -> DistillationV2:
     args = DistillationV2Args(teacher="unused", **args_overrides)
-    args.resolve_auto(scaling_info=ScalingInfo(dataset_size=64, epochs=10))
+    args.resolve_auto_fields(scaling=ScalingInfo(dataset_size=64, epochs=10))
     optimizer_args = DistillationV2.optimizer_args_cls("auto")()
-    optimizer_args.resolve_auto(
+    optimizer_args.resolve_auto_fields(
         wrapped_model=TinyMultiscaleWrapper(dim=teacher_dim)
     )
     student = FeatureExtractor(
@@ -76,12 +76,12 @@ class TestArgs:
     def test_bad_layer_pair_raises(self):
         args = DistillationV2Args(teacher_layers=(3, 1))
         with pytest.raises(ValueError, match="ordered"):
-            args.resolve_auto()
+            args.resolve_auto_fields()
 
     def test_negative_layers_raise(self):
         args = DistillationV2Args(teacher_layers=(-1, 1))
         with pytest.raises(ValueError, match="0-based"):
-            args.resolve_auto()
+            args.resolve_auto_fields()
 
     def test_bad_layer_length_raises(self):
         # A 3-tuple fails pydantic validation at construction time.
@@ -112,7 +112,7 @@ class TestConstruction:
 
     def test_trainable_modules_student_only(self):
         method = make_method()
-        modules = list(method.trainable_modules().modules)
+        modules = list(method.trainable_modules().targets)
         assert method.embedding_model in modules
         assert method.teacher_embedding_model not in modules
 

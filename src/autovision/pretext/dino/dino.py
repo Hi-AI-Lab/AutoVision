@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """DINO: self-distillation with a momentum teacher over multi-crop views.
 
 Recipe (design doc §7.4, mirroring the baseline):
@@ -42,8 +42,8 @@ from autovision.augment.transform_args import (
 from autovision.augment.view_transform import ViewTransform
 from autovision.optim import (
     AdamWArgs,
+    OptimizationTargets,
     SGDArgs,
-    TrainableModules,
     get_weight_decay_parameters,
 )
 from autovision.optim.schedulers import CosineWarmupScheduler
@@ -99,18 +99,18 @@ class DINOArgs(PretextArgs):
     warmup_steps: int = 12500
     warmup_max_steps_fraction: float = 0.1
 
-    def resolve_auto(
+    def resolve_auto_fields(
         self,
-        scaling_info: ScalingInfo | None = None,
+        scaling: ScalingInfo | None = None,
         optimizer_args: Any = None,
         wrapped_model: Any = None,
     ) -> None:
-        super().resolve_auto(
-            scaling_info=scaling_info,
+        super().resolve_auto_fields(
+            scaling=scaling,
             optimizer_args=optimizer_args,
             wrapped_model=wrapped_model,
         )
-        dataset_size = scaling_info.dataset_size if scaling_info is not None else None
+        dataset_size = scaling.dataset_size if scaling is not None else None
 
         if self.output_dim == "auto":
             if dataset_size is None:
@@ -456,9 +456,9 @@ class DINO(PretextRecipe):
         self.teacher_projection_head.eval()
         return self
 
-    def trainable_modules(self) -> TrainableModules:
-        return TrainableModules(
-            modules=[self.embedding_model, self.student_projection_head]
+    def trainable_modules(self) -> OptimizationTargets:
+        return OptimizationTargets(
+            targets=[self.embedding_model, self.student_projection_head]
         )
 
     # ── forward ─────────────────────────────────────────────────────────

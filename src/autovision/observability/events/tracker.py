@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Opt-in usage telemetry.
 
 Compliance-first (design doc §14): telemetry is **disabled by default**

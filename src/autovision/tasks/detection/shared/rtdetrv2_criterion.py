@@ -4,7 +4,7 @@
 Losses (baseline weight dict): ``loss_vfl 1.0 + loss_bbox 5.0 + loss_giou
 
 Source lineage: RT-DETRv2 criterion (``lyuwenyu/RT-DETR`` @ ``df2a96c``, Apache-2.0),
-restructured by AutoVision; ledger ``docs/provenance/LEDGER.md`` (P1-4).
+restructured by AutoVision; provenance ledger entry (P1-4).
 2.0``; the box losses are normalized by the total number of target boxes
 (averaged across ranks with ``all_reduce``). Auxiliary decoder layers are
 weighted with factor 1.0 through the same loss names (``*_aux_{i}``), like

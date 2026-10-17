@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Image classification dataset over an ImageFolder-style layout.
 
 Layout: one subdirectory per class under the data root; the subdirectory

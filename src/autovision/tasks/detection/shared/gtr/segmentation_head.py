@@ -8,8 +8,7 @@ MIT License, Copyright (c) 2026 The GTR Authors; that file is itself
 PointRend's detectron2 implementation), adapted by AutoVision per
 MIT/Apache-2.0 terms (registration cleanup, typing; the ``export()``
 runtime-swap path is dropped — our deploy story lives in ONNX/TRT
-exporters, not a Python-side method swap); ledger:
-``docs/provenance/LEDGER.md`` (GTR multi-task S2, roadmap design doc 31
+exporters, not a Python-side method swap); provenance ledger entry (GTR multi-task S2, roadmap design doc 31
 §11).
 
 Contract: ``SegmentationHead(spatial_features, query_features)`` maps

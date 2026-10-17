@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """PicoDet postprocessing: sigmoid scores, top-k, class-offset NMS, rescale.
 
 The exported graph emits raw logits + normalized cxcywh boxes; the

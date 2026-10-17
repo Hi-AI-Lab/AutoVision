@@ -1,9 +1,9 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Contrastive denoising (CDN) training group for the RT-DETR family.
 
 Source lineage: RT-DETR contrastive denoising (``lyuwenyu/RT-DETR`` @ ``df2a96c``,
-Apache-2.0; also vendored in D-FINE ``@ 956d170``), re-implemented by Autovision
-with the ``max_gt_cap`` guard; ledger ``docs/provenance/LEDGER.md`` (P1-4).
+Apache-2.0; also vendored in D-FINE ``@ 956d170``), re-implemented by AutoVision
+with the ``max_gt_cap`` guard; provenance ledger entry (P1-4).
 
 Port of the baseline ``denoising.py`` semantics (design doc §8.2). During
 training, every GT box is repeated ``2 × num_group`` times — once as a

@@ -1,16 +1,17 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
-"""Model wrapper protocols.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
+"""Backbone adapter contract for the pretraining path.
 
-Every backbone is adapted to the framework through the ``EncoderProtocol``
-protocol group — structural subtyping, no base class required. The composed
-``EncoderProtocol`` protocol is what the pretraining path consumes;
-``ArchitectureInfoGettable`` is optional and drives ``"auto"`` decisions such
-as weight decay per architecture.
+Any backbone enters the framework through :class:`EncoderProtocol` — a
+runtime-checkable structural type, so third-party ``nn.Module`` subclasses
+need not inherit anything. Two optional capabilities extend it for
+intermediate-layer methods: :class:`MultiScaleViTEncoder` and
+:class:`MultiScaleCNNEncoder` (per-stage feature taps). ``ArchTraits``
+feeds the ``"auto"`` decisions such as per-architecture weight decay.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict
+from typing import Any, Literal, Protocol, TypedDict
 
 from torch import Tensor, nn
 from typing_extensions import (
@@ -20,133 +21,119 @@ from typing_extensions import (
     runtime_checkable,
 )
 
-if TYPE_CHECKING:
-    pass
-
 __all__ = [
-    "ArchitectureInfo",
-    "ArchitectureInfoGettable",
-    "FeatureDim",
-    "ForwardFeatures",
-    "ForwardFeaturesOutput",
-    "ForwardPool",
-    "ForwardPoolOutput",
-    "ModelGetter",
+    "ArchTraits",
+    "ArchTraitsSource",
     "EncoderProtocol",
-    "MultiScaleFeatureCNN",
-    "MultiScaleFeatureDims",
-    "MultiScaleFeatureStrides",
-    "MultiScaleFeatureViT",
-    "NNModule",
+    "FeatureMapsOut",
+    "MultiScaleCNNEncoder",
+    "MultiScaleViTEncoder",
     "PatchSize",
-    "ForwardMultiScaleFeatures",
-    "missing_model_wrapper_attrs",
+    "PoolOut",
+    "missing_encoder_members",
 ]
 
 
-class ForwardFeaturesOutput(TypedDict, total=False):
+class FeatureMapsOut(TypedDict, total=False):
     features: Required[Tensor]  # (B, C, H_out, W_out)
     cls_token: NotRequired[Tensor]  # (B, C)
 
 
-class ForwardPoolOutput(TypedDict, total=False):
+class PoolOut(TypedDict, total=False):
     pooled_features: Required[Tensor]  # (B, C, 1, 1)
 
 
-class ArchitectureInfo(TypedDict):
+class ArchTraits(TypedDict):
     model_type: Literal["convolutional", "transformer", "hybrid"]
     norm_type: Literal["batchnorm", "layernorm"]
 
 
 @runtime_checkable
-class ForwardFeatures(Protocol):
-    def forward_features(self, x: Tensor, *args: Any, **kwargs: Any) -> ForwardFeaturesOutput: ...
+class EncoderProtocol(Protocol):
+    """Everything the pretraining path needs from a backbone.
 
+    Declared flat on purpose: one structural type, one ``isinstance``.
+    The trailing members are the subset of the ``torch.nn.Module`` surface
+    that the engine and the checkpoint code rely on.
+    """
 
-@runtime_checkable
-class ForwardPool(Protocol):
-    def forward_pool(self, x: ForwardFeaturesOutput, *args: Any, **kwargs: Any) -> ForwardPoolOutput: ...
+    def feature_maps(self, x: Tensor, *args: Any, **kwargs: Any) -> FeatureMapsOut: ...
 
+    def pool_features(self, x: FeatureMapsOut, *args: Any, **kwargs: Any) -> PoolOut: ...
 
-@runtime_checkable
-class FeatureDim(Protocol):
-    def feature_dim(self) -> int: ...
+    def encoder_dim(self) -> int: ...
 
-
-@runtime_checkable
-class ModelGetter(Protocol):
-    def get_model(self) -> Any: ...
-
-
-@runtime_checkable
-class ArchitectureInfoGettable(Protocol):
-    def architecture_info(self) -> ArchitectureInfo: ...
-
-
-@runtime_checkable
-class NNModule(Protocol):
-    """Structural subset of ``torch.nn.Module``."""
-
-    def state_dict(self, *args: Any, **kwargs: Any) -> Any: ...
+    def raw_module(self) -> Any: ...
 
     def parameters(self, *args: Any, **kwargs: Any) -> Any: ...
 
-    def load_state_dict(self, state_dict: Any, strict: bool = True, assign: bool = False) -> Any: ...
+    def modules(self) -> Any: ...
 
     def eval(self) -> Any: ...
 
-    def modules(self) -> Any: ...
+    def state_dict(self, *args: Any, **kwargs: Any) -> Any: ...
+
+    def load_state_dict(
+        self, state_dict: Any, strict: bool = True, assign: bool = False
+    ) -> Any: ...
 
     def requires_grad_(self, requires_grad: bool = True) -> Any: ...
 
 
-class EncoderProtocol(ForwardFeatures, ForwardPool, FeatureDim, ModelGetter, NNModule, Protocol):
-    """Everything the pretraining path needs from a backbone."""
-
-
 @runtime_checkable
-class MultiScaleFeatureDims(Protocol):
-    def multiscale_feature_dims(self) -> list[int]: ...
+class ArchTraitsSource(Protocol):
+    """Optional capability: per-architecture traits for ``"auto"`` rules."""
 
-
-@runtime_checkable
-class MultiScaleFeatureStrides(Protocol):
-    def multiscale_feature_strides(self) -> list[int]: ...
+    def arch_traits(self) -> ArchTraits: ...
 
 
 @runtime_checkable
 class PatchSize(Protocol):
+    """Optional capability: ViT patch extent, used for multi-scale math."""
+
     def patch_size(self) -> int: ...
 
 
 @runtime_checkable
-class ForwardMultiScaleFeatures(Protocol):
-    def forward_multiscale_features(
+class MultiScaleViTEncoder(EncoderProtocol, Protocol):
+    """ViT backbones with intermediate-layer taps (per-block indices)."""
+
+    def stage_feature_maps(
         self, x: Tensor, layer_indices: Any
-    ) -> list[ForwardFeaturesOutput]: ...
+    ) -> list[FeatureMapsOut]: ...
+
+    def stage_dims(self) -> list[int]: ...
+
+    def patch_size(self) -> int: ...
 
 
-class MultiScaleFeatureViT(EncoderProtocol, ForwardMultiScaleFeatures, MultiScaleFeatureDims, PatchSize, Protocol): ...
+@runtime_checkable
+class MultiScaleCNNEncoder(EncoderProtocol, Protocol):
+    """Convolutional backbones with per-stage taps (stage indices)."""
+
+    def stage_feature_maps(
+        self, x: Tensor, layer_indices: Any
+    ) -> list[FeatureMapsOut]: ...
+
+    def stage_dims(self) -> list[int]: ...
+
+    def stage_strides(self) -> list[int]: ...
 
 
-class MultiScaleFeatureCNN(
-    EncoderProtocol, ForwardMultiScaleFeatures, MultiScaleFeatureDims, MultiScaleFeatureStrides, Protocol
-): ...
-
-
-def missing_model_wrapper_attrs(
-    model_wrapper: Any, exclude_module_attrs: bool = False
+def missing_encoder_members(
+    candidate: Any, exclude_module_attrs: bool = False
 ) -> list[str]:
-    """Names required by :class:`EncoderProtocol` that the object does not have.
+    """Protocol members ``candidate`` lacks — used to build actionable
+    ``UnknownModelError`` messages.
 
-    Used to build actionable ``UnknownModelError`` messages.
+    With ``exclude_module_attrs``, members that plain ``nn.Module`` already
+    provides are not reported (they cannot be missing on an ``nn.Module``).
     """
-    members = get_protocol_members(EncoderProtocol)
-    module_attrs = set(dir(nn.Module))
-    missing = []
-    for name in members:
-        if exclude_module_attrs and name in module_attrs:
+    inherited = set(dir(nn.Module))
+    gaps = []
+    for member in get_protocol_members(EncoderProtocol):
+        if exclude_module_attrs and member in inherited:
             continue
-        if not hasattr(model_wrapper, name):
-            missing.append(name)
-    return sorted(missing)
+        if not hasattr(candidate, member):
+            gaps.append(member)
+    return sorted(gaps)

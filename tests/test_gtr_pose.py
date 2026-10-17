@@ -48,7 +48,69 @@ def pose_checkpoint() -> Path:
 
 class TestGtrPoseLoad:
     def test_variant_table(self):
-        assert set(GTR_POSE_VARIANTS) == {"s", "m", "l", "x"}
+        # (embed_dim, num_heads, ffn_ratio, hidden, decoder_layers,
+        # decoder_ffn) — official per-variant shapes. L/X down-project to a
+        # 256-wide encoder+decoder (the semseg-lineage width trap) and
+        # decode 4 layers; S decodes 3.
+        assert GTR_POSE_VARIANTS == {
+            "s": (192, 3, 4.0, 192, 3, 512),
+            "m": (256, 4, 4.0, 256, 4, 512),
+            "l": (384, 6, 4.0, 256, 4, 1024),
+            "x": (384, 6, 6.0, 256, 4, 2048),
+        }
+
+    @pytest.mark.parametrize(
+        ("variant", "transferred", "layers", "ffn", "hidden"),
+        [
+            ("s", 239, 3, 512, 192),
+            ("m", 277, 4, 512, 256),
+            ("l", 277, 4, 1024, 256),
+            ("x", 277, 4, 2048, 256),
+        ],
+    )
+    def test_every_variant_loads_cleanly(
+        self, variant, transferred, layers, ffn, hidden
+    ):
+        """Every official checkpoint loads with zero shape skips AND zero
+        checkpoint-only keys (the gate that catches a decoder shallower
+        than the checkpoint — official M/L/X decode 4 levels)."""
+        from autovision.tasks.pose_estimation.gtr import GTRPoseEstimation
+
+        name = f"gtrpose_{variant}_coco"
+        try:
+            resolve_gtr_asset(name)
+        except Exception:  # noqa: BLE001
+            pytest.skip("local GTR pose weights not present")
+        net = GTRPoseEstimation(
+            num_classes=2, variant=variant, image_size=(640, 640), checkpoint=name
+        )
+        report = net.load_report
+        assert report["transferred"] == transferred, report
+        assert report["skipped_shape"] == 0, report
+        assert report["checkpoint_only"] == 0, report
+        assert report["encoder_decoder_coverage"] == 1.0, report
+        assert len(net.decoder.decoder.layers) == layers
+        assert net.decoder.decoder.layers[0].linear1.weight.shape == (ffn, hidden)
+        assert net.encoder.stages[0][0].cv1.conv.weight.shape[0] == hidden
+
+    def test_decoder_depth_mismatch_refused(self):
+        """A network shallower than the checkpoint (extra layers on the
+        checkpoint side) must be refused — coverage counting alone is blind
+        to that direction."""
+        from autovision.tasks.pose_estimation.gtr import GTRPoseEstimation
+
+        try:
+            resolve_gtr_asset("gtrpose_s_coco")
+        except Exception:  # noqa: BLE001
+            pytest.skip("local GTR pose weights not present")
+        with pytest.raises(ValueError, match="checkpoint_only"):
+            GTRPoseEstimation(
+                num_classes=2,
+                variant="s",
+                num_decoder_layers=2,
+                image_size=(640, 640),
+                checkpoint="gtrpose_s_coco",
+            )
 
     def test_official_checkpoint_loads_completely(self, pose_checkpoint):
         from autovision.tasks.pose_estimation.gtr import GTRPoseEstimation

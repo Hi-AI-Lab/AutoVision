@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """EOMT segmentation: joint (image, mask) transforms.
 
 Extends the shared resize/flip/normalize pipeline with the EOMT recipe's

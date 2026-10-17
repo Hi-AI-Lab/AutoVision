@@ -6,8 +6,7 @@ Re-port from Intellindust-AI-Lab GTR (``engine/gtr/pose/decoder.py`` +
 ``engine/gtr/pose/utils.py``, MIT License, Copyright (c) 2026 The GTR
 Authors; those files are "Modified from DETRPose"
 (https://github.com/SebastianJanampa/DETRPose), itself from Conditional
-DETR / DETR), adapted by AutoVision per MIT/Apache-2.0 terms; ledger:
-``docs/provenance/LEDGER.md`` (GTR multi-task S5, roadmap design doc 31
+DETR / DETR), adapted by AutoVision per MIT/Apache-2.0 terms; provenance ledger entry (GTR multi-task S5, roadmap design doc 31
 §11).
 
 This lineage is deliberately SELF-CONTAINED (own relu-only MLP, own

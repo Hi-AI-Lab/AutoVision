@@ -3,8 +3,7 @@
 
 Re-port from Intellindust-AI-Lab GTR (``engine/gtr/obb/denoising.py``,
 MIT License, Copyright (c) 2026 The GTR Authors), adapted by AutoVision
-per MIT sections 2-4 (typing, helper inlining); ledger:
-``docs/provenance/LEDGER.md`` (GTR multi-task S3b, roadmap design doc 31
+per MIT sections 2-4 (typing, helper inlining); provenance ledger entry (GTR multi-task S3b, roadmap design doc 31
 §11).
 
 The paper's best "box noise" mode: the oriented box (cx, cy, w, h, a) is

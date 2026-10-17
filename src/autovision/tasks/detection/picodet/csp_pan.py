@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """CSP-PAN neck (PP-PicoDet).
 
 Lateral 1x1 convs to a shared width, top-down path with nearest upsampling,

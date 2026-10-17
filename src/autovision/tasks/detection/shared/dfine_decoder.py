@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """D-FINE decoder: the RT-DETRv2 skeleton with distributional refinement.
 
 Shares the RT-DETRv2 pipeline verbatim (encoder proposals, contrastive

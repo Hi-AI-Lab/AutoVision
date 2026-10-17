@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Pinned pretrained-weight manifest (machine-managed).
 
 Regenerate with scripts/update_weight_hashes.py; hand-edits are
@@ -52,56 +52,56 @@ WEIGHT_MANIFEST = {
     ),
     'facebook/dinov2-base': WeightArtifact(
         repo_id='facebook/dinov2-base',
-        license='apache-2.0',
+        license='cc-by-nc-4.0',
         source='huggingface',
         revision='f9e44c814b77203eaa57a6bdbbd535f21ede1415',
         sha256={'model.safetensors': 'd73036b56966966d07975d696bde331762f37297e2f095de8cea0040c3aa0841', 'pytorch_model.bin': '014965d9e330e7f4bff8ddcbee9df5e4f2ca032b2f5180942a6edb454783e75d'},
     ),
     'facebook/dinov2-giant': WeightArtifact(
         repo_id='facebook/dinov2-giant',
-        license='apache-2.0',
+        license='cc-by-nc-4.0',
         source='huggingface',
         revision='611a9d42f2335e0f921f1e313ad3c1b7178d206d',
         sha256={'model.safetensors': '917d3c470db999d32a312f8542149be91c7cbac61ee8fb4b67ae3d82b79ce21f', 'pytorch_model.bin': '55755116234d40720deebc04dcf8b8c146e0e7dd5aace4a413eb203604c44762'},
     ),
     'facebook/dinov2-large': WeightArtifact(
         repo_id='facebook/dinov2-large',
-        license='apache-2.0',
+        license='cc-by-nc-4.0',
         source='huggingface',
         revision='47b73eefe95e8d44ec3623f8890bd894b6ea2d6c',
         sha256={'model.safetensors': '399fba97a95f22c36834418bc69373364a99af3a1153da1c0fb31db567c92e23', 'pytorch_model.bin': '8320e4778a7f8850d10f30d97e9138438e1851af1576fea789c43746140cc655'},
     ),
     'facebook/dinov2-small': WeightArtifact(
         repo_id='facebook/dinov2-small',
-        license='apache-2.0',
+        license='cc-by-nc-4.0',
         source='huggingface',
         revision='ed25f3a31f01632728cabb09d1542f84ab7b0056',
         sha256={'model.safetensors': 'ae1e99fcefd534ed978cdeb8326f08030c96e28b7a81ffcbc98a857c84d14be1', 'pytorch_model.bin': '1051e25b2ed69ddad24f3c41e7b6eed6e7f7d012103ea227e47eb82e87dc2050'},
     ),
     'facebook/dinov2-with-registers-base': WeightArtifact(
         repo_id='facebook/dinov2-with-registers-base',
-        license='apache-2.0',
+        license='cc-by-nc-4.0',
         source='huggingface',
         revision='a1d738ccfa7ae170945f210395d99dde8adb1805',
         sha256={'model.safetensors': '7a6f7b3b9fa4b8732e707476a03cd6cdce210048582f21aafb7991c17d98e362'},
     ),
     'facebook/dinov2-with-registers-giant': WeightArtifact(
         repo_id='facebook/dinov2-with-registers-giant',
-        license='apache-2.0',
+        license='cc-by-nc-4.0',
         source='huggingface',
         revision='8d0d49f77fb8b5dd78842496ff14afe7dd4d85cb',
         sha256={'model.safetensors': 'c03832d44691e99b62ae28c4dfa2f134853a3614b3756c94f525109cce5a5051'},
     ),
     'facebook/dinov2-with-registers-large': WeightArtifact(
         repo_id='facebook/dinov2-with-registers-large',
-        license='apache-2.0',
+        license='cc-by-nc-4.0',
         source='huggingface',
         revision='e4c89a4e05589de9b3e188688a303d0f3c04d0f3',
         sha256={'model.safetensors': 'edccedab2c4e164e80833096de89a32a6e8d7365870499a066a61dbc8894b42b'},
     ),
     'facebook/dinov2-with-registers-small': WeightArtifact(
         repo_id='facebook/dinov2-with-registers-small',
-        license='apache-2.0',
+        license='cc-by-nc-4.0',
         source='huggingface',
         revision='0d9846e56b43a21fa46d7f3f5070f0506a5795a9',
         sha256={'model.safetensors': '78e7f952c5af83cf6da38f08ff52b062bbe00c1adf39c4c7e0361969f27abae7'},

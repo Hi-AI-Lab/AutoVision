@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Tests for verified pretrained-weight loading (supply-chain integrity)."""
 
 from __future__ import annotations
@@ -89,11 +89,11 @@ def fake_download(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 
 class TestManifest:
     def test_covers_dinov2_registry(self):
-        from autovision.encoders.dinov2 import dinov2_package
+        from autovision.encoders.dinov2 import dinov2_source
 
         repos = {
             info["hf"] if use_reg else info["hf_noreg"]
-            for info in dinov2_package._MODEL_INFO.values()
+            for info in dinov2_source._MODEL_INFO.values()
             for use_reg in (True, False)
         }
         for repo in repos:
@@ -103,9 +103,9 @@ class TestManifest:
             assert artifact.source
 
     def test_covers_dinov3_registry(self):
-        from autovision.encoders.dinov3 import dinov3_package
+        from autovision.encoders.dinov3 import dinov3_source
 
-        for info in dinov3_package._MODEL_INFO.values():
+        for info in dinov3_source._MODEL_INFO.values():
             if info["hf"] is None:
                 # No public HF checkpoint (distilled vitt16/vitt16plus):
                 # config-built only, weights arrive via backbone_weights /

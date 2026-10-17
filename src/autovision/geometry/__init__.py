@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Pure geometry math shared across augment / metrics / tasks layers.
 
 No torch.nn modules and no framework imports beyond torch itself, so every

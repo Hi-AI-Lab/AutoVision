@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Distillation V3: queue-based global KL + intra-image patch KL.
 
 Recipe (design doc §7.3; evolves the baseline ``Distillation`` recipe by
@@ -48,8 +48,8 @@ __all__ = ["DistillationV3", "DistillationV3Args"]
 class DistillationV3Args(PretextArgs):
     """Arguments for the DistillationV3 method."""
 
-    default_steps: ClassVar[int | None] = None
-    default_epochs: ClassVar[int] = 100
+    auto_steps: ClassVar[int | None] = None
+    auto_epochs: ClassVar[int] = 100
 
     queue_size: int | Literal["auto"] = "auto"
     temperature_global: float = 0.07
@@ -62,29 +62,29 @@ class DistillationV3Args(PretextArgs):
     lr_scale_method: Literal["linear", "sqrt"] = "sqrt"
     reference_batch_size: int = 1536
 
-    def resolve_auto(
+    def resolve_auto_fields(
         self,
-        scaling_info: ScalingInfo | None = None,
+        scaling: ScalingInfo | None = None,
         optimizer_args: OptimizerArgs | None = None,
         wrapped_model: Any = None,
     ) -> None:
-        super().resolve_auto(
-            scaling_info=scaling_info,
+        super().resolve_auto_fields(
+            scaling=scaling,
             optimizer_args=optimizer_args,
             wrapped_model=wrapped_model,
         )
         if self.queue_size == "auto":
-            if scaling_info is None:
+            if scaling is None:
                 raise ValueError(
-                    "queue_size='auto' requires scaling_info (dataset size)."
+                    "queue_size='auto' requires scaling (dataset size)."
                 )
             self.queue_size = get_bucket_value(
-                input=scaling_info.dataset_size, buckets=QUEUE_SIZE_BUCKETS
+                input=scaling.dataset_size, buckets=QUEUE_SIZE_BUCKETS
             )
-        elif scaling_info is not None and self.queue_size >= scaling_info.dataset_size:
+        elif scaling is not None and self.queue_size >= scaling.dataset_size:
             raise ValueError(
                 f"The specified queue size ({self.queue_size}) cannot be larger "
-                f"than the dataset size ({scaling_info.dataset_size})."
+                f"than the dataset size ({scaling.dataset_size})."
             )
 
 
@@ -176,7 +176,7 @@ class DistillationV3(PretextRecipe):
         self.teacher_embedding_model = build_teacher(
             method_args, num_input_channels=num_input_channels
         )
-        self.teacher_embedding_dim: int = self.teacher_embedding_model.feature_dim()
+        self.teacher_embedding_dim: int = self.teacher_embedding_model.encoder_dim()
 
         self.student_projection_head_global = nn.Linear(
             embedding_model.embed_dim, self.teacher_embedding_dim
@@ -226,10 +226,10 @@ class DistillationV3(PretextRecipe):
         return DistillationV3Transform
 
     def trainable_modules(self):
-        from autovision.optim import TrainableModules
+        from autovision.optim import OptimizationTargets
 
-        return TrainableModules(
-            modules=[
+        return OptimizationTargets(
+            targets=[
                 self.student_embedding_model,
                 self.student_projection_head_global,
                 self.student_projection_head_local,
@@ -239,8 +239,8 @@ class DistillationV3(PretextRecipe):
     # ── teacher forward ─────────────────────────────────────────────────
     @torch.no_grad()
     def _forward_teacher(self, x: Tensor) -> tuple[Tensor, Tensor, tuple[int, int]]:
-        features = self.teacher_embedding_model.forward_features(x)["features"]
-        pooled = self.teacher_embedding_model.forward_pool({"features": features})
+        features = self.teacher_embedding_model.feature_maps(x)["features"]
+        pooled = self.teacher_embedding_model.pool_features({"features": features})
         teacher_global = pooled["pooled_features"].flatten(start_dim=1)  # (B, D)
         teacher_patches = features.flatten(start_dim=2).transpose(1, 2)  # (B, N, D)
         grid = (int(features.shape[2]), int(features.shape[3]))
@@ -275,17 +275,17 @@ class DistillationV3(PretextRecipe):
         # Single student forward pass: the pooled and patch representations
         # must come from the same backbone evaluation (BN running stats and
         # dropout are sampled once). Mirrors FeatureExtractor.forward's
-        # semantics: embed_head applies to pooled features (pool=True) and to
-        # raw features (pool=False).
+        # semantics: the embed head applies to pooled features (pool=True)
+        # and to raw features (pool=False).
         embedding_model = self.student_embedding_model
-        student_features_dict = embedding_model.wrapped_model.forward_features(x)
-        pooled = embedding_model.wrapped_model.forward_pool(student_features_dict)[
+        student_features_dict = embedding_model._inner.feature_maps(x)
+        pooled = embedding_model._inner.pool_features(student_features_dict)[
             "pooled_features"
         ]
-        student_pooled = embedding_model.embed_head(pooled).flatten(
+        student_pooled = embedding_model._embed(pooled).flatten(
             start_dim=1
         )  # (B, embed_dim)
-        student_features = embedding_model.embed_head(
+        student_features = embedding_model._embed(
             student_features_dict["features"]
         )
         student_patches = student_features.flatten(start_dim=2).transpose(

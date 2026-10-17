@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Logging setup: colored console output + rotating file log in the run dir."""
 
 from __future__ import annotations

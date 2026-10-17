@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """MLflow backend for the model asset registry.
 
 Implements the exact :class:`autovision.registry.model_registry.ModelRegistry`

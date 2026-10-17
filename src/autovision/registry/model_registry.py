@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Model asset registry: filesystem backend with dev/staging/prod promotion.
 
 The registry stores immutable model versions in a plain directory tree::
@@ -8,7 +8,7 @@ The registry stores immutable model versions in a plain directory tree::
     {root}/staging/...
     {root}/prod/...
 
-Design (docs/design 08-assets-and-deployment §12.6):
+Design (asset & deployment layer, §12.6):
 - Backend abstraction: the filesystem backend is the reference; a future
   MLflow backend implements the same :class:`ModelRegistry` contract.
 - Immutable versions: registering over an existing version raises.
@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from autovision.encoders.weight_verification import compute_file_sha256
-from autovision.errors import AutovisionError
+from autovision.errors import AutoVisionError
 
 __all__ = [
     "MODEL_STAGES",
@@ -45,7 +45,7 @@ RegistryStage = Literal["dev", "staging", "prod"]
 _MANIFEST_NAME = "manifest.json"
 
 
-class RegistryError(AutovisionError):
+class RegistryError(AutoVisionError):
     """Raised for registry layout, immutability or promotion-gate violations."""
 
 

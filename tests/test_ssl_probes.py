@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Tests for the SSL representation-quality probes (design doc 14 §4.5).
 
 All cases are hermetic: synthetic well-separated clusters with fixed seeds,

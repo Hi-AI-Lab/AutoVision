@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Human-readable metric tables for the training log.
 
 Renders the validation report in the fixed-width box style of the

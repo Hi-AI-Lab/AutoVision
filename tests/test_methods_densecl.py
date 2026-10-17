@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Tests for the DenseCL pretraining method."""
 
 import pytest
@@ -20,9 +20,9 @@ pytestmark = pytest.mark.filterwarnings("ignore::UserWarning")
 
 def make_method(**args_overrides) -> DenseCL:
     args = DenseCLArgs(hidden_dim=32, output_dim=16, **args_overrides)
-    args.resolve_auto(scaling_info=ScalingInfo(dataset_size=64, epochs=10))
+    args.resolve_auto_fields(scaling=ScalingInfo(dataset_size=64, epochs=10))
     optimizer_args = DenseCLSGDArgs()
-    optimizer_args.resolve_auto(wrapped_model=None)
+    optimizer_args.resolve_auto_fields(wrapped_model=None)
     return DenseCL(
         method_args=args,
         optimizer_args=optimizer_args,
@@ -46,18 +46,18 @@ def test_registered():
 class TestArgs:
     def test_queue_auto_buckets_by_dataset_size(self):
         args = DenseCLArgs()
-        args.resolve_auto(scaling_info=ScalingInfo(dataset_size=800, epochs=10))
+        args.resolve_auto_fields(scaling=ScalingInfo(dataset_size=800, epochs=10))
         assert args.queue_size == 16  # smallest bucket
         args = DenseCLArgs()
-        args.resolve_auto(
-            scaling_info=ScalingInfo(dataset_size=3_000_000, epochs=10)
+        args.resolve_auto_fields(
+            scaling=ScalingInfo(dataset_size=3_000_000, epochs=10)
         )
         assert args.queue_size == _QUEUE_SIZE_BUCKETS[-1][1]
 
     def test_queue_auto_requires_dataset_size(self):
         args = DenseCLArgs()
         with pytest.raises(ValueError, match="dataset size"):
-            args.resolve_auto()
+            args.resolve_auto_fields()
 
     def test_bucket_table_extends_beyond_shared_cap(self):
         # The shared QUEUE_SIZE_BUCKETS cap at 8192 is too small for

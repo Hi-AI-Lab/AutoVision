@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """PicoDet object detection: model configuration."""
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ class PicoDetObjectDetectionTrainArgs(TrainModelArgs, PydanticConfig):
     ema_momentum: float = 0.9998
     ema_warmup_steps: int = 2000
 
-    def resolve_auto(
+    def resolve_auto_fields(
         self, total_steps: int, train_num_batches: int, gradient_accumulation_steps: int
     ) -> None:
         from autovision.tasks.shared.flat_cosine import (

@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Tests for the deployment layer: ONNX export, SAHI, benchmark, load_model."""
 
 import pytest
@@ -17,8 +17,8 @@ from autovision.tasks.shared.sahi import (
 from autovision.tasks.task_model import TaskNetwork
 from autovision.tasks.task_model_helpers import load_task_model
 
-onnxruntime = pytest.importorskip("onnxruntime", reason="onnxruntime not installed")
-pytest.importorskip("onnxslim", reason="onnxslim not installed")
+onnxruntime = pytest.importorskip("onnxruntime", reason="onnxruntime not installed (pip install -e '.[export]')")
+pytest.importorskip("onnxslim", reason="onnxslim not installed (pip install -e '.[export]')")
 
 
 @pytest.fixture(scope="module")
@@ -80,6 +80,19 @@ class TestOnnxExport:
             tiny_model.export_onnx(
                 tmp_path / "x.onnx", precision="fp16", simplify=False
             )
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+    def test_cuda_resident_model_exports(self, tiny_model, tmp_path):
+        """The example input follows the model's device (trained-on-GPU flow)."""
+        import copy
+
+        model = copy.deepcopy(tiny_model).cuda()
+        out = model.export_onnx(
+            tmp_path / "cuda_model.onnx",
+            precision="fp32",
+            format_args={"opset_version": 18},
+        )
+        assert out.exists() and out.stat().st_size > 100_000
 
 
 class TestSAHI:
@@ -179,6 +192,9 @@ class _SahiStubModel:
         self.seen_metadata = metadata
         self.seen_threshold = threshold
         return self.outputs
+
+    def _module_device(self):
+        return torch.device("cpu")
 
     # TaskNetwork unbound methods bound to the stub instance.
     predict_sahi = TaskNetwork.predict_sahi

@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Transform argument models (shared building blocks).
 
 The base :class:`MethodTransformArgs` has no field defaults — every method's
@@ -94,7 +94,7 @@ class MethodTransformArgs(PydanticConfig):
     solarize: SolarizeArgs | None = None
     normalize: NormalizeArgs
 
-    def resolve_auto(self) -> None:
+    def resolve_auto_fields(self) -> None:
         if self.num_channels == "auto":
             self.num_channels = len(self.normalize.mean)
 

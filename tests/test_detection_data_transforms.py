@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Tests for the task data layer and detection transforms."""
 
 import json
@@ -268,7 +268,7 @@ class TestDetectionTransform:
             random_zoom_out_prob=0.5,
             random_iou_crop_prob=0.8,
         )
-        args.resolve_auto(num_channels=3)
+        args.resolve_auto_fields(num_channels=3)
         args.resolve_step_schedule(total_steps=120, train_num_batches=12, gradient_accumulation_steps=1)
         args.resolve_incompatible()
         return args
@@ -336,7 +336,7 @@ class TestDetectionCollate:
             photometric_distort_prob=None, random_zoom_out_prob=None,
             random_iou_crop_prob=None, mixup_prob=None,
         )
-        args.resolve_auto(num_channels=3)
+        args.resolve_auto_fields(num_channels=3)
         return args
 
     def _items(self, num: int = 2):

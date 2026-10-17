@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Density-guided dynamic-query decoder (Dome-DETR PAQI port, doc 13 §4.3).
 
 Subclasses :class:`DFINEv2Decoder` and replaces the fixed top-``num_queries``

@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Tests for in-backbone background token dropping (design doc 17).
 
 Core invariants (mirroring the reference rf-detr-ssl-v2
@@ -97,9 +97,9 @@ class TestWrapperMaskedForward:
         torch.manual_seed(0)
         wrapper = make_wrapper()
         x = torch.randn(2, 3, 56, 56)
-        dense = wrapper.forward_multiscale_features(x, TAPS)
+        dense = wrapper.stage_feature_maps(x, TAPS)
         all_keep = torch.ones(2, 2, dtype=torch.bool)
-        masked = wrapper.forward_multiscale_features_masked(
+        masked = wrapper.stage_feature_maps_masked(
             x, TAPS, [all_keep, all_keep]
         )
         for tap_dense, tap_masked in zip(dense, masked):
@@ -114,7 +114,7 @@ class TestWrapperMaskedForward:
         keep[0, 0] = True  # top-left window only: patches rows/cols 0-1
         (features,) = [
             tap["features"]
-            for tap in wrapper.forward_multiscale_features_masked(
+            for tap in wrapper.stage_feature_maps_masked(
                 x, TAPS[:1], [keep]
             )
         ]
@@ -131,11 +131,11 @@ class TestWrapperMaskedForward:
         x = torch.randn(2, 3, 56, 56)
         keep_a = torch.tensor([[True, True], [False, True]])
         keep_b = torch.tensor([[True, False], [True, True]])
-        batched = wrapper.forward_multiscale_features_masked(
+        batched = wrapper.stage_feature_maps_masked(
             x, TAPS, [keep_a, keep_b]
         )
-        single_a = wrapper.forward_multiscale_features_masked(x[:1], TAPS, [keep_a])
-        single_b = wrapper.forward_multiscale_features_masked(x[1:2], TAPS, [keep_b])
+        single_a = wrapper.stage_feature_maps_masked(x[:1], TAPS, [keep_a])
+        single_b = wrapper.stage_feature_maps_masked(x[1:2], TAPS, [keep_b])
         for tap_batched, tap_a, tap_b in zip(batched, single_a, single_b):
             assert torch.equal(tap_batched["features"][0], tap_a["features"][0])
             assert torch.equal(tap_batched["features"][1], tap_b["features"][0])
@@ -144,8 +144,8 @@ class TestWrapperMaskedForward:
         torch.manual_seed(0)
         wrapper = make_wrapper()
         x = torch.randn(2, 3, 56, 56)
-        dense = wrapper.forward_multiscale_features(x, TAPS)
-        masked = wrapper.forward_multiscale_features_masked(x, TAPS, [None, None])
+        dense = wrapper.stage_feature_maps(x, TAPS)
+        masked = wrapper.stage_feature_maps_masked(x, TAPS, [None, None])
         for tap_dense, tap_masked in zip(dense, masked):
             assert torch.equal(tap_dense["features"], tap_masked["features"])
 
@@ -153,7 +153,7 @@ class TestWrapperMaskedForward:
         wrapper = make_wrapper()
         x = torch.randn(1, 3, 56, 56)
         with pytest.raises(ValueError, match="evenly tile"):
-            wrapper.forward_multiscale_features_masked(
+            wrapper.stage_feature_maps_masked(
                 x, TAPS, [torch.ones(3, 3, dtype=torch.bool)]
             )
 
@@ -161,7 +161,7 @@ class TestWrapperMaskedForward:
         wrapper = make_wrapper()
         x = torch.randn(2, 3, 56, 56)
         with pytest.raises(ValueError, match="keep masks"):
-            wrapper.forward_multiscale_features_masked(
+            wrapper.stage_feature_maps_masked(
                 x, TAPS, [torch.ones(2, 2, dtype=torch.bool)]
             )
 
@@ -174,7 +174,7 @@ class TestWrapperMaskedForward:
         keep[0, 0] = True
         (features,) = [
             tap["features"]
-            for tap in wrapper.forward_multiscale_features_masked(
+            for tap in wrapper.stage_feature_maps_masked(
                 x, TAPS[:1], [keep]
             )
         ]
@@ -199,9 +199,9 @@ class TestWrapperMaskedForwardDinov3:
         torch.manual_seed(0)
         wrapper = make_dinov3_wrapper()
         x = torch.randn(2, 3, 56, 56)
-        dense = wrapper.forward_multiscale_features(x, TAPS)
+        dense = wrapper.stage_feature_maps(x, TAPS)
         all_keep = torch.ones(2, 2, dtype=torch.bool)
-        masked = wrapper.forward_multiscale_features_masked(
+        masked = wrapper.stage_feature_maps_masked(
             x, TAPS, [all_keep, all_keep]
         )
         for tap_dense, tap_masked in zip(dense, masked):
@@ -216,7 +216,7 @@ class TestWrapperMaskedForwardDinov3:
         keep[0, 0] = True  # top-left window only: patches rows/cols 0-1
         (features,) = [
             tap["features"]
-            for tap in wrapper.forward_multiscale_features_masked(
+            for tap in wrapper.stage_feature_maps_masked(
                 x, TAPS[:1], [keep]
             )
         ]
@@ -233,11 +233,11 @@ class TestWrapperMaskedForwardDinov3:
         x = torch.randn(2, 3, 56, 56)
         keep_a = torch.tensor([[True, True], [False, True]])
         keep_b = torch.tensor([[True, False], [True, True]])
-        batched = wrapper.forward_multiscale_features_masked(
+        batched = wrapper.stage_feature_maps_masked(
             x, TAPS, [keep_a, keep_b]
         )
-        single_a = wrapper.forward_multiscale_features_masked(x[:1], TAPS, [keep_a])
-        single_b = wrapper.forward_multiscale_features_masked(x[1:2], TAPS, [keep_b])
+        single_a = wrapper.stage_feature_maps_masked(x[:1], TAPS, [keep_a])
+        single_b = wrapper.stage_feature_maps_masked(x[1:2], TAPS, [keep_b])
         for tap_batched, tap_a, tap_b in zip(batched, single_a, single_b):
             assert torch.equal(tap_batched["features"][0], tap_a["features"][0])
             assert torch.equal(tap_batched["features"][1], tap_b["features"][0])
@@ -246,8 +246,8 @@ class TestWrapperMaskedForwardDinov3:
         torch.manual_seed(0)
         wrapper = make_dinov3_wrapper()
         x = torch.randn(2, 3, 56, 56)
-        dense = wrapper.forward_multiscale_features(x, TAPS)
-        masked = wrapper.forward_multiscale_features_masked(x, TAPS, [None, None])
+        dense = wrapper.stage_feature_maps(x, TAPS)
+        masked = wrapper.stage_feature_maps_masked(x, TAPS, [None, None])
         for tap_dense, tap_masked in zip(dense, masked):
             assert torch.equal(tap_dense["features"], tap_masked["features"])
 
@@ -255,7 +255,7 @@ class TestWrapperMaskedForwardDinov3:
         wrapper = make_dinov3_wrapper()
         x = torch.randn(1, 3, 56, 56)
         with pytest.raises(ValueError, match="evenly tile"):
-            wrapper.forward_multiscale_features_masked(
+            wrapper.stage_feature_maps_masked(
                 x, TAPS, [torch.ones(3, 3, dtype=torch.bool)]
             )
 
@@ -263,7 +263,7 @@ class TestWrapperMaskedForwardDinov3:
         wrapper = make_dinov3_wrapper()
         x = torch.randn(2, 3, 56, 56)
         with pytest.raises(ValueError, match="keep masks"):
-            wrapper.forward_multiscale_features_masked(
+            wrapper.stage_feature_maps_masked(
                 x, TAPS, [torch.ones(2, 2, dtype=torch.bool)]
             )
 
@@ -276,11 +276,17 @@ class TestWrapperMaskedForwardDinov3:
         keep[0, 0] = True
         (features,) = [
             tap["features"]
-            for tap in wrapper.forward_multiscale_features_masked(
+            for tap in wrapper.stage_feature_maps_masked(
                 x, TAPS[:1], [keep]
             )
         ]
-        features.sum().backward()
+        # A plain sum is degenerate: the DINOv3 tap carries the baseline's
+        # final LayerNorm, whose fresh-init all-ones weight makes the
+        # per-token channel sum identically zero — the gradient vanishes
+        # for a reason unrelated to token dropping. Weight the tap with a
+        # fixed random probe instead (same intent, honest check).
+        probe = torch.randn_like(features)
+        (features * probe).sum().backward()
         # DINOv3 embeddings expose the patch stem directly (a Conv2d).
         weight = wrapper.hf_model.embeddings.patch_embeddings.weight
         assert weight.grad is not None
@@ -308,7 +314,7 @@ class TestWrapperMaskedForwardDinov3:
             transformers.DINOv3ConvNextModel(convnext_config)
         )
         assert not isinstance(convnext, TransformersDinov2Wrapper)
-        assert not hasattr(convnext, "forward_multiscale_features_masked")
+        assert not hasattr(convnext, "stage_feature_maps_masked")
 
 
 class TestMaskConstruction:

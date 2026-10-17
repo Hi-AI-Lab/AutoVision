@@ -1,11 +1,10 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Official D-FINE decoder (the ``DFINETransformer`` gateway design).
 
 Based on the official D-FINE implementation (D-FINE: Redefine Regression
 Task of DETRs as Fine-grained Distribution Refinement, Apache-2.0,
 ``Peterande/D-FINE`` @ ``956d170``, ``src/zoo/dfine/dfine_decoder.py``),
-modified by AutoVision per Apache-2.0 section 4b; ledger:
-``docs/provenance/LEDGER.md`` (P1-2). This is the decoder architecture the
+modified by AutoVision per Apache-2.0 section 4b; provenance ledger entry (P1-2). This is the decoder architecture the
 published baseline D-FINE COCO checkpoints were trained with — its
 decoder layer fuses self-attention
 and cross-attention outputs through a learned :class:`Gate` instead of the

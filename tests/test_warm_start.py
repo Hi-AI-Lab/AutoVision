@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Tests for the AVWarmStart v1 format (design doc 28 §4.3/§6.2)."""
 
 import pytest

@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """EOMT optimizer: AdamW with layer-wise learning-rate decay.
 
 Follows the ViT finetuning convention used by the EOMT recipes: block

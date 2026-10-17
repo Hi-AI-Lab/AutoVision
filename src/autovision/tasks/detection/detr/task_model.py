@@ -1,8 +1,9 @@
 # Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """DETR object detection task model (inference/export facing).
 
-Assembly (baseline ``dinov3_ltdetr``): SSL backbone wrapper -> stride
-8/16/32 pyramid -> shared HybridEncoder -> RT-DETRv2 or D-FINE decoder.
+Assembly (baseline SSL-backbone detector): SSL backbone wrapper ->
+stride 8/16/32 pyramid -> shared HybridEncoder -> RT-DETRv2 or D-FINE
+decoder.
 Reuses the framework's shared detection components and the shared top-k
 decoder, so the coordinate contract is identical to the RT-DETR task
 family. Per-variant encoder/decoder recipes come from the registry spec.
@@ -833,13 +834,18 @@ def load_warm_start_into_network(
     the license field is mandatory (registry R7: an unlicensed warm-start
     asset must not exist) and the decoder coverage gate refuses partial
     assemblies below 0.5. Returns the load report for run provenance.
+
+    ``warm_start`` accepts a file path or a registered user-held asset
+    name (``registry/user_held_assets.py``, policy D1-a).
     """
+    from autovision.registry.user_held_assets import resolve_avwarm_start_source
     from autovision.registry.warm_start import (
         AV_WARM_START_FORMAT,
         WarmStartError,
         load_warm_start,
     )
 
+    warm_start = resolve_avwarm_start_source(warm_start)
     try:
         payload = load_warm_start(warm_start)
     except WarmStartError as error:

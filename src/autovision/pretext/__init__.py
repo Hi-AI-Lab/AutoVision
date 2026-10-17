@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Pretraining method layer."""
 
 from autovision.pretext import teachers  # noqa: F401  (registers methods)

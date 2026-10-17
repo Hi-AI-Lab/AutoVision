@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 from autovision import errors as err
 
 
@@ -12,12 +12,12 @@ def test_error_hierarchy():
         err.UnresolvedAutoError,
         err.CheckpointError,
     ):
-        assert issubclass(exc, err.AutovisionError)
+        assert issubclass(exc, err.AutoVisionError)
     assert issubclass(err.ConfigValidationError, err.ConfigError)
 
 
 def test_errors_are_raisable_with_message():
     try:
         raise err.ConfigValidationError("boom")
-    except err.AutovisionError as error:
+    except err.AutoVisionError as error:
         assert str(error) == "boom"

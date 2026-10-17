@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Opt-in telemetry (disabled by default; see tracker module docstring)."""
 
 from autovision.observability.events.tracker import (

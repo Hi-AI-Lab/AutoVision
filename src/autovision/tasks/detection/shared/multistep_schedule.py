@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """MultiStep LR schedule used by the official Dome/D-FINE recipes.
 
 Linear warmup → constant plateau with ``gamma`` multiplicative drops at

@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Accelerator detection: CUDA first, Ascend NPU (torch_npu) fallback.
 
 Ascend support is a software-side adaptation only (design §12.4): device

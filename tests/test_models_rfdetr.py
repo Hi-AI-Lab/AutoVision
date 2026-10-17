@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Tests for the transformers-backed RF-DETR package.
 
 The package gates on the ``transformers`` RfDetr classes at runtime, so the
@@ -23,7 +23,7 @@ from torch import nn
 
 from autovision.encoders import get_wrapped_model
 from autovision.encoders.model_wrapper import EncoderProtocol
-from autovision.encoders.rfdetr import RFDETR_PACKAGE, RFDETRModelWrapper
+from autovision.encoders.rfdetr import RFDETR_SOURCE, RFDETRModelWrapper
 
 # ── gating: forced deterministically, not assumed from the environment ──
 
@@ -31,25 +31,25 @@ from autovision.encoders.rfdetr import RFDETR_PACKAGE, RFDETRModelWrapper
 class TestGating:
     @pytest.fixture
     def no_support(self, monkeypatch):
-        from autovision.encoders.rfdetr import rfdetr_package
+        from autovision.encoders.rfdetr import rfdetr_source
 
         monkeypatch.setattr(
-            rfdetr_package, "_rfdetr_classes", lambda: None
+            rfdetr_source, "_rfdetr_classes", lambda: None
         )
 
     def test_no_support_lists_empty(self, no_support):
-        assert RFDETR_PACKAGE.list_model_names() == []
+        assert RFDETR_SOURCE.catalog_names() == []
 
     def test_no_support_raises_on_get_model(self, no_support):
         with pytest.raises(ImportError, match="RfDetr"):
-            RFDETR_PACKAGE.get_model("rf-detr-base", load_weights=False)
+            RFDETR_SOURCE.build("rf-detr-base", load_weights=False)
 
     def test_support_lists_all_variants(self, monkeypatch):
-        from autovision.encoders.rfdetr import rfdetr_package
+        from autovision.encoders.rfdetr import rfdetr_source
 
         classes = {"config": object, "model": object, "backbone_config": object}
-        monkeypatch.setattr(rfdetr_package, "_rfdetr_classes", lambda: classes)
-        names = RFDETR_PACKAGE.list_model_names()
+        monkeypatch.setattr(rfdetr_source, "_rfdetr_classes", lambda: classes)
+        names = RFDETR_SOURCE.catalog_names()
         # Five sizes, each with a -notpretrained offline twin.
         assert len(names) == 10
         assert "rfdetr/rf-detr-base" in names
@@ -64,7 +64,7 @@ class TestGating:
             raise ImportError(name)
 
         monkeypatch.setattr(importlib, "import_module", _raise)
-        assert RFDETR_PACKAGE.list_model_names() == []
+        assert RFDETR_SOURCE.catalog_names() == []
 
 
 # ── fake transformers with the RfDetr classes ────────────────────────────
@@ -170,13 +170,13 @@ def make_wrapper(
     name: str = "rf-detr-base-notpretrained",
     **kwargs,
 ) -> RFDETRModelWrapper:
-    model = RFDETR_PACKAGE.get_model(name, load_weights=False, **kwargs)
-    return RFDETR_PACKAGE.get_model_wrapper(model)
+    model = RFDETR_SOURCE.build(name, load_weights=False, **kwargs)
+    return RFDETR_SOURCE.as_encoder(model)
 
 
 class TestWithInjectedSupport:
-    def test_list_model_names(self, fake_rfdetr_transformers):
-        names = RFDETR_PACKAGE.list_model_names()
+    def test_catalog_names(self, fake_rfdetr_transformers):
+        names = RFDETR_SOURCE.catalog_names()
         assert len(names) == 10  # 5 variants x (pretrained, -notpretrained)
         assert names == sorted(names)
         for expected in (
@@ -191,13 +191,13 @@ class TestWithInjectedSupport:
         assert "rfdetr/rf-detr-seg-preview" not in names
 
     def test_registration_before_custom(self, fake_rfdetr_transformers):
-        from autovision.encoders.package_helpers import list_base_packages
+        from autovision.encoders.package_helpers import list_sources
 
-        names = [p.name for p in list_base_packages()]
+        names = [p.name for p in list_sources()]
         assert names.index("rfdetr") < names.index("custom")
 
     def test_base_notpretrained_build(self, fake_rfdetr_transformers):
-        model = RFDETR_PACKAGE.get_model(
+        model = RFDETR_SOURCE.build(
             "rf-detr-base-notpretrained", load_weights=False
         )
         assert isinstance(model, FakeRfDetrModel)
@@ -211,20 +211,20 @@ class TestWithInjectedSupport:
         assert model.config.decoder_layers == 3
 
     def test_variant_dispatch(self, fake_rfdetr_transformers):
-        nano = RFDETR_PACKAGE.get_model(
+        nano = RFDETR_SOURCE.build(
             "rf-detr-nano-notpretrained", load_weights=False
         )
         assert nano.config.decoder_layers == 2
         assert nano.config.backbone_config.patch_size == 16
         assert nano.config.backbone_config.num_windows == 2
         assert nano.config.backbone_config.out_indices == [3, 6, 9, 12]
-        large = RFDETR_PACKAGE.get_model(
+        large = RFDETR_SOURCE.build(
             "rf-detr-large-notpretrained", load_weights=False
         )
         assert large.config.decoder_layers == 4
 
     def test_model_args_override(self, fake_rfdetr_transformers):
-        model = RFDETR_PACKAGE.get_model(
+        model = RFDETR_SOURCE.build(
             "rf-detr-nano-notpretrained",
             load_weights=False,
             model_args={"decoder_layers": 6},
@@ -233,18 +233,18 @@ class TestWithInjectedSupport:
 
     def test_three_channels_required(self, fake_rfdetr_transformers):
         with pytest.raises(ValueError, match="3 input channels"):
-            RFDETR_PACKAGE.get_model("rf-detr-base", num_input_channels=1)
+            RFDETR_SOURCE.build("rf-detr-base", num_input_channels=1)
 
     def test_unknown_model(self, fake_rfdetr_transformers):
         with pytest.raises(ValueError, match="Unknown rfdetr model"):
-            RFDETR_PACKAGE.get_model("rf-detr-unknown", load_weights=False)
+            RFDETR_SOURCE.build("rf-detr-unknown", load_weights=False)
 
     def test_wrapper_is_model_wrapper(self, fake_rfdetr_transformers):
         assert isinstance(make_wrapper(), EncoderProtocol)
 
-    def test_forward_features_last_stage(self, fake_rfdetr_transformers):
+    def test_feature_maps_last_stage(self, fake_rfdetr_transformers):
         wrapper = make_wrapper()
-        out = wrapper.forward_features(torch.randn(2, 3, 224, 224))
+        out = wrapper.feature_maps(torch.randn(2, 3, 224, 224))
         assert out["features"].shape == (2, 384, 16, 16)  # 224 / patch 14
 
     def test_backbone_property_is_inner_vit(self, fake_rfdetr_transformers):
@@ -260,24 +260,24 @@ class TestWithInjectedSupport:
         # with a direction to the ViT backbones instead of ignoring it.
         wrapper = make_wrapper()
         with pytest.raises(ValueError, match="bool_masked_pos"):
-            wrapper.forward_features(
+            wrapper.feature_maps(
                 torch.randn(1, 3, 224, 224),
                 bool_masked_pos=torch.ones(1, 256, dtype=torch.bool),
             )
 
     def test_feature_dim_and_patch_size(self, fake_rfdetr_transformers):
         wrapper = make_wrapper("rf-detr-nano-notpretrained")
-        assert wrapper.feature_dim() == 384
+        assert wrapper.encoder_dim() == 384
         assert wrapper.patch_size() == 16
 
     def test_pool(self, fake_rfdetr_transformers):
         wrapper = make_wrapper()
-        out = wrapper.forward_features(torch.randn(1, 3, 224, 224))
-        pooled = wrapper.forward_pool(out)
+        out = wrapper.feature_maps(torch.randn(1, 3, 224, 224))
+        pooled = wrapper.pool_features(out)
         assert pooled["pooled_features"].shape == (1, 384, 1, 1)
 
-    def test_architecture_info(self, fake_rfdetr_transformers):
-        assert make_wrapper().architecture_info() == {
+    def test_arch_traits(self, fake_rfdetr_transformers):
+        assert make_wrapper().arch_traits() == {
             "model_type": "transformer",
             "norm_type": "layernorm",
         }
@@ -288,14 +288,14 @@ class TestWithInjectedSupport:
         assert len(state) > 0
         wrapper.load_state_dict(state, strict=True)
 
-    def test_is_supported_model(self, fake_rfdetr_transformers):
+    def test_recognizes(self, fake_rfdetr_transformers):
         wrapper = make_wrapper()
-        assert RFDETR_PACKAGE.is_supported_model(wrapper)
-        bare = RFDETR_PACKAGE.get_model(
+        assert RFDETR_SOURCE.recognizes(wrapper)
+        bare = RFDETR_SOURCE.build(
             "rf-detr-base-notpretrained", load_weights=False
         )
-        assert RFDETR_PACKAGE.is_supported_model(bare)
-        assert not RFDETR_PACKAGE.is_supported_model(nn.Linear(2, 2))
+        assert RFDETR_SOURCE.recognizes(bare)
+        assert not RFDETR_SOURCE.recognizes(nn.Linear(2, 2))
 
     def test_get_wrapped_model_by_name(self, fake_rfdetr_transformers):
         wrapper = get_wrapped_model("rfdetr/rf-detr-base-notpretrained")
@@ -318,7 +318,7 @@ class TestWithInjectedSupport:
     ):
         wrapper = make_wrapper()
         out = tmp_path / "exported" / "model.pt"
-        RFDETR_PACKAGE.export_model(wrapper, out, log_example=False)
+        RFDETR_SOURCE.export_weights(wrapper, out, log_example=False)
         payload = torch.load(out, weights_only=True)
         assert any(key.startswith("backbone.") for key in payload)
         assert any(key.startswith("head.") for key in payload)
@@ -360,6 +360,6 @@ class TestWithInjectedSupport:
                 "model.safetensors": hashlib.sha256(b"weights").hexdigest()
             },
         )
-        RFDETR_PACKAGE.get_model("rf-detr-base")  # pretrained by default
+        RFDETR_SOURCE.build("rf-detr-base")  # pretrained by default
         assert downloaded == ["Roboflow/rf-detr-base"]
         assert requested == [snapshot]

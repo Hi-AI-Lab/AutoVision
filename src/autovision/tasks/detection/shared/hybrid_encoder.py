@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Full AIFI + CCFF HybridEncoder for the RT-DETR family.
 Source lineage: RT-DETRv2 ``hybrid_encoder.py`` (originally by lyuwenyu,
 ``lyuwenyu/RT-DETR`` @ ``df2a96c``; Apache-2.0, also vendored in D-FINE ``@ 956d170``).

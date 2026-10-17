@@ -3,7 +3,7 @@
 
 Source lineage: the RT-DETRv2/D-FINE matching-cost design (Apache-2.0,
 ``Peterande/D-FINE`` @ ``956d170``), re-implemented for this framework;
-ledger ``docs/provenance/LEDGER.md`` (P1-4). The batched padded cost
+provenance ledger entry (P1-4). The batched padded cost
 construction and the consolidated multi-group solve follow the design
 used by RF-DETR's matcher (Apache-2.0) and are implemented independently
 here.
@@ -178,8 +178,8 @@ def _build_cost(
 
 # ── mask costs (GTR seg lineage, design doc 31 §11 S2) ──────────────────
 # Point-sampled pairwise CE/Dice, re-ported from GTR's engine/gtr/box_ops.py
-# (MIT; those helpers are RF-DETR's, Apache-2.0) — ledger:
-# docs/provenance/LEDGER.md. Only active when the matcher was constructed
+# (MIT; those helpers are RF-DETR's, Apache-2.0) — provenance ledger entry
+# provenance ledger entry. Only active when the matcher was constructed
 # with mask costs and the outputs/targets carry masks.
 def _batch_dice_loss(inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
     inputs = inputs.sigmoid().flatten(1)

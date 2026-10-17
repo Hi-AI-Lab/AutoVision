@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Tests for multi-backend inference benchmarking (torch / ONNX / TensorRT)."""
 
 import json
@@ -6,9 +6,9 @@ import json
 import pytest
 import torch
 
-pytest.importorskip("onnx", reason="onnx not installed")
-onnxruntime = pytest.importorskip("onnxruntime", reason="onnxruntime not installed")
-pytest.importorskip("onnxslim", reason="onnxslim not installed")
+pytest.importorskip("onnx", reason="onnx not installed (pip install -e '.[export]')")
+onnxruntime = pytest.importorskip("onnxruntime", reason="onnxruntime not installed (pip install -e '.[export]')")
+pytest.importorskip("onnxslim", reason="onnxslim not installed (pip install -e '.[export]')")
 
 from autovision.export import benchmark  # noqa: E402
 from autovision.export.benchmark import (  # noqa: E402

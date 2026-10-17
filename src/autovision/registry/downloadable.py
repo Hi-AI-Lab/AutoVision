@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Downloadable model registry: name -> (url, sha256[, license]) with
 verified download + local cache.
 
@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from autovision.encoders.weight_verification import compute_file_sha256
-from autovision.errors import AutovisionError
+from autovision.errors import AutoVisionError
 from autovision.registry.assets import LicenseRef
 
 __all__ = [
@@ -29,7 +29,7 @@ __all__ = [
 logger = logging.getLogger("autovision")
 
 
-class DownloadableModelError(AutovisionError):
+class DownloadableModelError(AutoVisionError):
     """Raised when a downloadable model is unknown or fails verification."""
 
 

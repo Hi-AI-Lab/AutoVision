@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """DINOv3 wrapper: ViT (CLS + registers) and ConvNeXt variants.
 
 The ViT wrapper reuses the DINOv2 wrapping semantics (pooled feature = CLS
@@ -20,22 +20,49 @@ from autovision.encoders.dinov2.dinov2_wrapper import (
     _kept_patch_indices,
 )
 from autovision.encoders.model_wrapper import (
-    ArchitectureInfo,
-    ForwardFeaturesOutput,
-    ForwardPoolOutput,
+    ArchTraits,
+    FeatureMapsOut,
+    PoolOut,
 )
 
 __all__ = ["TransformersDinov3ConvNextWrapper", "TransformersDinov3ViTWrapper"]
 
 
 class TransformersDinov3ViTWrapper(TransformersDinov2Wrapper):
-    """DINOv3 ViT: identical semantics to the DINOv2 wrapper.
+    """DINOv3 ViT: DINOv2-like tap semantics, EXCEPT the tap norm.
 
     The HF layout differs (``embeddings`` / ``rope_embeddings`` / ``model``
     (= the encoder stack) / ``norm``; rope is part of the forward signature,
     not an embeddings internal — design doc 17 §4.3.1), so the masked
     multi-scale forward is orchestrated here instead of inherited.
+
+    Tap semantics: the baseline that produced the published LT-DETR COCO
+    checkpoints taps through
+    ``get_intermediate_layers(..., norm=True)``, which applies the model's
+    FINAL LayerNorm (``norm.*``, loaded into HF's top-level ``norm``) to
+    every intermediate block output before the patch tokens are stripped.
+    Measured against that baseline on the published vitt16 detector, the
+    un-normed taps cost ~87% of COCO mAP (0.523 -> 0.066 on a 500-image
+    val2017 subset; regression pinned by
+    ``tests/test_detr_object_detection.py::TestDinov3TapSemantics``);
+    :meth:`tap_hidden` therefore applies the final norm.
     """
+
+    def tap_hidden(self, hidden: Tensor) -> Tensor:
+        """Apply the final LayerNorm (baseline ``norm=True`` tap semantics).
+
+        LayerNorm is per-token, so normalizing the assembled sequence is
+        bit-identical to the baseline's normalize-then-strip order on the
+        patch tokens.
+        """
+        norm = getattr(self._model, "norm", None)
+        if not isinstance(norm, nn.Module):
+            raise ValueError(
+                "DINOv3 ViT tap extraction requires the HF final norm "
+                "module (model.norm); the installed transformers exposes a "
+                "different layout — design doc 20 §3.2."
+            )
+        return norm(hidden)
 
     def supports_masked_forward(self) -> bool:
         """True when the DINOv3 masked orchestration surface is complete.
@@ -54,7 +81,7 @@ class TransformersDinov3ViTWrapper(TransformersDinov2Wrapper):
             and hasattr(getattr(hf_model, "model"), "layer")
         )
 
-    def forward_multiscale_features_masked(
+    def stage_feature_maps_masked(
         self,
         x: Tensor,
         layer_indices: Sequence[int],
@@ -146,7 +173,9 @@ class TransformersDinov3ViTWrapper(TransformersDinov2Wrapper):
                         num_h_patches,
                         num_w_patches,
                     )
-                features, cls_token = self._reshape_patch_tokens(tap_hidden)
+                features, cls_token = self._reshape_patch_tokens(
+                    self.tap_hidden(tap_hidden), image
+                )
                 per_tap[tap_index].append(
                     {"features": features, "cls_token": cls_token}
                 )
@@ -174,27 +203,49 @@ class TransformersDinov3ConvNextWrapper(nn.Module):
     def hf_model(self) -> nn.Module:
         return self._model
 
-    def get_model(self) -> nn.Module:
+    def raw_module(self) -> nn.Module:
         return self._model
 
     @property
     def config(self) -> Any:
         return self._model.config
 
-    def forward_features(self, x: Tensor) -> ForwardFeaturesOutput:
+    def feature_maps(self, x: Tensor) -> FeatureMapsOut:
         outputs = self._model(pixel_values=x)
         return {"features": outputs.last_hidden_state}
 
-    def forward_pool(self, x: ForwardFeaturesOutput) -> ForwardPoolOutput:
+    def pool_features(self, x: FeatureMapsOut) -> PoolOut:
         pooled = torch.nn.functional.adaptive_avg_pool2d(
             x["features"], output_size=1
         )
         return {"pooled_features": pooled}
 
-    def feature_dim(self) -> int:
+    def encoder_dim(self) -> int:
         return int(self.config.hidden_sizes[-1])
 
-    def architecture_info(self) -> ArchitectureInfo:
+    def final_stage_norm(self, features: Tensor) -> Tensor:
+        """Apply the final LayerNorm to the LAST stage's feature map.
+
+        Baseline tap semantics: the detector wrapper taps through
+        ``ConvNeXt.get_intermediate_layers``, which routes every tap
+        through ``norms[i]`` — ``norms = [Identity, Identity, Identity,
+        self.norm]``, so ONLY the final stage's tap (index 3) is normalized;
+        earlier taps stay raw. HF keeps the same tensor at the top level
+        (``layer_norm.*``) but expects channels-last, hence the permutes.
+        The un-normed tap costs ~29% of COCO mAP on the published
+        convnext-tiny detector (0.414 -> 0.293 on the same 500-image
+        val2017 subset).
+        """
+        norm = getattr(self._model, "layer_norm", None)
+        if not isinstance(norm, nn.Module):
+            raise ValueError(
+                "DINOv3 ConvNeXt tap extraction requires the HF final norm "
+                "module (model.layer_norm); the installed transformers "
+                "exposes a different layout."
+            )
+        return norm(features.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+
+    def arch_traits(self) -> ArchTraits:
         return {"model_type": "convolutional", "norm_type": "layernorm"}
 
     def make_teacher(self) -> "TransformersDinov3ConvNextWrapper":

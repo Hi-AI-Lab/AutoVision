@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Oriented RT-DETRv2 criterion + matcher: VFL + 5-D L1 + ProbIoU.
 
 Losses reuse the baseline weight dict (``loss_vfl 1.0 + loss_bbox 5.0 +

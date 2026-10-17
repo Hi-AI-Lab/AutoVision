@@ -6,8 +6,7 @@ MIT License, Copyright (c) 2026 The GTR Authors; that file is itself
 ported from Depth-Anything-V2's metric-depth DPT
 (https://github.com/DepthAnything/Depth-Anything-V2, Apache-2.0) and
 adapted to the 3-level GTR encoder pyramid), adapted by AutoVision per
-MIT/Apache-2.0 terms (registration cleanup, typing); ledger:
-``docs/provenance/LEDGER.md`` (GTR multi-task S4, roadmap design doc 31
+MIT/Apache-2.0 terms (registration cleanup, typing); provenance ledger entry (GTR multi-task S4, roadmap design doc 31
 §11).
 
 Module names (``layer_rn``/``refinenet{1,2,3}``/``output_conv{1,2}``) are

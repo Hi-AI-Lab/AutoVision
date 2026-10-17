@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """In-training kNN probe over frozen embeddings (design doc §7.5).
 
 The pretraining loop's only quality signal is ``train_loss``; the kNN probe
@@ -46,12 +46,12 @@ class KnnEvalArgs(PydanticConfig):
     split: float = 0.5
     batch_size: int = 256
     max_samples: int = 100_000
-    # True once "auto" was resolved to a bool by resolve_auto(); an
+    # True once "auto" was resolved to a bool by resolve_auto_fields(); an
     # auto-enabled probe degrades silently on an unlabeled layout, while an
     # explicit enabled=True is a hard configuration error there.
     was_auto: bool = Field(default=False, exclude=True)
 
-    def resolve_auto(self, dataset_size: int | None = None) -> None:
+    def resolve_auto_fields(self, dataset_size: int | None = None) -> None:
         if self.enabled == "auto":
             if dataset_size is None:
                 raise ValueError(

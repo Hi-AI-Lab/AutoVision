@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Apache-licensed warm-start component assets (design doc 28, section 6.3).
 
 Phase 4 asset switch: the COCO warm-start chain is rebuilt from Apache-2.0

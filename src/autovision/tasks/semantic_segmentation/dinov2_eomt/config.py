@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Arguments for EOMT semantic segmentation training (DINOv2 variant)."""
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ class Dinov2EomtSemanticSegmentationTrainArgs(TrainModelArgs):
 
     model_config = {"extra": "forbid"}
 
-    def resolve_auto(self, **kwargs) -> None:
+    def resolve_auto_fields(self, **kwargs) -> None:
         total_steps = kwargs.get("total_steps", 0)
         if self.lr_warmup_steps == "auto":
             self.lr_warmup_steps = max(10, int(total_steps * 0.05)) if total_steps else 10

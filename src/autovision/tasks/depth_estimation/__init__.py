@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Depth estimation task (monocular depth regression).
 
 Planned family layout (design doc 30, task-first tree). One directory per

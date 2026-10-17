@@ -3,6 +3,9 @@ name: ci
 on:
   push:
     branches: [main]
+    # Release tags: the test job's release-tag check asserts the tag matches
+    # the package version (tests/test_infrastructure.py::TestRelease).
+    tags: ["v*"]
   pull_request:
 
 jobs:
@@ -14,7 +17,8 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install ruff
-      - run: ruff check src tests
+      # scripts/ is linted too: the release gates live there.
+      - run: ruff check src tests scripts
 
   provenance:
     runs-on: ubuntu-latest
@@ -30,6 +34,20 @@ jobs:
       # One-way layering contract (design doc 28 §4.2, rule R4).
       - run: python scripts/check_layering.py
 
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install the docs toolchain
+        run: pip install "mkdocs-material>=9.5"
+      # Public-tree references (relative links + backticked repo paths).
+      - run: python scripts/check_docs_links.py
+      # Zero-warning site build (navigation, in-site links, orphans).
+      - run: mkdocs build --strict
+
   test:
     runs-on: ubuntu-latest
     env:
@@ -40,6 +58,10 @@ jobs:
       AUTOVISION_HF_TESTS: "0"
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history + tags: the release-tag check needs the tag that
+          # triggered a tag-push run.
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"

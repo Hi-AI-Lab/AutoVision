@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """EOMT semantic segmentation training wrapper."""
 
 from __future__ import annotations
@@ -132,7 +132,7 @@ class Dinov2EomtSemanticSegmentationTrain(TrainModel):
         gradient_accumulation_steps: int = 1,
     ) -> tuple[torch.optim.Optimizer, Any]:
         args = self.model_args
-        args.resolve_auto(total_steps=total_steps)
+        args.resolve_auto_fields(total_steps=total_steps)
         optimizer = build_eomt_optimizer(
             self.model.model,
             lr=args.lr,

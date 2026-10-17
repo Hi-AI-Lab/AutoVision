@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Tests for the SimCLR pretraining method."""
 
 import pytest
@@ -23,9 +23,9 @@ pytestmark = pytest.mark.filterwarnings("ignore::UserWarning")
 
 def make_simclr(embed_dim: int = 8, **args_overrides) -> SimCLR:
     method_args = SimCLRArgs(**args_overrides)
-    method_args.resolve_auto(scaling_info=ScalingInfo(dataset_size=64, epochs=10))
+    method_args.resolve_auto_fields(scaling=ScalingInfo(dataset_size=64, epochs=10))
     optimizer_args = SimCLR.optimizer_args_cls("auto")()
-    optimizer_args.resolve_auto(wrapped_model=None)
+    optimizer_args.resolve_auto_fields(wrapped_model=None)
     embedding_model = FeatureExtractor(
         wrapped_model=TinyWrapper(dim=embed_dim), embed_dim=None
     )
@@ -109,7 +109,7 @@ class TestSimCLRMethod:
     def test_trainable_modules_exclude_head_bn_from_no_wd_auto(self):
         method = make_simclr()
         trainable = method.trainable_modules()
-        modules = list(trainable.modules)
+        modules = list(trainable.targets)
         assert method.embedding_model in modules
         assert method.projection_head in modules
 

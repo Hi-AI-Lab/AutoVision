@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Cross-model distillation losses for the D-FINE criterion (design doc 23).
 
 The teacher never enters the criterion as a module: the training wrapper

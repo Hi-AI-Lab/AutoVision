@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Oriented (rotated-box) detection transform + collate.
 
 Mirrors the RT-DETR detection transform contract for 8-component corner

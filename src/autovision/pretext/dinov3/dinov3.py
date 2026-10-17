@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """DINOv3: a DINOv2 post-train method with a PaKA dense-relational loss.
 
 - [0]: 2025, PaKA: https://arxiv.org/abs/2509.05606
@@ -34,7 +34,7 @@ from torch import Tensor, nn
 
 from autovision.augment.method_transform import MultiViewTransform
 from autovision.augment.transform_args import NormalizeArgs
-from autovision.optim import TrainableModules, get_weight_decay_parameters
+from autovision.optim import OptimizationTargets, get_weight_decay_parameters
 from autovision.optim.schedulers import CosineWarmupScheduler
 from autovision.pretext.dino.dino import (
     DINOTransformArgs,
@@ -66,7 +66,7 @@ def _restore_orientation(tokens: Tensor, hflip: Tensor, vflip: Tensor) -> Tensor
 
     Groups samples by flip combination (none / h / v / hv) and flips each
     group back; the masked scatter keeps the autograd path intact for the
-    student side. Spec: ``docs/provenance/specs/S2-roi-align-view.md``.
+    student side. Spec: provenance spec S2.
     """
     out = torch.empty_like(tokens)
     flip_codes = hflip.int() + 2 * vflip.int()
@@ -97,7 +97,7 @@ def _shared_region(
     coordinates must stay well-defined for the resample). ``valid`` is
     ``(B,)`` bool: the intersection must span at least one output cell of
     A's grid in both dimensions; slimmer overlaps carry no relational
-    signal. Spec: ``docs/provenance/specs/S3-align-cross-view-pair.md``.
+    signal. Spec: provenance spec S3.
     """
     lo_x = torch.maximum(geom_a[:, 0], geom_b[:, 0])
     lo_y = torch.maximum(geom_a[:, 1], geom_b[:, 1])
@@ -131,14 +131,14 @@ class DINOv3Args(DINOv2Args):
     # Per-image token subsample before the O(N^2) CKA kernel.
     paka_max_tokens: int = 512
 
-    def resolve_auto(
+    def resolve_auto_fields(
         self,
-        scaling_info: Any = None,
+        scaling: Any = None,
         optimizer_args: Any = None,
         wrapped_model: Any = None,
     ) -> None:
-        super().resolve_auto(
-            scaling_info=scaling_info,
+        super().resolve_auto_fields(
+            scaling=scaling,
             optimizer_args=optimizer_args,
             wrapped_model=wrapped_model,
         )
@@ -364,9 +364,9 @@ class DINOv3(DINOv2):
         self.teacher_paka_head.eval()
         return self
 
-    def trainable_modules(self) -> TrainableModules:
-        return TrainableModules(
-            modules=[
+    def trainable_modules(self) -> OptimizationTargets:
+        return OptimizationTargets(
+            targets=[
                 self.embedding_model,
                 self.student_projection_head,
                 self.student_paka_head,
@@ -505,7 +505,7 @@ class DINOv3(DINOv2):
         teacher_aligned, valid)`` with shapes ``(B, C, out_h, out_w)`` and
         ``(B, out_h*out_w)``; ``valid`` is False for whole images whose
         crops do not overlap meaningfully (spec:
-        ``docs/provenance/specs/S3-align-cross-view-pair.md``).
+        provenance spec S3).
         """
         region, valid = _shared_region(student_geom, teacher_geom, out_h, out_w)
         student_aligned = self._roi_align_view(
@@ -547,7 +547,7 @@ class DINOv3(DINOv2):
         into this crop's feature-grid frame (undoing the recorded flips
         first so grid coordinates match the original orientation), then
         resampled with the shared bilinear primitive (spec:
-        ``docs/provenance/specs/S2-roi-align-view.md``).
+        provenance spec S2).
         """
         feat = _restore_orientation(tokens, geom[:, 6] > 0.5, geom[:, 7] > 0.5)
         crop_w = (geom[:, 2] - geom[:, 0]).clamp(min=1e-6)

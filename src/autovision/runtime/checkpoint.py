@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Checkpoint format: self-describing, atomic writes, metadata embedded.
 
 Layout::
@@ -96,7 +96,7 @@ class Checkpoint:
             ) from error
         if not isinstance(raw, dict) or CHECKPOINT_AUTOVISION_KEY not in raw:
             raise CheckpointError(
-                f"File '{path}' is not an Autovision checkpoint (missing "
+                f"File '{path}' is not an AutoVision checkpoint (missing "
                 f"'{CHECKPOINT_AUTOVISION_KEY}' metadata)."
             )
         metadata = CheckpointMetadata.from_dict(raw[CHECKPOINT_AUTOVISION_KEY])

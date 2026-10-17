@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Label conversion for the EOMT criterion.
 
 The HF EOMT loss consumes per-instance binary masks (Mask2Former

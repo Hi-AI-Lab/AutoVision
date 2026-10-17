@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 from autovision.pretext.distillationv3.distillationv3 import (
     DistillationV3,
     DistillationV3AdamWArgs,

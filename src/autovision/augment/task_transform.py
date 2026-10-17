@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Task transform base: step hooks and the "auto" resolution contract.
 
 Mirrors the baseline ``TaskTransform``/``TaskTransformArgs`` pair. Step
@@ -18,7 +18,7 @@ __all__ = ["TaskTransform", "TaskTransformArgs", "ActivationPolicyArgs"]
 class TaskTransformArgs(PydanticConfig):
     """Base args for task transforms."""
 
-    def resolve_auto(self, **kwargs: Any) -> None:
+    def resolve_auto_fields(self, **kwargs: Any) -> None:
         """Resolve any ``"auto"`` fields (model/geometry dependent)."""
 
     def resolve_step_schedule(

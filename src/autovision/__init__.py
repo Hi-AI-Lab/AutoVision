@@ -32,6 +32,7 @@ from autovision.cli import (
     train_object_detection,
     train_oriented_object_detection,
     train_panoptic_segmentation,
+    train_pose_estimation,
     train_semantic_segmentation,
 )
 from autovision.cli.extract_video_frames import extract_video_frames
@@ -44,7 +45,7 @@ from autovision.cli.model_handle import (
 from autovision.data.coco8 import ensure_coco8
 from autovision.encoders import list_models
 from autovision.errors import AutoVisionError
-from autovision.export import benchmark
+from autovision.export import benchmark, measure_model_cost
 from autovision.features import embed
 from autovision.pretext import list_methods
 from autovision.runtime.checkpoint import CHECKPOINT_AUTOVISION_KEY
@@ -65,6 +66,7 @@ __all__ = [
     "list_models",
     "embed",
     "benchmark",
+    "measure_model_cost",
     "ensure_coco8",
     "evaluate_object_detection",
     "extract_video_frames",
@@ -79,6 +81,7 @@ __all__ = [
     "train_panoptic_segmentation",
     "train_semantic_segmentation",
     "train_depth_estimation",
+    "train_pose_estimation",
 ]
 
 

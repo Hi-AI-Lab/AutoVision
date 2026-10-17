@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """RT-DETR object detection task model (inference/export facing)."""
 
 from __future__ import annotations
@@ -80,7 +80,7 @@ class RTDETRObjectDetection(ONNXExportMixin, TaskNetwork):
         backbone_wrapper = get_wrapped_model(
             backbone, num_input_channels=3, load_weights=load_weights
         )
-        raw_model = backbone_wrapper.get_model()
+        raw_model = backbone_wrapper.raw_module()
         levels = self._feature_levels(raw_model, backbone)
         in_channels = self._level_channels(raw_model, levels)
         self.feature_extractor = create_feature_extractor(

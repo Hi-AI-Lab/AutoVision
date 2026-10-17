@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Two-view dataset wrapper for the SSL ``two_crop`` objective (doc 14 §4.5)."""
 
 from __future__ import annotations

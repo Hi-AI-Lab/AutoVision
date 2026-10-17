@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Optimizer selection, parameter grouping, and LR scheduling."""
 
 from autovision.optim.optimizer_args import (
@@ -13,18 +13,19 @@ from autovision.optim.optimizer_helpers import (
     get_optimizer,
     get_weight_decay_parameters,
 )
-from autovision.optim.optimizer_type import OptimizerType
+from autovision.optim.optimizer_type import OPTIMIZER_KINDS, OptimizerKind
 from autovision.optim.schedulers import CosineWarmupScheduler
-from autovision.optim.trainable_modules import TrainableModules
+from autovision.optim.trainable_modules import OptimizationTargets
 
 __all__ = [
     "AdamWArgs",
     "CosineWarmupScheduler",
     "LARSArgs",
     "OptimizerArgs",
-    "OptimizerType",
+    "OptimizerKind",
+    "OPTIMIZER_KINDS",
     "SGDArgs",
-    "TrainableModules",
+    "OptimizationTargets",
     "build_adamw",
     "get_optimizer",
     "get_optimizer_args_cls",

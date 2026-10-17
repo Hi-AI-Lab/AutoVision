@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Tests for the DINOv3 pretraining method (DINOv2 + PaKA post-train)."""
 
 import random
@@ -38,9 +38,9 @@ def make_method(**args_overrides) -> DINOv3:
         warmup_teacher_temp=0.04,
         **args_overrides,
     )
-    args.resolve_auto(scaling_info=ScalingInfo(dataset_size=64, epochs=10))
+    args.resolve_auto_fields(scaling=ScalingInfo(dataset_size=64, epochs=10))
     optimizer_args = DINOv2AdamWArgs()
-    optimizer_args.resolve_auto(wrapped_model=None)
+    optimizer_args.resolve_auto_fields(wrapped_model=None)
     student = FeatureExtractor(
         wrapped_model=TinyMaskedViTWrapper(grid=4), embed_dim=8
     )
@@ -78,15 +78,15 @@ class TestArgs:
         assert args.paka_start_step == 0
         assert args.paka_num_local == 8
         assert args.paka_max_tokens == 512
-        assert args.default_steps == 125_000
+        assert args.auto_steps == 125_000
 
     def test_bad_paka_num_local_raises(self):
         with pytest.raises(ValueError, match="paka_num_local"):
-            DINOv3Args(paka_num_local=-1).resolve_auto()
+            DINOv3Args(paka_num_local=-1).resolve_auto_fields()
 
     def test_bad_paka_weight_raises(self):
         with pytest.raises(ValueError, match="paka_weight"):
-            DINOv3Args(paka_weight=0.0).resolve_auto()
+            DINOv3Args(paka_weight=0.0).resolve_auto_fields()
 
     def test_registered(self):
         assert "dinov3" in list_methods()
@@ -318,7 +318,7 @@ class TestMethod:
 
     def test_trainable_modules_include_paka_head(self):
         method = make_method()
-        modules = method.trainable_modules().modules
+        modules = method.trainable_modules().targets
         assert method.student_paka_head in modules
 
     def test_optimizer_covers_paka_head(self):

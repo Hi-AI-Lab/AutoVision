@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """VisDrone LT-DETR at 1280x1280 — ConvNeXt-LARGE, COCO-full warm start.
 
 Backbone-upgrade twin of ``visdrone_ltdetr_1280_convnextb_baseline_coco.py``

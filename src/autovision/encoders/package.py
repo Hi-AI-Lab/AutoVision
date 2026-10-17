@@ -1,10 +1,11 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
-"""Package protocols for model providers.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
+"""Model-source contract.
 
-A package owns a set of backbone models: it lists names, builds raw modules,
-and adapts them to the :class:`~autovision.encoders.model_wrapper.EncoderProtocol`
-protocol. Registration is in
-:mod:`autovision.encoders.package_helpers`.
+A *source* supplies backbone models: it recognizes the modules it built and
+writes them out for checkpoints. Sources with a catalog additionally build
+modules by name and adapt them to
+:class:`~autovision.encoders.model_wrapper.EncoderProtocol`. Registration
+lives in :mod:`autovision.encoders.package_helpers`.
 """
 
 from __future__ import annotations
@@ -13,47 +14,46 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
-__all__ = ["BasePackage", "Package"]
+__all__ = ["CatalogModelSource", "ModelSource"]
 
 
-class BasePackage(ABC):
-    """A model provider that can export models it built."""
+class ModelSource(ABC):
+    """A provider of backbone modules (custom adapters included)."""
 
     name: str
 
     @classmethod
     @abstractmethod
-    def export_model(
-        cls, model: Any, out: Path, log_example: bool = True
-    ) -> None:
-        """Export a model built by this package to ``out``."""
+    def recognizes(cls, model: Any) -> bool:
+        """Whether ``model`` (a module or an adapter) was built by this source."""
 
     @classmethod
     @abstractmethod
-    def is_supported_model(cls, model: Any) -> bool:
-        """True if ``model`` (instance or name) belongs to this package."""
+    def export_weights(cls, model: Any, out: Path, log_example: bool = True) -> None:
+        """Write a model built by this source to ``out``."""
 
 
-class Package(BasePackage):
-    """A model provider with a listable set of ``"<package>/<model>"`` names."""
-
-    @classmethod
-    @abstractmethod
-    def list_model_names(cls) -> list[str]:
-        """All supported model names as ``"<package>/<model>"`` strings."""
+class CatalogModelSource(ModelSource):
+    """A source with a catalog of ``"<source>/<model>"`` names."""
 
     @classmethod
     @abstractmethod
-    def get_model(
+    def catalog_names(cls) -> list[str]:
+        """Every supported name, as ``"<source>/<model>"`` strings."""
+
+    @classmethod
+    @abstractmethod
+    def build(
         cls,
-        model_name: str,
+        name: str,
+        *,
         num_input_channels: int = 3,
         model_args: dict[str, Any] | None = None,
         load_weights: bool = True,
     ) -> Any:
-        """Build the raw model module."""
+        """Construct the raw module for ``name``."""
 
     @classmethod
     @abstractmethod
-    def get_model_wrapper(cls, model: Any) -> Any:
-        """Wrap a model built by :meth:`get_model` into a ``EncoderProtocol``."""
+    def as_encoder(cls, model: Any) -> Any:
+        """Adapt a module from :meth:`build` to the encoder protocol."""

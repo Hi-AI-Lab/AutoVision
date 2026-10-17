@@ -1,9 +1,9 @@
 # Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Detection backbone wrappers for the AV-DETR family.
 
-Ports the baseline ``ltdetr_object_detection`` backbone adapters:
+Ports the baseline detector backbone adapters:
 
-- :class:`ViTDetectionBackbone` (baseline ``DINOSTAs``): semantic features
+- :class:`ViTDetectionBackbone` (baseline ViT adapter): semantic features
   from intermediate ViT blocks, bilinearly resized into a stride-8/16/32
   pyramid, optionally fused channel-wise with a CNN spatial prior (STA)
   and projected to a shared ``hidden_dim`` via 1x1 convs. Only the
@@ -61,7 +61,7 @@ class SpatialPriorModule(Module):
     from a small helper instead of hand-unrolled ``Sequential`` literals —
     layer order, channel widths and state-dict keys (``stem``/``conv2``/
     ``conv3``/``conv4``) are unchanged so existing checkpoints stay
-    loadable. Ledger: ``docs/provenance/LEDGER.md`` (P1-1).
+    loadable. Ledger: (P1-1).
     """
 
     def __init__(self, inplanes: int = 16) -> None:
@@ -97,7 +97,7 @@ class SpatialPriorModule(Module):
 
 
 class ViTDetectionBackbone(Module):
-    """ViT -> stride-8/16/32 detection features (baseline ``DINOSTAs``)."""
+    """ViT -> stride-8/16/32 detection features (baseline ViT adapter)."""
 
     def __init__(
         self,
@@ -256,6 +256,14 @@ class ConvNeXtDetectionBackbone(Module):
     ``num_stages=3`` (default) taps stages 1/2/3 (strides 8/16/32);
     ``num_stages=4`` taps all four stages (strides 4/8/16/32) — the
     Dome-faithful pyramid for tiny-object workloads (design doc 13 §5/D1).
+
+    Tap semantics (baseline ConvNeXt detection wrapper): every tap runs
+    through the baseline's ``norms[i]`` — ``[Identity, Identity, Identity,
+    self.norm]`` — so ONLY the final stage's feature map is LayerNormed;
+    the earlier stages stay raw. Applied here to the last tap for both
+    pyramid depths (the last tap IS the final stage in either case); the
+    un-normed alternative measured 0.414 -> 0.293 COCO mAP on the published
+    convnext-tiny detector.
     """
 
     #: 0-based stage indices for the default 3-level pyramid.
@@ -308,7 +316,9 @@ class ConvNeXtDetectionBackbone(Module):
             raise ValueError(
                 f"Expected {self.num_stages} ConvNeXt stage features, got {len(feats)}."
             )
-        return feats
+        # Baseline norms[-1] == self.norm on the LAST stage only (the
+        # earlier taps are Identity), in both 3- and 4-level pyramids.
+        return feats[:-1] + (self._model_wrapper.final_stage_norm(feats[-1]),)
 
 
 class TimmCNNBackbone(Module):
@@ -391,6 +401,7 @@ class GTRViTBackbone(Module):
         super().__init__()
         from autovision.errors import AutoVisionError
         from autovision.tasks.detection.shared.gtr import (
+            GTR_ONNX_EXPORT_BLOCKER,
             ViTAdapterSpatialSwiGLU,
             gtr_available,
         )
@@ -402,6 +413,9 @@ class GTRViTBackbone(Module):
             )
         self.embed_dim = embed_dim
         self.patch_size = patch_size
+        # Declared for the export mixin's module-tree scan: the GLA
+        # kernels have no ONNX lowering (see the constant's docstring).
+        self.export_blocker = GTR_ONNX_EXPORT_BLOCKER
         self._adapter = ViTAdapterSpatialSwiGLU(
             embed_dim=embed_dim,
             num_heads=num_heads,

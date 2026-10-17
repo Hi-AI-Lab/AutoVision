@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Geometry-coupled crop helpers for the PaKA dense relational loss.
 
 These are data-augmentation utilities (not SSL math): they build extra views
@@ -207,7 +207,7 @@ def sample_high_overlap_box(
     is accepted for API symmetry and unused. The local's area is drawn
     uniformly from ``_LOCAL_SCALE_RANGE`` of the parent area, its aspect
     ratio log-uniformly from ``_ASPECT_RANGE``, and its position uniformly
-    among legal offsets. Spec: ``docs/provenance/specs/S1-constrained-crop.md``.
+    among legal offsets. Spec: provenance spec S1.
     """
     del min_iou  # containment (ratio 1.0) always satisfies the constraint
     px0, py0, px1, py1 = parent_box

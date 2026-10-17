@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Optional MultiScaleDeformableAttention CUDA op (opt-in, JIT-compiled).
 
 Vendored from the Deformable-DETR / RT-DETR / Dome-DETR lineage

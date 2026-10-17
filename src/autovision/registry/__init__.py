@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Model asset registry (filesystem + MLflow backends) + downloadable cache."""
 
 # Registers the Apache warm-start component assets on import (design doc 28

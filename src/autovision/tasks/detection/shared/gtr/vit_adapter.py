@@ -3,7 +3,7 @@
 
 Re-port from Intellindust-AI-Lab GTR (``engine/gtr/backbone/vit_adapter.py``,
 MIT License, Copyright (c) 2026 The GTR Authors), adapted by AutoVision
-per MIT sections 2-4; ledger: ``docs/provenance/LEDGER.md`` (roadmap
+per MIT sections 2-4; provenance ledger entry (roadmap
 design doc 31 G2). AutoVision modifications:
 
 - registry decorators / package-relative ``core`` imports removed;

@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """DetCon: masked region-contrastive pretraining (S = SupCon / B = BYOL).
 
 Recipe (design doc §4.2, blueprint in volume 12 §4.2; DetCon:
@@ -41,7 +41,7 @@ import torchvision.transforms.functional as TF
 from torch import Tensor, nn
 from torchvision.transforms import InterpolationMode
 
-from autovision.optim import SGDArgs, TrainableModules
+from autovision.optim import OptimizationTargets, SGDArgs
 from autovision.pretext.detcon.detcon_transform import (
     DetConBTransform,
     DetConSTransform,
@@ -398,9 +398,9 @@ class DetConS(PretextRecipe):
     def transform_cls() -> type[DetConSTransform]:
         return DetConSTransform
 
-    def trainable_modules(self) -> TrainableModules:
-        return TrainableModules(
-            modules=[self.embedding_model, self.projection_head]
+    def trainable_modules(self) -> OptimizationTargets:
+        return OptimizationTargets(
+            targets=[self.embedding_model, self.projection_head]
         )
 
     def training_step_impl(self, batch: dict, batch_idx: int) -> StepOutput:
@@ -494,9 +494,9 @@ class DetConB(PretextRecipe):
     def transform_cls() -> type[DetConBTransform]:
         return DetConBTransform
 
-    def trainable_modules(self) -> TrainableModules:
-        return TrainableModules(
-            modules=[
+    def trainable_modules(self) -> OptimizationTargets:
+        return OptimizationTargets(
+            targets=[
                 self.embedding_model,
                 self.projection_head,
                 self.prediction_head,

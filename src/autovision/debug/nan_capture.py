@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """NaN capture: a self-contained replay snapshot on the first instability.
 
 On a non-finite loss/gradient the monitor saves model weights, optimizer
@@ -18,7 +18,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from autovision.errors import AutovisionError
+from autovision.errors import AutoVisionError
 from autovision.runtime.accelerator import npu_available
 
 __all__ = ["NaNCaptureMonitor", "NaNDetectedError", "load_nan_capture"]
@@ -26,7 +26,7 @@ __all__ = ["NaNCaptureMonitor", "NaNDetectedError", "load_nan_capture"]
 logger = logging.getLogger("autovision")
 
 
-class NaNDetectedError(AutovisionError):
+class NaNDetectedError(AutoVisionError):
     """Raised after a NaN snapshot has been saved."""
 
 

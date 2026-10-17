@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """VisDrone LT-DETR at 800x800 — COCO-full warm start + open-vocab head (G3 arm).
 
 Bit-identical copy of ``visdrone_ltdetr_800_baseline_coco.py`` except for

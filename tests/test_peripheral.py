@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Tests for peripheral subsystems: loggers, telemetry, debug, visualization,
 embed, video extraction, torch.compile, 8-bit optimizer, CLI."""
 
@@ -404,7 +404,7 @@ class TestExtractVideoFrames:
         import shutil
 
         if shutil.which("ffmpeg") is None:
-            pytest.skip("ffmpeg not installed")
+            pytest.skip("ffmpeg not installed (apt install ffmpeg)")
         from autovision import extract_video_frames
 
         video = self._make_video(tmp_path)
@@ -417,7 +417,7 @@ class TestExtractVideoFrames:
         import shutil
 
         if shutil.which("ffmpeg") is None:
-            pytest.skip("ffmpeg not installed")
+            pytest.skip("ffmpeg not installed (apt install ffmpeg)")
         from autovision import extract_video_frames
 
         video = self._make_video(tmp_path)
@@ -448,9 +448,9 @@ class TestTorchCompile:
 class TestAdamW8bit:
     def test_missing_package_raises(self):
         pytest.importorskip.__doc__  # keep importorskip semantics documented
-        from autovision.optim.adamw8bit_args import AdamW8bitArgs
+        from autovision.optim.adamw8bit_args import AdamW8BitArgs
 
-        args = AdamW8bitArgs()
+        args = AdamW8BitArgs()
         try:
             import bitsandbytes  # noqa: F401
 
@@ -463,7 +463,7 @@ class TestAdamW8bit:
     def test_registered_in_lookup(self):
         from autovision.optim import get_optimizer_args_cls
 
-        assert get_optimizer_args_cls("adamw8bit").__name__ == "AdamW8bitArgs"
+        assert get_optimizer_args_cls("adamw8bit").__name__ == "AdamW8BitArgs"
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────

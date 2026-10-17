@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Density-modulated per-class NMS for dynamic query selection.
 
 Port of the baseline ``src/zoo/dome/dynamic_nms.py`` (Dome-DETR,

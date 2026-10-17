@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Resume helper for the G3 OV arm (design doc 27 §13.4 G3).
 
 Reuses ``visdrone_ltdetr_800_cocofull_openvocab.py`` verbatim and resumes

@@ -1,10 +1,9 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Oriented (rotated-box) object detection finetuning (YOLO-OBB format)."""
 
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +18,7 @@ from autovision.cli.train_task.task_helpers import (
 )
 from autovision.config.validate import pydantic_model_validate
 from autovision.data.mmap_helpers import dataset_mmap_context
-from autovision.engine import TaskEngine
+from autovision.engine import TaskEngine, seed_everything
 from autovision.runtime.accelerator import accelerator_supports_bf16
 from autovision.runtime.logging import set_up_file_logging
 from autovision.types import PathLike
@@ -90,6 +89,10 @@ def train_oriented_object_detection(
         RTDETROrientedObjectDetectionTrainArgs,
     )
 
+    # The seed must be applied before the assembly builds random
+    # modules (model init, transform parameters): the engine re-seeds
+    # inside fit(), which is already too late for construction.
+    seed_everything(seed)
     out_dir = common_helpers.get_out_dir(out, resume_interrupted, overwrite)
     set_up_file_logging(out_dir / "train.log")
 
@@ -160,11 +163,7 @@ def train_oriented_object_detection(
     )
 
     # 5. datasets (mmap-managed)
-    num_devices = (
-        int(os.getenv("WORLD_SIZE", "1"))
-        if devices == "auto"
-        else int(devices)
-    )
+    num_devices = common_helpers.resolve_num_devices(devices)
     global_batch_size = common_helpers.get_global_batch_size(
         batch_size_resolved, max(1, _dataset_size(data_args, "train")), num_devices
     )
@@ -189,6 +188,8 @@ def train_oriented_object_detection(
         train_loader = common_helpers.build_task_dataloader(
             train_dataset, batch_size=per_device_batch,
             num_workers=num_workers_resolved, train=True,
+            # Step-windowed augmentation: see build_task_dataloader's note.
+            persistent_workers=False,
         )
         val_loader = common_helpers.build_task_dataloader(
             val_dataset, batch_size=per_device_batch,

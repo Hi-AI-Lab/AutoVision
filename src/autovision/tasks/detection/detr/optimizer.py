@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """DETR optimizer construction: param groups + warmup scheduler.
 
 Extracted verbatim from ``TrainModel.get_optimizer`` (design doc 30
@@ -46,7 +46,7 @@ def build_detr_optimizer(
         or args.dec_layers == "auto"
         or args.num_heads == "auto"
     ):
-        args.resolve_auto(
+        args.resolve_auto_fields(
             total_steps=total_steps,
             train_num_batches=train_num_batches or total_steps,
             gradient_accumulation_steps=gradient_accumulation_steps,

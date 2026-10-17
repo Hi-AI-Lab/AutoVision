@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Training engine: step loop, precision, checkpointing, optional DDP.
 
 Deliberately thin and framework-free. The loop implements exactly what the
@@ -730,7 +730,7 @@ class TaskEngine(Engine):
                     state_dict=checkpoint_dict["state_dict"], autovision=metadata
                 ).save(out_dir / "checkpoints" / f"{best_or_last}.ckpt")
 
-        def export_model(step: int, best_or_last: str) -> Path:
+        def export_weights(step: int, best_or_last: str) -> Path:
             export_dir = out_dir / "exported_models"
             export_dir.mkdir(parents=True, exist_ok=True)
             path = export_dir / f"exported_{best_or_last}.pt"
@@ -896,7 +896,7 @@ class TaskEngine(Engine):
                 if (is_save_step or is_last_step) and is_rank_zero:
                     save_checkpoint(step, "last")
                     result.checkpoint_path = out_dir / "checkpoints" / "last.ckpt"
-                    result.exported_model_path = export_model(step, "last")
+                    result.exported_model_path = export_weights(step, "last")
                     logger.info("Saved last checkpoint at step %d.", step + 1)
 
                 do_validation = (
@@ -994,7 +994,7 @@ class TaskEngine(Engine):
                         if save_best and is_rank_zero:
                             save_checkpoint(step, "best")
                             result.best_checkpoint_path = out_dir / "checkpoints" / "best.ckpt"
-                            result.best_exported_model_path = export_model(step, "best")
+                            result.best_exported_model_path = export_weights(step, "best")
                         if is_rank_zero:
                             logger.info(
                                 "Best %s improved to %.4f (step %d)",

@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """DINOv2 backbone wrapper on top of ``transformers``.
 
 Per framework policy, DINOv2 is provided through HuggingFace
@@ -12,17 +12,16 @@ the CLS token; spatial features strip the CLS + register tokens.
 
 from __future__ import annotations
 
-import math
 from typing import Any, Sequence
 
 import torch
 from torch import Tensor, nn
 
 from autovision.encoders.model_wrapper import (
-    ArchitectureInfo,
-    ForwardFeaturesOutput,
-    ForwardPoolOutput,
+    ArchTraits,
+    FeatureMapsOut,
     PatchSize,
+    PoolOut,
 )
 
 __all__ = ["TransformersDinov2Wrapper"]
@@ -97,7 +96,7 @@ class TransformersDinov2Wrapper(nn.Module, PatchSize):
     def hf_model(self) -> nn.Module:
         return self._model
 
-    def get_model(self) -> nn.Module:
+    def raw_module(self) -> nn.Module:
         return self._model
 
     @property
@@ -105,9 +104,9 @@ class TransformersDinov2Wrapper(nn.Module, PatchSize):
         return self._model.config
 
     # ── EncoderProtocol protocol ───────────────────────────────────────────
-    def forward_features(
+    def feature_maps(
         self, x: Tensor, bool_masked_pos: Tensor | None = None
-    ) -> ForwardFeaturesOutput:
+    ) -> FeatureMapsOut:
         if bool_masked_pos is None:
             outputs = self._model(pixel_values=x)
         else:
@@ -121,15 +120,37 @@ class TransformersDinov2Wrapper(nn.Module, PatchSize):
             # model's learned mask token (HF Dinov2Model embeddings).
             outputs = self._model(pixel_values=x, bool_masked_pos=bool_masked_pos)
         hidden = outputs.last_hidden_state  # (B, 1 + R + N, D)
-        features, cls_token = self._reshape_patch_tokens(hidden)
+        features, cls_token = self._reshape_patch_tokens(hidden, x)
         return {"features": features, "cls_token": cls_token}
 
-    def forward_multiscale_features(
+    def tap_hidden(self, hidden: Tensor) -> Tensor:
+        """Per-tap post-processing of one block hidden state (see
+        :meth:`stage_feature_maps` for the per-family semantics).
+
+        The detector baselines tap through ``get_intermediate_layers``;
+        the two baseline forks disagree on its ``norm`` flag, so the family
+        split lives here:
+
+        - the DINOv2 fork this wrapper ports leaves taps at their RAW
+          block output (the historical behavior; ``tests/
+          test_models_dinov2.py::test_multiscale_final_tap_pre_layernorm``
+          pins it), and
+        - the DINOv3 fork applies the model's final LayerNorm to every tap
+          (``norm=True`` default) — ``TransformersDinov3ViTWrapper``
+          overrides this hook with the measured fix for that family.
+
+        ``feature_maps`` deliberately bypasses this hook: HF's
+        ``last_hidden_state`` is already final-normed.
+        """
+        return hidden
+
+    def stage_feature_maps(
         self, x: Tensor, layer_indices: Sequence[int]
     ) -> list[dict[str, Any]]:
         """Features after the given 0-based block indices (baseline
         ``get_intermediate_layers`` semantics: patch tokens reshaped to
-        (B, D, H, W), no final layernorm, CLS token per tap).
+        (B, D, H, W), CLS token per tap, tap post-processing per
+        :meth:`tap_hidden`).
 
         Implemented via a full forward with ``output_hidden_states=True``;
         cost is identical to a plain forward whenever the last tap is the
@@ -149,13 +170,13 @@ class TransformersDinov2Wrapper(nn.Module, PatchSize):
         results: list[dict[str, Any]] = []
         for layer_index in layer_indices:
             features, cls_token = self._reshape_patch_tokens(
-                hidden_states[layer_index + 1]
+                self.tap_hidden(hidden_states[layer_index + 1]), x
             )
             results.append({"features": features, "cls_token": cls_token})
         return results
 
     def supports_masked_forward(self) -> bool:
-        """Whether :meth:`forward_multiscale_features_masked` can run.
+        """Whether :meth:`stage_feature_maps_masked` can run.
 
         The masked path orchestrates the HF model's internals directly
         (``embeddings`` -> ``encoder``), which requires the DINOv2 layout.
@@ -168,7 +189,7 @@ class TransformersDinov2Wrapper(nn.Module, PatchSize):
         hf_model = self._model
         return hasattr(hf_model, "embeddings") and hasattr(hf_model, "encoder")
 
-    def forward_multiscale_features_masked(
+    def stage_feature_maps_masked(
         self,
         x: Tensor,
         layer_indices: Sequence[int],
@@ -176,7 +197,7 @@ class TransformersDinov2Wrapper(nn.Module, PatchSize):
     ) -> list[dict[str, Any]]:
         """Multi-scale taps with per-image background patch-token dropping.
 
-        Same tap semantics as :meth:`forward_multiscale_features`, but the
+        Same tap semantics as :meth:`stage_feature_maps`, but the
         encoder runs once per image over only its kept patch tokens (design
         doc 17): the keep mask (window grid) is expanded to the patch grid,
         the kept tokens are gathered right after the embeddings stage, and
@@ -246,7 +267,13 @@ class TransformersDinov2Wrapper(nn.Module, PatchSize):
                     hidden = _backfill_patch_tokens(
                         hidden, kept, num_prefix, num_h_patches, num_w_patches
                     )
-                features, cls_token = self._reshape_patch_tokens(hidden)
+                # tap_hidden before the reshape, exactly as in the dense
+                # path; the tap norm is per-token, so applying it to the
+                # backfilled sequence matches the baseline's norm-then-strip
+                # order bit-for-bit on the kept tokens.
+                features, cls_token = self._reshape_patch_tokens(
+                    self.tap_hidden(hidden), image
+                )
                 per_tap[tap_index].append(
                     {"features": features, "cls_token": cls_token}
                 )
@@ -262,20 +289,20 @@ class TransformersDinov2Wrapper(nn.Module, PatchSize):
             for tap_images in per_tap
         ]
 
-    def forward_pool(self, x: ForwardFeaturesOutput) -> ForwardPoolOutput:
+    def pool_features(self, x: FeatureMapsOut) -> PoolOut:
         # Baseline semantics: DINOv2 pools via the CLS token, not avg pool.
         cls_token = x.get("cls_token")
         if cls_token is None:
-            raise ValueError("forward_pool requires 'cls_token' from forward_features.")
+            raise ValueError("pool_features requires 'cls_token' from feature_maps.")
         return {"pooled_features": cls_token[..., None, None]}
 
-    def feature_dim(self) -> int:
+    def encoder_dim(self) -> int:
         return int(self.config.hidden_size)
 
     def patch_size(self) -> int:
         return int(self.config.patch_size)
 
-    def architecture_info(self) -> ArchitectureInfo:
+    def arch_traits(self) -> ArchTraits:
         return {"model_type": "transformer", "norm_type": "layernorm"}
 
     def make_teacher(self) -> "TransformersDinov2Wrapper":
@@ -295,26 +322,46 @@ class TransformersDinov2Wrapper(nn.Module, PatchSize):
         return self
 
     # ── Internal helpers ────────────────────────────────────────────────
-    def _reshape_patch_tokens(self, hidden: Tensor) -> tuple[Tensor, Tensor]:
+    def _patch_grid(self, image: Tensor) -> tuple[int, int]:
+        """Patch-grid dims from the INPUT size (``H // patch``, ``W // patch``).
+
+        Derived from the input rather than recovered from the token count:
+        under dynamic H/W (roadmap D2) the token count is a symbolic value
+        and an ``isqrt`` reconstruction cannot be traced.
+        """
+        patch_size = self.patch_size()
+        return image.shape[-2] // patch_size, image.shape[-1] // patch_size
+
+    def _reshape_patch_tokens(self, hidden: Tensor, image: Tensor) -> tuple[Tensor, Tensor]:
         """Split the prefix tokens off a hidden state and reshape patches.
 
         Strips the CLS + register tokens and reshapes the patch tokens to a
-        square (B, C, H, W) map. Returns ``(features, cls_token)``.
+        square (B, C, H, W) map; the grid comes from ``image``'s spatial size
+        (dynamic-shape safe). Returns ``(features, cls_token)``.
         """
         cls_token = hidden[:, 0]
         num_prefix = 1 + int(getattr(self.config, "num_register_tokens", 0) or 0)
         patches = hidden[:, num_prefix:]  # (B, N, D)
-        num_patches = patches.shape[1]
-        side = math.isqrt(num_patches)
-        if side * side != num_patches:
-            raise ValueError(
-                f"Non-square DINOv2 feature map ({num_patches} patches) is "
-                f"not supported."
-            )
-        channels = self.feature_dim()
+        channels = self.encoder_dim()
+        grid_h, grid_w = self._patch_grid(image)
+        if not torch.compiler.is_compiling():
+            # Eager safety net, kept OUT of traced graphs: with dynamic H/W
+            # the grid and the token count are symbolic and data-dependent
+            # comparisons cannot be traced (the reshape below is the runtime
+            # guard there).
+            if grid_h != grid_w:
+                raise ValueError(
+                    f"Non-square DINOv2 feature map ({grid_h}x{grid_w} patches) "
+                    "is not supported."
+                )
+            if patches.shape[1] != grid_h * grid_w:
+                raise ValueError(
+                    f"Patch grid {grid_h}x{grid_w} does not match "
+                    f"{patches.shape[1]} patch tokens."
+                )
         features = (
             patches.transpose(1, 2)
-            .reshape(-1, channels, side, side)
+            .reshape(patches.shape[0], channels, grid_h, grid_w)
             .contiguous()
         )
         return features, cls_token

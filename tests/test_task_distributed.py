@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Tests for distributed task-training support (engine + metric gathering).
 
 Multi-process end-to-end DDP runs need a torchrun launcher and are not part

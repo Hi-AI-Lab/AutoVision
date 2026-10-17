@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Autovision contributors. Apache-2.0.
+# Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """YOLO object detection dataset.
 
 Ultralytics layout: ``<split>/images/...`` with labels mirrored under a
@@ -15,7 +15,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from autovision.data.label_helpers import get_class_id_to_internal_class_id_mapping
+from autovision.data.label_helpers import contiguous_class_id_map
 
 __all__ = ["YOLOObjectDetectionDataArgs", "yolo_images_to_labels_path"]
 
@@ -65,7 +65,7 @@ class YOLOObjectDetectionDataArgs(BaseModel):
 
     def classes(self) -> dict[int, str]:
         included = set(self.names) - set(self.ignore_classes or [])
-        internal = get_class_id_to_internal_class_id_mapping(sorted(included))
+        internal = contiguous_class_id_map(sorted(included))
         return {internal[class_id]: self.names[class_id] for class_id in sorted(included)}
 
     def _mmap_hash(self, split: Path) -> str:
@@ -88,7 +88,7 @@ class YOLOObjectDetectionDataArgs(BaseModel):
         images_dir = getattr(self, split)
         labels_dir = yolo_images_to_labels_path(images_dir)
         included = set(self.names) - set(self.ignore_classes or [])
-        internal = get_class_id_to_internal_class_id_mapping(sorted(included))
+        internal = contiguous_class_id_map(sorted(included))
 
         for image_path in sorted(images_dir.rglob("*")):
             if not image_path.is_file() or image_path.suffix.lower() not in {
