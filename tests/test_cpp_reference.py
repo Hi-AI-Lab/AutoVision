@@ -22,7 +22,7 @@ def test_cpp_postprocess_host_test(tmp_path):
     binary = tmp_path / "postprocess_test"
     subprocess.run(
         [
-            "g++", "-std=c++17", "-O2",
+            "g++", "-std=c++17", "-O2", "-Wall", "-Wextra", "-Werror",
             f"-I{CPP / 'src'}",
             str(CPP / "src" / "postprocess_test.cpp"),
             "-o", str(binary),
@@ -40,11 +40,20 @@ def test_cpp_postprocess_host_test(tmp_path):
 
 def test_cpp_example_files_are_wired():
     main = (CPP / "src" / "main.cpp").read_text()
+    header = (CPP / "src" / "postprocess.hpp").read_text()
     cmake = (CPP / "CMakeLists.txt").read_text()
     readme = (CPP / "README.md").read_text()
     assert "onnxruntime_cxx_api.h" in main
     assert "opencv2/opencv.hpp" in main
+    assert "--max-detections" in main
+    assert "GetOutputCount" in main
+    assert "std::stable_sort" in header
     assert "ONNXRUNTIME_ROOT" in cmake
     assert "postprocess_test" in cmake
+    assert "add_test(" in cmake
     assert "autovision_infer" in readme
+    assert "ctest --output-on-failure" in readme
+    assert "--max-detections" in readme
     assert (CPP / "src" / "postprocess.hpp").is_file()
+    manifest = (ROOT / "MANIFEST.in").read_text()
+    assert "examples/cpp" in manifest

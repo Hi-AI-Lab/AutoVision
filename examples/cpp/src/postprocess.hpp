@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <utility>
 #include <vector>
 
 namespace autovision {
@@ -63,11 +64,13 @@ inline float iou(const Box& a, const Box& b) {
   return union_area > 0.0f ? inter / union_area : 0.0f;
 }
 
-// Matches torchvision.ops.nms with a per-class offset: cross-class boxes
-// never suppress each other; same-class duplicates are removed in
-// descending score order.
+// Matches torchvision.ops.nms with a class offset: labels are shifted by
+// label * offset before IoU. Class-aware NMS passes offset > max(image),
+// class-agnostic NMS passes offset=0. This mirrors the NumPy reference
+// (`_class_offset_nms`), including stable descending-score order.
 inline void class_offset_nms(std::vector<Detection>& detections,
-                             const DecodeConfig& config, float offset) {
+                             float offset, float iou_threshold,
+                             int max_detections) {
   if (detections.empty()) {
     return;
   }
@@ -82,30 +85,25 @@ inline void class_offset_nms(std::vector<Detection>& detections,
       continue;
     }
     kept.push_back(detections[i]);
-    if (config.max_detections > 0 &&
-        static_cast<int>(kept.size()) >= config.max_detections) {
+    if (max_detections > 0 &&
+        static_cast<int>(kept.size()) >= max_detections) {
       break;
     }
+    const float shift_i =
+        static_cast<float>(detections[i].label) * offset;
     Box shifted_i = detections[i].box;
-    if (config.class_aware) {
-      const float shift = static_cast<float>(detections[i].label) * offset;
-      shifted_i.x1 += shift;
-      shifted_i.x2 += shift;
-    }
+    shifted_i.x1 += shift_i;
+    shifted_i.x2 += shift_i;
     for (std::size_t j = i + 1; j < detections.size(); ++j) {
       if (removed[j]) {
         continue;
       }
-      if (config.class_aware && detections[j].label != detections[i].label) {
-        continue;
-      }
+      const float shift_j =
+          static_cast<float>(detections[j].label) * offset;
       Box shifted_j = detections[j].box;
-      if (config.class_aware) {
-        const float shift = static_cast<float>(detections[j].label) * offset;
-        shifted_j.x1 += shift;
-        shifted_j.x2 += shift;
-      }
-      if (iou(shifted_i, shifted_j) > config.nms_iou) {
+      shifted_j.x1 += shift_j;
+      shifted_j.x2 += shift_j;
+      if (iou(shifted_i, shifted_j) > iou_threshold) {
         removed[j] = true;
       }
     }
@@ -143,8 +141,10 @@ inline std::vector<std::vector<Detection>> decode(
     if (keep <= 0) {
       continue;
     }
-    std::partial_sort(
-        candidates.begin(), candidates.begin() + keep, candidates.end(),
+    // Stable descending order, matching np.argsort(-scores, kind="stable")
+    // in the NumPy reference: ties keep the lower flat (query, class) index.
+    std::stable_sort(
+        candidates.begin(), candidates.end(),
         [](const Candidate& a, const Candidate& b) {
           return a.score > b.score;
         });
@@ -177,8 +177,11 @@ inline std::vector<std::vector<Detection>> decode(
     }
     if (config.family == Family::Picodet && !detections.empty()) {
       const float offset =
-          static_cast<float>(std::max(size.width, size.height)) + 1.0f;
-      class_offset_nms(detections, config, offset);
+          config.class_aware
+              ? static_cast<float>(std::max(size.width, size.height)) + 1.0f
+              : 0.0f;
+      class_offset_nms(detections, offset, config.nms_iou,
+                       config.max_detections);
     }
     output[static_cast<std::size_t>(image)] = std::move(detections);
   }

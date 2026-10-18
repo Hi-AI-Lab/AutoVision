@@ -107,9 +107,17 @@ python scripts/measure_int8_accuracy.py --model best.pt --data coco.yaml \
 
 `examples/cpp/` 提供最小 ONNX Runtime + OpenCV 参考实现：读取导出的
 `(logits, boxes)`，用与 `postprocess.json` 相同的 DETR top-k / PicoDet NMS
-解码，输出原图像素框。host-only 的 `postprocess_test` 只需 g++；完整
-runtime 构建说明见 `examples/cpp/README.md`。
-这是参考示例，不是 ABI/SDK 承诺。
+解码，输出原图像素框。host-only 的 `postprocess_test` 只需 g++：
+
+```bash
+g++ -std=c++17 -O2 -Wall -Wextra -Werror -Iexamples/cpp/src \
+    examples/cpp/src/postprocess_test.cpp -o /tmp/postprocess_test
+/tmp/postprocess_test
+```
+
+测试覆盖 DETR top-k、PicoDet class-aware / class-agnostic NMS、
+`max_detections`、batch 内不同原图尺寸与严格分数阈值；完整 runtime
+构建说明见 `examples/cpp/README.md`。这是参考示例，不是 ABI/SDK 承诺。
 
 ## TensorRT 11 适配
 

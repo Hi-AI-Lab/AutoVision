@@ -11,9 +11,12 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <iostream>
+#include <ostream>
 #include <string>
 #include <vector>
 
@@ -26,22 +29,23 @@ struct Options {
   std::string image;
   int num_classes = 80;
   int top_k = 300;
+  int max_detections = 0;  // 0 = use top_k
   float threshold = 0.5f;
   int input_width = 640;
   int input_height = 640;
   std::string family = "detr";
   float nms_iou = 0.6f;
   bool class_agnostic = false;
+  bool help = false;
 };
 
-void usage() {
-  std::cerr
-      << "usage: autovision_infer --model model.onnx --image demo.jpg "
+void usage(std::ostream& out) {
+  out << "usage: autovision_infer --model model.onnx --image demo.jpg "
          "--num-classes 80\n"
-         "       [--top-k 300] [--threshold 0.5] [--input-width 640] "
-         "[--input-height 640]\n"
+         "       [--top-k 300] [--max-detections 0] [--threshold 0.5]\n"
+         "       [--input-width 640] [--input-height 640]\n"
          "       [--family detr|picodet] [--nms-iou 0.6] "
-         "[--class-agnostic]\n";
+         "[--class-agnostic] [--help]\n";
 }
 
 bool parse(int argc, char** argv, Options* options) {
@@ -54,32 +58,87 @@ bool parse(int argc, char** argv, Options* options) {
       *value = argv[++index];
       return true;
     };
+    auto next_int = [&](int* value) -> bool {
+      std::string text;
+      if (!next(&text)) {
+        return false;
+      }
+      std::size_t consumed = 0;
+      try {
+        *value = std::stoi(text, &consumed);
+      } catch (const std::exception&) {
+        return false;
+      }
+      return consumed == text.size();
+    };
+    auto next_float = [&](float* value) -> bool {
+      std::string text;
+      if (!next(&text)) {
+        return false;
+      }
+      std::size_t consumed = 0;
+      try {
+        *value = std::stof(text, &consumed);
+      } catch (const std::exception&) {
+        return false;
+      }
+      return consumed == text.size();
+    };
     if (key == "--model") {
       if (!next(&options->model)) return false;
     } else if (key == "--image") {
       if (!next(&options->image)) return false;
     } else if (key == "--num-classes") {
-      options->num_classes = std::stoi(argv[++index]);
+      if (!next_int(&options->num_classes)) return false;
     } else if (key == "--top-k") {
-      options->top_k = std::stoi(argv[++index]);
+      if (!next_int(&options->top_k)) return false;
+    } else if (key == "--max-detections") {
+      if (!next_int(&options->max_detections)) return false;
     } else if (key == "--threshold") {
-      options->threshold = std::stof(argv[++index]);
+      if (!next_float(&options->threshold)) return false;
     } else if (key == "--input-width") {
-      options->input_width = std::stoi(argv[++index]);
+      if (!next_int(&options->input_width)) return false;
     } else if (key == "--input-height") {
-      options->input_height = std::stoi(argv[++index]);
+      if (!next_int(&options->input_height)) return false;
     } else if (key == "--family") {
       if (!next(&options->family)) return false;
     } else if (key == "--nms-iou") {
-      options->nms_iou = std::stof(argv[++index]);
+      if (!next_float(&options->nms_iou)) return false;
     } else if (key == "--class-agnostic") {
       options->class_agnostic = true;
+    } else if (key == "--help" || key == "-h") {
+      options->help = true;
     } else {
       std::cerr << "unknown flag: " << key << "\n";
       return false;
     }
   }
-  return !options->model.empty() && !options->image.empty();
+  if (options->help) {
+    return true;
+  }
+  if (options->model.empty() || options->image.empty()) {
+    return false;
+  }
+  if (options->family != "detr" && options->family != "picodet") {
+    std::cerr << "unknown --family '" << options->family
+              << "' (expected detr|picodet)\n";
+    return false;
+  }
+  if (options->num_classes <= 0 || options->top_k < 0 ||
+      options->max_detections < 0 || options->input_width <= 0 ||
+      options->input_height <= 0) {
+    std::cerr << "invalid numeric option: require num-classes/input sizes > 0 "
+                 "and top-k/max-detections >= 0\n";
+    return false;
+  }
+  if (options->threshold < 0.0f || options->threshold > 1.0f ||
+      !std::isfinite(options->threshold) ||
+      options->nms_iou < 0.0f || options->nms_iou > 1.0f ||
+      !std::isfinite(options->nms_iou)) {
+    std::cerr << "invalid threshold/nms-iou: expected finite values in [0, 1]\n";
+    return false;
+  }
+  return true;
 }
 
 std::vector<float> preprocess(const cv::Mat& bgr, int input_width,
@@ -110,8 +169,12 @@ std::vector<float> preprocess(const cv::Mat& bgr, int input_width,
 int main(int argc, char** argv) {
   Options options;
   if (!parse(argc, argv, &options)) {
-    usage();
+    usage(std::cerr);
     return 2;
+  }
+  if (options.help) {
+    usage(std::cout);
+    return 0;
   }
   cv::Mat image = cv::imread(options.image);
   if (image.empty()) {
@@ -125,6 +188,11 @@ int main(int argc, char** argv) {
   Ort::SessionOptions session_options;
   session_options.SetIntraOpNumThreads(1);
   Ort::Session session(env, options.model.c_str(), session_options);
+  if (session.GetInputCount() < 1 || session.GetOutputCount() < 2) {
+    std::cerr << "model must expose at least one input and two outputs "
+                 "(logits, boxes)\n";
+    return 1;
+  }
   Ort::AllocatorWithDefaultOptions allocator;
 
   const auto input_name = session.GetInputNameAllocated(0, allocator);
@@ -136,11 +204,27 @@ int main(int argc, char** argv) {
 
   const auto input_shape =
       session.GetInputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
+  if (input_shape.size() != 4) {
+    std::cerr << "expected a rank-4 NCHW input\n";
+    return 1;
+  }
+  if (input_shape[1] > 0 && input_shape[1] != 3) {
+    std::cerr << "expected 3 input channels, graph has " << input_shape[1]
+              << "\n";
+    return 1;
+  }
   int input_width = options.input_width;
   int input_height = options.input_height;
-  if (input_shape.size() == 4 && input_shape[3] > 0) {
+  if (input_shape[3] > 0) {
     input_width = static_cast<int>(input_shape[3]);
+  }
+  if (input_shape[2] > 0) {
     input_height = static_cast<int>(input_shape[2]);
+  }
+  if (input_width <= 0 || input_height <= 0) {
+    std::cerr << "cannot determine a positive input size; pass "
+                 "--input-width/--input-height\n";
+    return 1;
   }
   auto tensor = preprocess(image, input_width, input_height);
   const std::array<int64_t, 4> shape = {1, 3, input_height, input_width};
@@ -156,18 +240,39 @@ int main(int argc, char** argv) {
     std::cerr << "inference failed: " << error.what() << "\n";
     return 1;
   }
+  if (outputs.size() < 2) {
+    std::cerr << "model returned fewer than two outputs\n";
+    return 1;
+  }
 
   const auto logits_shape =
       outputs[0].GetTensorTypeAndShapeInfo().GetShape();
   const auto boxes_shape =
       outputs[1].GetTensorTypeAndShapeInfo().GetShape();
-  if (logits_shape.size() != 3 || boxes_shape.size() != 3) {
+  if (outputs[0].GetTensorTypeAndShapeInfo().GetElementType() !=
+          ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+      outputs[1].GetTensorTypeAndShapeInfo().GetElementType() !=
+          ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+    std::cerr << "expected float32 logits/boxes outputs\n";
+    return 1;
+  }
+  if (logits_shape.size() != 3 || boxes_shape.size() != 3 ||
+      boxes_shape[2] != 4) {
     std::cerr << "expected logits (B,Q,C) and boxes (B,Q,4)\n";
+    return 1;
+  }
+  if (logits_shape[0] != boxes_shape[0] ||
+      logits_shape[1] != boxes_shape[1]) {
+    std::cerr << "logits/boxes batch or query dimensions disagree\n";
     return 1;
   }
   const int batch = static_cast<int>(logits_shape[0]);
   const int queries = static_cast<int>(logits_shape[1]);
   const int classes = static_cast<int>(logits_shape[2]);
+  if (batch <= 0 || queries <= 0 || classes <= 0) {
+    std::cerr << "empty logits/boxes shape\n";
+    return 1;
+  }
   if (classes != options.num_classes) {
     std::cerr << "warning: --num-classes " << options.num_classes
               << " != graph classes " << classes << "; using the graph\n";
@@ -182,7 +287,8 @@ int main(int argc, char** argv) {
                       : autovision::Family::Detr;
   config.nms_iou = options.nms_iou;
   config.class_aware = !options.class_agnostic;
-  config.max_detections = options.top_k;
+  config.max_detections =
+      options.max_detections > 0 ? options.max_detections : options.top_k;
 
   std::vector<autovision::ImageSize> sizes(
       static_cast<std::size_t>(batch),

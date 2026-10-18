@@ -6,6 +6,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_executable(postprocess_test src/postprocess_test.cpp)
 target_include_directories(postprocess_test PRIVATE src)
+set_target_properties(postprocess_test PROPERTIES CXX_EXTENSIONS OFF)
+
+include(CTest)
+if(BUILD_TESTING)
+  add_test(NAME postprocess_test COMMAND postprocess_test)
+endif()
 
 # The host-side postprocess test builds with a bare C++ compiler. The
 # ONNX Runtime example is optional: point ONNXRUNTIME_ROOT at an extracted

@@ -15,3 +15,5 @@ recursive-include src/autovision/tasks/detection/shared/_msda_src *.cpp *.cu *.c
 recursive-include examples/tasks *.py *.md
 # Only the CC0 demo image ships; see examples/tasks/assets/README.md.
 recursive-include examples/tasks/assets *.jpg
+# Device-side C++ reference runtime + host test (sdist only).
+recursive-include examples/cpp CMakeLists.txt README.md *.cpp *.hpp
