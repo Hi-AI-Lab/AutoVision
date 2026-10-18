@@ -10,7 +10,24 @@ from pathlib import Path
 
 import numpy as np
 
-__all__ = ["COCOMaskAPEvaluator"]
+__all__ = ["COCOMaskAPEvaluator", "resize_masks"]
+
+
+def resize_masks(masks, height: int, width: int):
+    """Resize ``(N, H, W)`` instance masks to the requested resolution.
+
+    Validation decodes predictions back to the original frame while the
+    transformed GT masks still live on the network canvas. COCO evaluation
+    requires both to share the declared image size, so the GT side is
+    resampled with nearest-neighbour (binary masks must stay binary).
+    """
+    import torch.nn.functional as F
+
+    if masks.numel() == 0 or tuple(masks.shape[-2:]) == (height, width):
+        return masks
+    return F.interpolate(
+        masks.unsqueeze(1).float(), size=(height, width), mode="nearest"
+    ).squeeze(1)
 
 
 def _to_rle(mask: np.ndarray) -> dict:

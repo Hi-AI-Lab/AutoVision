@@ -688,6 +688,7 @@ class ONNXExportMixin(nn.Module):
         onnx_args: dict[str, Any] | None = None,
         verbose: bool = False,
         debug: bool = False,
+        verify: bool = True,
     ) -> Path:
         """Build a TensorRT engine from this model (design §12.3).
 
@@ -705,8 +706,142 @@ class ONNXExportMixin(nn.Module):
         an image path/directory as well as sample dicts.
         ``keep_int8_onnx=True`` keeps the SANITIZED QDQ graph (the
         TensorRT-side int32 fold mutates it in place).
+
+        ``verify=True`` runs a seeded eager-vs-engine parity check after the
+        build (final tensors, precision-appropriate tolerances); a mismatch
+        deletes the engine and raises. Set ``verify=False`` only for
+        throwaway debug builds.
         """
         from autovision.export.tensorrt_helpers import export_onnx_to_tensorrt
+
+        def _verify_engine(engine_path: Path) -> None:
+            """Eager-vs-engine parity gate (fail closed: delete the engine)."""
+            if not verify:
+                return
+            from autovision.export.tensorrt_helpers import (
+                TensorRTEngineRunner,
+                verify_engine_outputs,
+            )
+
+            spec = self.model_input_spec
+            parameter = next(self.parameters(), None)
+            example_device = (
+                parameter.device if parameter is not None else torch.device("cpu")
+            )
+            sample = next(
+                iter(
+                    spec.example_inputs(
+                        batch_size=min_batch_size, device=example_device
+                    ).values()
+                )
+            )
+            generator = torch.Generator().manual_seed(0)
+            compare = torch.rand(
+                sample.shape, generator=generator, dtype=sample.dtype
+            ).to(sample.device)
+            resolved_precision = precision
+            if resolved_precision == "auto":
+                # The engine may be fp16 (explicit request or an fp16 model
+                # at build time); use the fp16 band for auto builds.
+                resolved_precision = "fp16"
+            atol, rtol = {
+                "fp32": (5e-3, 1e-2),
+                "fp16": (5e-2, 5e-2),
+                "int8": (2.0, 0.5),
+            }[resolved_precision]
+            with torch.no_grad():
+                expected = self.forward_backend(compare)
+            runner_device = (
+                str(compare.device)
+                if compare.device.type == "cuda"
+                else "cuda"
+            )
+            runner = TensorRTEngineRunner(engine_path, device=runner_device)
+            actual = runner.run(compare.cpu())
+            try:
+                # Detection outputs can permute tied queries between
+                # backends; compare the FINAL boxes/scores (label + IoU
+                # matching) instead of raw query order. This is the
+                # deployment question and avoids false failures when two
+                # anchors tie under fp16.
+                used_e2e = False
+                image_size = getattr(self, "image_size", None)
+                postprocess = getattr(self, "postprocess", None)
+                if (
+                    resolved_precision in ("fp32", "fp16")
+                    and image_size is not None
+                    and callable(postprocess)
+                ):
+                    size = int(image_size[0] if isinstance(image_size, (tuple, list)) else image_size)
+                    metadata = [
+                        {"orig_w": size, "orig_h": size}
+                        for _ in range(int(compare.shape[0]))
+                    ]
+                    try:
+                        reference_records = postprocess(
+                            expected, metadata, threshold=0.0
+                        )
+                        engine_records = postprocess(
+                            actual, metadata, threshold=0.0
+                        )
+                    except (AutoVisionError, TypeError, AttributeError, KeyError):
+                        pass
+                    else:
+                        if (
+                            reference_records
+                            and isinstance(reference_records[0], dict)
+                            and "bboxes" in reference_records[0]
+                        ):
+                            from autovision.export.e2e_parity import (
+                                compare_detection_records,
+                            )
+
+                            report = compare_detection_records(
+                                reference_records,
+                                engine_records,
+                                box_tolerance_px={
+                                    "fp32": 1.0,
+                                    "fp16": 1.0,
+                                    "int8": 5.0,
+                                }[resolved_precision],
+                                score_tolerance={
+                                    "fp32": 1e-2,
+                                    "fp16": 5e-2,
+                                    "int8": 0.5,
+                                }[resolved_precision],
+                            )
+                            if not report.passed:
+                                raise RuntimeError(
+                                    "TensorRT end-to-end parity failed: "
+                                    f"{report.to_dict()}"
+                                )
+                            used_e2e = True
+                if not used_e2e:
+                    if resolved_precision == "int8":
+                        # int8 accepts a looser tensor-level contract; the
+                        # full-AP regression gate lives in measure_int8_accuracy.
+                        verify_engine_outputs(
+                            engine_path,
+                            expected,
+                            compare.cpu(),
+                            atol=atol,
+                            rtol=rtol,
+                        )
+                    else:
+                        verifier = getattr(self, "verify_onnx_export_outputs", None)
+                        if callable(verifier):
+                            verifier(expected, actual)
+                        else:
+                            verify_engine_outputs(
+                                engine_path,
+                                expected,
+                                compare.cpu(),
+                                atol=atol,
+                                rtol=rtol,
+                            )
+            except Exception:
+                Path(engine_path).unlink(missing_ok=True)
+                raise
 
         # The intermediate ONNX is not the delivered artifact: only the
         # engine gets a postprocess sidecar.
@@ -760,6 +895,7 @@ class ONNXExportMixin(nn.Module):
                 _drop(int8_onnx.with_suffix(".fp32.onnx"))
                 if not keep_int8_onnx:
                     _drop(int8_onnx)
+            _verify_engine(engine)
             _maybe_write_postprocess_spec(self, engine)
             if not keep_int8_onnx:
                 # export_onnx_int8 wrote the staged ONNX sidecar; the engine
@@ -781,6 +917,7 @@ class ONNXExportMixin(nn.Module):
             verbose=verbose,
             debug=debug,
         )
+        _verify_engine(engine)
         _maybe_write_postprocess_spec(self, engine)
         return engine
 

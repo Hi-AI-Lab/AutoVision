@@ -53,6 +53,7 @@ _TAG_SHA256 = _TAG_PREFIX + "sha256"
 _TAG_METADATA = _TAG_PREFIX + "metadata"
 
 _RESOURCE_ALREADY_EXISTS = "RESOURCE_ALREADY_EXISTS"
+_SIDECAR_SUFFIXES = (".modelcard.json", ".postprocess.json")
 
 
 def _strip_file_scheme(uri: str) -> Path:
@@ -157,9 +158,21 @@ class MLflowModelRegistry:
         name: str,
         version: str,
         to_stage: RegistryStage = "staging",
+        gates: list[Any] | None = None,
     ) -> RegistryEntry:
-        """Promote an entry one stage forward (dev -> staging -> prod)."""
+        """Promote an entry one stage forward (dev -> staging -> prod).
+
+        Artifact sidecars (model card / postprocess spec) are downloaded
+        alongside the model, so the same deployment gates as the filesystem
+        backend run against the promoted copy. ``gates=None`` applies the
+        default gates (fail-closed); ``gates=[]`` is an explicit audited
+        bypass.
+        """
         _validate_stage(to_stage)
+        if gates is None:
+            from autovision.registry.deployment_gates import default_gates
+
+            gates = default_gates()
         if to_stage == "dev":
             raise RegistryError("Cannot promote to 'dev'.")
         client = self.client
@@ -185,6 +198,17 @@ class MLflowModelRegistry:
                 f"Source artifact for '{name}' v{version} failed sha256 "
                 f"verification; promotion aborted."
             )
+        source_entry = _entry(name, source_mv, local)
+        failures: list[str] = []
+        for gate in gates:
+            gate_name = getattr(gate, "name", type(gate).__name__)
+            try:
+                problems = gate.check(source_entry)
+            except Exception as error:  # noqa: BLE001 - gate boundary
+                problems = [f"{type(error).__name__}: {error}"]
+            failures.extend(f"{gate_name}: {problem}" for problem in problems)
+        if failures:
+            raise RegistryError("Deployment gates failed: " + "; ".join(failures))
         metadata = _load_metadata(source_mv.tags)
         created = self._create_model_version(
             client,
@@ -208,7 +232,11 @@ class MLflowModelRegistry:
         _validate_stage(stage)
         client = self.client
         versions = self._search(client, name)
-        in_stage = [v for v in versions if v.tags.get(_TAG_STAGE) == stage]
+        in_stage = [
+            v
+            for v in versions
+            if _is_autovision_version(v) and v.tags.get(_TAG_STAGE) == stage
+        ]
         if not in_stage:
             raise RegistryError(f"No versions of '{name}' in '{stage}'.")
         if version is None:
@@ -220,6 +248,12 @@ class MLflowModelRegistry:
                     f"Registry entry '{name}' v{version} not found in '{stage}'."
                 )
         local = self._download(client, mv)
+        declared = mv.tags.get(_TAG_SHA256, "")
+        if declared and compute_file_sha256(local) != declared:
+            raise RegistryError(
+                f"MLflow artifact for '{name}' v{mv.version} failed sha256 "
+                "verification; refusing the read."
+            )
         return _entry(name, mv, local)
 
     def exists(
@@ -231,12 +265,17 @@ class MLflowModelRegistry:
         )
 
     def list_entries(self, stage: RegistryStage | None = None) -> list[RegistryEntry]:
-        """List entries, optionally filtered by stage."""
+        """List AutoVision entries, optionally filtered by stage.
+
+        MLflow registries may hold unrelated models: versions without the
+        framework tags are skipped rather than raising ``KeyError``.
+        """
         versions = self._search(self.client)
         entries = [
             _entry(v.name, v, _strip_file_scheme(v.source))
             for v in versions
-            if stage is None or v.tags.get(_TAG_STAGE) == stage
+            if _is_autovision_version(v)
+            and (stage is None or v.tags.get(_TAG_STAGE) == stage)
         ]
         entries.sort(
             key=lambda e: (e.name, MODEL_STAGES.index(e.stage), e.version)
@@ -263,6 +302,10 @@ class MLflowModelRegistry:
         run = client.create_run(experiment_id)
         try:
             client.log_artifact(run.info.run_id, str(source))
+            for suffix in _SIDECAR_SUFFIXES:
+                sidecar = Path(str(source) + suffix)
+                if sidecar.is_file():
+                    client.log_artifact(run.info.run_id, str(sidecar))
         except Exception as error:  # noqa: BLE001
             raise RegistryError(
                 f"MLflow backend error while logging artifact '{source}': {error}"
@@ -316,16 +359,22 @@ class MLflowModelRegistry:
 
     @staticmethod
     def _download(client: Any, mv: Any) -> Path:
-        """Materialize the model artifact locally (source of truth: MLflow)."""
+        """Materialize the model artifact and its sidecars locally."""
         if not mv.run_id:
             return _strip_file_scheme(mv.source)
         try:
-            return Path(client.download_artifacts(mv.run_id, _artifact_name(mv)))
+            local = Path(client.download_artifacts(mv.run_id, _artifact_name(mv)))
         except Exception as error:  # noqa: BLE001
             raise RegistryError(
                 f"MLflow backend error while downloading artifact for "
                 f"'{mv.name}' v{mv.version}: {error}"
             ) from error
+        for suffix in _SIDECAR_SUFFIXES:
+            try:
+                client.download_artifacts(mv.run_id, _artifact_name(mv) + suffix)
+            except Exception:  # noqa: BLE001 - sidecars are optional
+                continue
+        return local
 
 
 def _artifact_name(mv: Any) -> str:
@@ -342,9 +391,22 @@ def _validate_stage(stage: str) -> None:
 
 def _find(versions: list[Any], version: str, stage: str) -> Any | None:
     for mv in versions:
-        if mv.tags.get(_TAG_VERSION) == version and mv.tags.get(_TAG_STAGE) == stage:
+        if (
+            _is_autovision_version(mv)
+            and mv.tags.get(_TAG_VERSION) == version
+            and mv.tags.get(_TAG_STAGE) == stage
+        ):
             return mv
     return None
+
+
+def _is_autovision_version(mv: Any) -> bool:
+    """True for versions written by this backend (tags are complete)."""
+    return (
+        bool(mv.tags.get(_TAG_VERSION))
+        and mv.tags.get(_TAG_STAGE) in MODEL_STAGES
+        and bool(mv.tags.get(_TAG_SHA256))
+    )
 
 
 def _version_tags(

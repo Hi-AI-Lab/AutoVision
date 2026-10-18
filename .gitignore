@@ -16,6 +16,7 @@ env/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.autovision-cache/
 .coverage
 .coverage.*
 htmlcov/
@@ -23,6 +24,7 @@ htmlcov/
 # Experiment run artifacts (checkpoints, exports, logs)
 runs/
 output/
+smoke-report.json
 
 # Model / export artifacts
 *.pt

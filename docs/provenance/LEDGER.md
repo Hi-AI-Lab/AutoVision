@@ -18,6 +18,7 @@
 | `tasks/detection/picodet/` | [PaddleDetection PP-PicoDet](https://github.com/PaddlePaddle/PaddleDetection) | Apache-2.0 | 架构参考；AutoVision 实现 | README 致谢、NOTICE |
 | `tracking/byte_track.py` | [ByteTrack](https://github.com/ifzhang/ByteTrack)（ECCV 2022） | MIT（上游） | 算法参考；AutoVision 实现 | 文件头、README 致谢 |
 | `tasks/shared/sahi.py`、`tasks/shared/tiling_utils.py` | [SAHI](https://github.com/obss/sahi) | MIT（上游） | 算法参考；AutoVision 实现 | README 致谢 |
+| `visualize/effects.py`、`visualize/skeletons.py`、`geometry/boxes.py`、`geometry/masks.py`、`inference/video.py` | [Roboflow supervision 0.30](https://github.com/roboflow/supervision) | MIT | API/算法参考；AutoVision 实现（Pillow/NumPy 重写，不引入运行时依赖） | 文件头、NOTICE、THIRD_PARTY_LICENSES |
 | `encoders/rfdetr/`、`tasks/detection/rfdetr/` | [Roboflow RF-DETR](https://github.com/roboflow/rf-detr) / HF transformers | Apache-2.0 | wrapper；权重按需下载 | 模型卡、模型库 |
 
 ## 2. 已处置：DEIMv2（STA 删除）

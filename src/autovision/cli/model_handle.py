@@ -63,13 +63,18 @@ def _image_size(path: Path) -> tuple[int, int]:
         return handle.size
 
 
-def _record_to_jsonable(record: dict[str, Any]) -> dict[str, Any]:
-    output: dict[str, Any] = {}
-    for key, value in record.items():
-        output[key] = (
-            value.detach().cpu().tolist() if torch.is_tensor(value) else value
-        )
-    return output
+def _record_to_jsonable(
+    record: dict[str, Any],
+    *,
+    mask_format: str = "rle",
+    max_elements: int = 10_000,
+) -> dict[str, Any]:
+    """Serialize one prediction record with bounded, lossless mask payloads."""
+    from autovision.results import InferenceResult
+
+    return InferenceResult.from_record(record).to_json(
+        masks=mask_format, max_elements=max_elements
+    )
 
 
 def evaluate_object_detection(
@@ -332,14 +337,27 @@ def predict_to_files(
     threshold: float = 0.5,
     save_visuals: bool = True,
     class_names: dict[int, str] | None = None,
+    mask_format: str = "rle",
+    max_json_elements: int = 10_000,
 ) -> Path:
     """Run prediction over a file/directory and persist JSON (+ overlays).
 
-    Writes ``out_dir/predictions.json`` (one record per image with
-    ``bboxes``/``scores``/``labels`` as plain lists) and, when
-    ``save_visuals``, overlay PNGs under ``out_dir/visuals/``.
+    Writes ``out_dir/predictions.json`` (one record per image; detection
+    boxes stay plain lists, masks are COCO RLE by default) and, when
+    ``save_visuals``, task-aware overlay PNGs under ``out_dir/visuals/``.
+    ``mask_format`` is ``"rle"`` (default), ``"dense"`` or ``"none"``.
     """
     from autovision.visualize.detection import draw_prediction
+
+    if mask_format not in {"rle", "dense", "none"}:
+        raise AutoVisionError(
+            "mask_format must be 'rle', 'dense', or 'none', "
+            f"got {mask_format!r}."
+        )
+    if max_json_elements < 1:
+        raise AutoVisionError(
+            f"max_json_elements must be >= 1, got {max_json_elements}."
+        )
 
     network = (
         load_task_model(model, device="cpu")
@@ -364,10 +382,19 @@ def predict_to_files(
     records: list[dict[str, Any]] = []
     for path in paths:
         result = network.predict(path, threshold=threshold)
-        records.append({"image": str(path), **_record_to_jsonable(result)})
+        records.append(
+            {
+                "image": str(path),
+                **_record_to_jsonable(
+                    result,
+                    mask_format=mask_format,
+                    max_elements=max_json_elements,
+                ),
+            }
+        )
         if save_visuals:
             visuals_dir.mkdir(exist_ok=True)
             rendered = draw_prediction(path, result, class_names=class_names)
             rendered.save(visuals_dir / f"{path.stem}_pred.png")
-    (out_dir / "predictions.json").write_text(json.dumps(records, indent=2))
+    (out_dir / "predictions.json").write_text(json.dumps(records, indent=2, allow_nan=False))
     return out_dir

@@ -198,6 +198,111 @@ class TestRandomSearch:
         assert calls["count"] == after_first  # nothing re-run
         assert all(record.status == "reused" for record in second.trials)
         assert [r.params for r in first.trials] == [r.params for r in second.trials]
+        # Every metrics file is backed by a matching provenance sidecar.
+        for index in range(3):
+            meta_path = tmp_path / "reuse" / f"trial_{index:03d}" / "metrics.json.meta.json"
+            meta = json.loads(meta_path.read_text())
+            assert meta["schema_version"] == 1
+            assert meta["params"] == first.trials[index].params
+            assert meta["steps"] == 2
+            assert meta["fingerprint"]
+
+    def test_changed_params_or_budget_rerun_instead_of_reusing(self, tmp_path):
+        calls = {"count": 0}
+
+        def trial(params, steps, run_dir):
+            calls["count"] += 1
+            return {"val_metric/map_50": float(params["x"]) * 10.0 + steps}
+
+        out_dir = tmp_path / "changed"
+        first = run_search(
+            trial, SearchSpace.from_mapping({"x": [1]}), out_dir,
+            strategy="grid", trials=1, budget=3, objective="val_metric/map_50",
+        )
+        assert first.trials[0].status == "ok"
+        assert first.trials[0].metrics["val_metric/map_50"] == 13.0
+
+        # Same out_dir, changed space (x=1 -> x=2): the old metrics belong
+        # to another trial and MUST be re-run, never reported as "reused".
+        second = run_search(
+            trial, SearchSpace.from_mapping({"x": [2]}), out_dir,
+            strategy="grid", trials=1, budget=3, objective="val_metric/map_50",
+        )
+        assert calls["count"] == 2
+        assert second.trials[0].status == "ok"
+        assert second.trials[0].metrics["val_metric/map_50"] == 23.0
+        assert json.loads((out_dir / "trial_000" / "metrics.json").read_text()) == {
+            "val_metric/map_50": 23.0
+        }
+        meta_path = out_dir / "trial_000" / "metrics.json.meta.json"
+        meta = json.loads(meta_path.read_text())
+        assert meta["schema_version"] == 1
+        assert meta["params"] == {"x": 2}
+        assert meta["steps"] == 3
+        assert meta["fingerprint"]
+
+        # A changed budget alone is also a different reuse key.
+        third = run_search(
+            trial, SearchSpace.from_mapping({"x": [2]}), out_dir,
+            strategy="grid", trials=1, budget=4, objective="val_metric/map_50",
+        )
+        assert calls["count"] == 3
+        assert third.trials[0].status == "ok"
+        assert third.trials[0].metrics["val_metric/map_50"] == 24.0
+        assert json.loads(meta_path.read_text())["steps"] == 4
+
+    def test_missing_sidecar_reruns_and_overwrites_legacy_metrics(self, tmp_path):
+        calls = {"count": 0}
+
+        def trial(params, steps, run_dir):
+            calls["count"] += 1
+            return {"val_metric/map_50": float(calls["count"])}
+
+        space = SearchSpace.from_mapping({"x": [1]})
+        out_dir = tmp_path / "legacy"
+        run_search(trial, space, out_dir, strategy="grid", trials=1, budget=1)
+        meta_path = out_dir / "trial_000" / "metrics.json.meta.json"
+        assert meta_path.exists()
+        meta_path.unlink()  # simulate a run directory written before sidecars
+
+        result = run_search(trial, space, out_dir, strategy="grid", trials=1, budget=1)
+        assert calls["count"] == 2
+        assert result.trials[0].status == "ok"  # re-run, not reused
+        assert result.trials[0].metrics["val_metric/map_50"] == 2.0
+        assert json.loads((out_dir / "trial_000" / "metrics.json").read_text()) == {
+            "val_metric/map_50": 2.0
+        }
+        assert meta_path.exists()
+
+    def test_failed_rerun_leaves_no_usable_sidecar(self, tmp_path):
+        state = {"fail": False, "value": 1.0}
+
+        def trial(params, steps, run_dir):
+            if state["fail"]:
+                raise RuntimeError("boom")
+            return {"val_metric/map_50": state["value"]}
+
+        out_dir = tmp_path / "failed_rerun"
+        run_search(trial, SearchSpace.from_mapping({"x": [1]}), out_dir,
+                   strategy="grid", trials=1, budget=1)
+        meta_path = out_dir / "trial_000" / "metrics.json.meta.json"
+        assert meta_path.exists()
+
+        # The changed trial rejects the old cache, then fails: the sidecar
+        # must be gone so no later run can treat the stale metrics as valid.
+        state["fail"] = True
+        failed = run_search(trial, SearchSpace.from_mapping({"x": [2]}), out_dir,
+                            strategy="grid", trials=1, budget=1)
+        assert failed.trials[0].status == "failed"
+        assert not meta_path.exists()
+        # The old (x=1) metrics file survives, but without a sidecar it is
+        # not reused: the old trial re-runs and overwrites it.
+        state.update(fail=False, value=5.0)
+        recovered = run_search(trial, SearchSpace.from_mapping({"x": [1]}), out_dir,
+                               strategy="grid", trials=1, budget=1)
+        assert recovered.trials[0].status == "ok"
+        assert recovered.trials[0].metrics["val_metric/map_50"] == 5.0
+        assert meta_path.exists()
 
     def test_corrupt_metrics_file_reruns_instead_of_crashing(self, tmp_path):
         calls = {"count": 0}
@@ -269,6 +374,51 @@ class TestAsha:
             assert (tmp_path / "asha" / "trial_000" / f"metrics.rung{rung}.json").exists()
         report = result.report_md.read_text()
         assert "策略 asha" in report
+
+    def test_changed_budget_ladder_reruns_stale_rungs(self, tmp_path):
+        calls: dict[tuple[str, int], int] = {}
+
+        def trial(params, steps, run_dir):
+            key = (run_dir.name, steps)
+            calls[key] = calls.get(key, 0) + 1
+            return {"val_metric/map_50": 10.0 - float(params["x"])}
+
+        space = SearchSpace.from_mapping({"x": [1, 2]})
+        out_dir = tmp_path / "asha_budget"
+        first = run_search(
+            trial, space, out_dir,
+            strategy="asha", trials=2, budget=2, asha_max_budget=6, asha_eta=3,
+            objective="val_metric/map_50", seed=0,
+        )
+        # Ladder 2 -> 6: two configs at rung 0, the best one promoted.
+        promoted = [record for record in first.trials if record.rung == 1]
+        assert len(promoted) == 1
+        assert calls[(Path(promoted[0].run_dir).name, 6)] == 1
+
+        # The identical ladder reuses every rung (idempotence preserved).
+        run_search(
+            trial, space, out_dir,
+            strategy="asha", trials=2, budget=2, asha_max_budget=6, asha_eta=3,
+            objective="val_metric/map_50", seed=0,
+        )
+        assert all(count == 1 for count in calls.values())
+
+        # eta 3 -> 2 changes the promoted rung's budget (6 -> 4): its stale
+        # rung-1 metrics must re-run even though params are unchanged.
+        second = run_search(
+            trial, space, out_dir,
+            strategy="asha", trials=2, budget=2, asha_max_budget=6, asha_eta=2,
+            objective="val_metric/map_50", seed=0,
+        )
+        assert all(record.status == "reused" for record in second.trials if record.rung == 0)
+        second_rung1 = [record for record in second.trials if record.rung == 1]
+        assert len(second_rung1) == 1
+        assert second_rung1[0].status == "ok"  # re-run, not reused
+        rung1_dir = Path(second_rung1[0].run_dir)
+        assert calls[(rung1_dir.name, 4)] == 1
+        meta = json.loads((rung1_dir / "metrics.rung1.json.meta.json").read_text())
+        assert meta["steps"] == 4
+        assert meta["fingerprint"]
 
     def test_promotion_resumes_against_the_real_training_entry(self, tmp_path):
         """Regression (review blocker): a promoted rung resumes the real run.

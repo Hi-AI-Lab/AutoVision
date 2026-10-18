@@ -12,8 +12,11 @@ engine, so the hpo driver never sets it) — a rung's read is a genuine
 longer-training read, not a retrain from scratch.
 
 Per-rung metrics land in ``metrics.rung<r>.json`` inside the trial's run
-dir (``metrics.json`` mirrors the latest rung), which is also the resume
-key: an interrupted search re-enters at the rung it lost.
+dir (``metrics.json`` mirrors the latest rung). Every metrics file has a
+``<name>.meta.json`` provenance sidecar whose fingerprint over params +
+budget is the reuse key: an interrupted search re-enters at the rung it
+lost, while a changed space, budget or eta re-runs the stale rung instead
+of reusing it.
 
 Ray Tune users: the same ``trial_fn`` can be handed to
 ``ray.tune`` with an ``ASHAScheduler`` if that stack is preferred — this
@@ -33,6 +36,9 @@ from autovision.hpo.search import (
     TrialFn,
     TrialRecord,
     _finalize,
+    _metadata_path,
+    _metadata_payload,
+    _write_metadata_atomic,
     run_trial,
 )
 
@@ -107,8 +113,13 @@ def run_asha(
                 if record.status in ("ok", "reused"):
                     # Only a completed rung mirrors into metrics.json (a
                     # failed rung's empty dict would poison later reuse).
+                    # The mirror carries the same provenance sidecar as the
+                    # rung file so a later run cannot mistake it for a match.
                     metrics_path = Path(record.run_dir) / "metrics.json"
                     metrics_path.write_text(json.dumps(record.metrics, indent=2))
+                    _write_metadata_atomic(
+                        _metadata_path(metrics_path), _metadata_payload(record)
+                    )
                 all_records.append(record)
                 rung_records.append(record)
                 handle.write(json.dumps(record.to_json()) + "\n")

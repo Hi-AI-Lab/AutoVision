@@ -13,7 +13,7 @@ Python API 与 `autovision-cli`（30 条命令）共享同一套 Pydantic 严格
 - **可验证一致性**：导出默认数值对拍门禁；已接入的官方权重加载 / 前向逐位对拍；金标准 loss 轨迹快照。
 - **协议化基准**：[基准表](docs/benchmarks.md)只引官方发表值；自家数字必附复现脚本；只增不改并附勘误节。
 
-文档：[模型库](docs/model_zoo.md) · [权重下载](docs/download_weights.md) · [基准](docs/benchmarks.md) ·
+文档：[任务示例](docs/task_examples.md) · [模型库](docs/model_zoo.md) · [权重下载](docs/download_weights.md) · [基准](docs/benchmarks.md) ·
 [架构总览](docs/framework_design.md) · [导出与部署](docs/export.md) ·
 [插件协议](docs/plugins.md) · [私有注册表](docs/registry.md) ·
 [合规报告](docs/compliance.md) · [硬件伙伴包](docs/hardware_packs.md) ·
@@ -29,9 +29,9 @@ Python API 与 `autovision-cli`（30 条命令）共享同一套 Pydantic 严格
 
 ## 安装
 
-Python ≥ 3.10。当前尚未上传 PyPI；以下源码安装是可用路径。PyPI 发行名
-`autovision-framework` 已预留（import 名仍是 `autovision`），首次发布后下述 PyPI
-命令才会生效。
+Python ≥ 3.10。源码安装是当前可用路径；PyPI 发布后可用
+`pip install autovision-framework`。发行名计划使用 `autovision-framework`
+（import 名仍是 `autovision`）。
 
 从源码安装（在仓库根目录执行）：
 
@@ -153,6 +153,17 @@ autovision-cli predict model=runs/det1/exported_models/exported_best.pt images=d
 | 深度 | `train_depth_estimation` / `train-depth-estimation` | `gtr/s` | images + depths（`.npy` 米或 16-bit PNG） | `gtr` extra；官方权重需 `download` |
 | 分类 | `train_image_classification` / `train-image-classification` | `torchvision/resnet18` | ImageFolder `train/`、`val/` | — |
 
+每个任务都有“纯推理 + 训练”两个示例（推理加载现有权重，训练默认生成合成数据；
+`--dry-run` 只打印数据契约）：
+
+```bash
+python examples/tasks/detection.py                  # 推理，不训练
+python examples/tasks/instance_segmentation_train.py --dry-run
+python examples/tasks/yolo/detection.py             # 可选 AGPL YOLO 基线
+```
+
+完整列表见 [任务示例](docs/task_examples.md) / `examples/tasks/README.md`。
+
 `dinov2/eomt` 与 GTR 模型分别依赖 DINOv2 权重与 GTR 官方权重；离线或受限网络
 环境请使用 `-notpretrained` 变体、本地 checkpoint，或先按许可说明设置权重门控。
 GTR 官方权重可用 `scripts/download_gtr_assets.py` 下载。
@@ -224,8 +235,9 @@ autovision.train_semantic_segmentation(
   隔离）、dinov2、dinov3、rfdetr）+ 树内 `rtdetr/*`、`detr/*`、`dfine/*`、
   `picodet/*`、`rfdetr/*`、`gtr/*` 装配，覆盖检测、分割、姿态、深度、分类。
 - **训练与数据**：自监督预训练（DINO / DINOv2 / DINOv3、SimCLR、DetCon 等）、
-  蒸馏、DDP / 混合精度 / 原子 checkpoint + resume；mmap 文件清单与 VOC / YOLO
-  转换。
+  蒸馏、DDP / 混合精度 / 原子 checkpoint + resume；每次训练在输出目录写
+  `run_manifest.json`（命令 / git commit / 环境白名单 / 依赖版本 / GPU）；
+  mmap 文件清单与 VOC / YOLO 转换。
 - **部署与闭环**：ONNX / TensorRT / OpenVINO + 数值对拍；伪标注、误差分析、HPO、
   内容寻址快照，均带 CLI。
 
@@ -405,26 +417,84 @@ autovision-cli predict model=exported_best.pt source=clip.mp4 out=preds/ track=t
 JSONL 逐帧增加 `tracks`（`track_id` / `bbox` / `score` / `class_id` / `age`），
 渲染画面标注 `#id 类别 分数`，汇总带唯一 id 数；API 侧 `run_stream(..., track=True)`。
 
+区域统计（`track=True`）：`LineZone(start, end)` 统计定向穿越 in/out（按类别），
+`PolygonZone(points)` 统计当前区域内目标数；结果写入 JSONL 的 `zones` 并叠加到
+渲染画面。`smooth=True` 对每条轨迹的框做滑动平均（仅影响渲染，JSONL 保留原始
+预测）。单路 `run_stream` 采用 reader / infer / writer 三段式管线，返回
+`decode_s` / `infer_s` / `render_s` / `write_s` 与端到端 FPS。
+
+```python
+from autovision.tracking import LineZone, PolygonZone
+from autovision.inference import run_stream
+
+run_stream("clip.mp4", "preds/", model="best.pt", track=True,
+           line_zones=[LineZone((0, 360), (1280, 360), name="gate")],
+           polygon_zones=[PolygonZone([(0, 0), (640, 0), (640, 720), (0, 720)], name="left")],
+           smooth=True)
+```
+
 </details>
 
 <details>
-<summary>参考 serving（FastAPI：/predict、/healthz、/metrics）</summary>
+<summary>参考 serving（FastAPI：/predict、/healthz、/readyz、/drift、/metrics）</summary>
 
-需要 `.[serving]`，属参考实现而非生产网关：
+需要 `.[serving]`，属参考实现而非完整生产网关：
 
 ```bash
 autovision-cli serve model=exported_best.pt port=8000
+# 可选加固：API key（推荐用环境变量，避免进入 shell history）+ 上限 + 并发闸门
+export AUTOVISION_SERVING_API_KEY="$SERVE_KEY"
+autovision-cli serve model=exported_best.pt port=8000 \
+    max_body_bytes=8388608 max_image_pixels=40000000 max_concurrency=1
+# TLS + 2 个 uvicorn worker（多 worker 要求 model= 是路径）
+autovision-cli serve model=exported_best.pt port=8443 workers=2 \
+    ssl_keyfile=key.pem ssl_certfile=cert.pem
+# 进程内限流（每 worker 一份桶；全局配额放网关）
+autovision-cli serve model=exported_best.pt rate_limit_per_minute=600 \
+    rate_limit_burst=20
 ```
 
 - `POST /predict`：`{"images": ["<base64>", ...]}`（或单张 `{"image": ...}`），
-  批处理按输入顺序返回，前后处理与评测同源；
-- `GET /healthz`：后端 / 模型 / threshold；
-- `GET /metrics`：Prometheus 文本（请求数 / 错误数 / 图片数 / 延迟 summary）。
+  批处理按输入顺序返回，前后处理与评测同源；推理在线程池执行，不阻塞事件循环；
+- `GET /healthz`：liveness + 后端 / 模型 / threshold / variant；
+- `GET /readyz`：readiness（所有 variant 引擎可调用时 200，否则 503）；
+- `GET /drift`：预测分布 PSI（标签分布 + 分数直方图）；未配置基线时
+  `{"enabled": false}`，样本不足时 `status: insufficient_data`，超过阈值时
+  `status: drift`；
+- `GET /metrics`：Prometheus 文本（请求数 / 错误数 / 图片数 / 延迟 summary /
+  variant 请求数 / drift PSI）。
+- 防护：`api_key=` 开启 Bearer / `X-API-Key` 常量时间校验；`max_body_bytes`
+  在流式读取时限制请求体；`max_image_pixels` 在解码前拒绝解压炸弹；
+  `max_concurrency` 默认 1（TensorRT/OpenVINO runner 非线程安全）。
+  `trust_proxy_headers=true` 只在可信反向代理后面使用（否则客户端可伪造
+  `X-Forwarded-For` 绕过按 IP 限流）。
+- 每个响应带 `X-Request-ID`（可用同名请求头透传）与 `variant`（A/B/canary）。
+
+**A/B / canary（Python API）**：
+
+```python
+from autovision.serving import build_drift_baseline, create_app
+
+app = create_app(
+    variants={"stable": stable_engine, "canary": canary_engine},
+    variant_weights={"stable": 0.95, "canary": 0.05},   # 5% canary
+    drift_baseline="drift_baseline.json",               # 可选
+)
+# 基线由参考预测构建：
+# build_drift_baseline(reference_records).save("drift_baseline.json")
+```
+
+变体按请求 ID 稳定哈希分流；客户端可传 `X-Request-ID` 做粘性分流，
+`X-AB-Variant: stable|canary` 可强制指定（测试/回滚；生产网关可按需剥离该头）。
+每个 variant 的请求数与延迟在 `/metrics` 单独计数。
 
 </details>
 
-**边界**：不提供鉴权、TLS、多进程编排；漂移检测 / A-B / 金丝雀不在范围内——
-`/metrics` 是它们的起点，按产品需求在其上构建。
+**边界**：已提供 TLS、多 worker、进程内限流、分布漂移与 A/B/canary 分流；
+限流桶与漂移窗口在多 worker 下各自独立（跨 worker 聚合需指标后端/网关）；
+`/drift` 是服务级聚合（A/B 混合流量会混合分布，按 variant 分析需拆分实例或
+在指标后端按 variant 聚合）；全局配额、告警/值班、A/B 统计显著性与金丝雀
+自动回滚仍属生产网关/平台职责。
 
 ## 进阶功能
 
@@ -452,6 +522,13 @@ print(result.exported_model_path, result.metrics)
 检测模型另有 `predict_sahi(image, tile_size, overlap, threshold, ...)`（默认 tile
 取模型输入尺寸，全图 resize 视图作全局瓦片一并推理）。
 
+- `batch_size=N` 限制单次前向的视图数（全局 + tile），避免高分辨率图一次堆叠全部
+  tile 的显存峰值；`None` 保留原单批语义。
+- `merge="nmm"` 对重叠碎片做非极大值合并（并集框 + 面积加权分数），适合被切断 /
+  相邻目标；默认 `"nms"`。
+- `overlap_metric="ios"` 用 Intersection-over-Smaller 判定嵌套框，默认 `"iou"`。
+- tile 之间在合并前统一做 per-label 过滤，重叠区重复框不会漏到全局阶段。
+
 </details>
 
 <details>
@@ -472,6 +549,36 @@ autovision-cli data-snapshot snapshot=coco8.snap.json spec=copied.yaml  # 迁移
 spec 文件所在目录解析（与训练入口同一规则；快照记录该基准目录，换 CWD 校验不会
 漂移）；`out` 已存在时报错，需显式 `overwrite=true`；`snapshot=... deep=true` 只对
 deep 快照有效——浅快照会明确报错，避免「内容校验」空转。
+
+</details>
+
+<details>
+<summary>早停与训练回调（task training）</summary>
+
+早停通过 `trainer_args` 暴露，和验证节奏一起配置：
+
+```bash
+autovision-cli train-object-detection ... \
+    trainer_args='{"val_every_num_steps": 500, "early_stopping_patience": 5, "early_stopping_min_delta": 0.001}'
+```
+
+`early_stopping_patience` 是「连续多少次验证没有超过 `best + min_delta`」；
+触发时引擎保存 latest checkpoint（即使不是计划保存步），`TaskTrainResult`
+返回 `stopped_early` / `stop_step`。必须同时配置 `val_every_num_steps`
+和验证集，否则配置阶段直接报错。
+
+Python API 还支持训练回调（rank 0 执行，异常只告警、不中断训练）：
+
+```python
+class MyCallback:
+    def on_train_start(self, steps, out_dir): ...
+    def on_step_end(self, step, log_dict): ...
+    def on_validation_end(self, step, metrics): ...
+    def on_early_stop(self, step, best_metric, patience): ...
+    def on_train_end(self, result): ...
+
+engine.fit_task(..., callbacks=[MyCallback()])
+```
 
 </details>
 
@@ -566,7 +673,7 @@ autovision-cli train-object-detection out=runs/longtail data=coco.yaml \
 ```
 
 误差分析（TP/FP/FN 匹配、FP 归因 duplicate/classification/localization/background、
-按类别与 COCO 面积分档切片、top-FP/FN 可视化画廊）：
+混淆矩阵、按类别与 COCO 面积分档切片、top-FP/FN 可视化画廊）：
 
 ```bash
 autovision-cli analyze-errors model=best.pt data=coco.yaml out=report/ iou=0.5 top_k=5 threshold=0.3
@@ -614,6 +721,9 @@ AutoVision 的架构与实现受益于以下开源工作。代码 lineage 与修
 - **跟踪 / 切片**：[ByteTrack](https://github.com/ifzhang/ByteTrack)（ECCV
   2022，MIT）、[SAHI](https://github.com/obss/sahi)（MIT）提供了算法参考；
   本仓库为 AutoVision 实现。
+- **可视化 / 视频工具**：[Roboflow supervision](https://github.com/roboflow/supervision)
+  （MIT）提供了增强标注器、骨架注册表、框/mask/polygon 工具与视频 sink 的
+  API/算法参考；本仓库为 AutoVision 实现，不引入 supervision 运行时依赖。
 - **推理 / 训练工具**：PyTorch、torchvision、HuggingFace Transformers、
   ONNX Runtime、NVIDIA TensorRT、OpenVINO、FastAPI、MLflow、
   Weights & Biases、TensorBoard。
@@ -628,9 +738,11 @@ AutoVision 的架构与实现受益于以下开源工作。代码 lineage 与修
 ## 开发
 
 ```bash
-pip install -e ".[dev,export]"   # CI 同款
-pytest tests                     # 2100+ 个测试（含金标准 loss 轨迹快照）
+pip install -e ".[dev,export,serving,video,transformers]"   # CI 同款测试依赖
+pytest tests                     # 2500+ 个测试（含金标准 loss 轨迹快照）
 ruff check src tests scripts     # lint（规则集见 pyproject.toml）
+bandit -r src/autovision -ll -ii -q   # SAST（medium/high）
+python scripts/smoke_enterprise.py --json /tmp/smoke.json   # 企业冒烟
 python scripts/check_provenance.py && python scripts/check_layering.py   # CI 门禁
 python scripts/check_docs_links.py && mkdocs build --strict              # 文档门禁（需 .[docs]）
 ```
@@ -639,8 +751,10 @@ python scripts/check_docs_links.py && mkdocs build --strict              # 文�
 - 真实 `from_pretrained` 的测试默认跳过，`AUTOVISION_HF_TESTS=1` 开启（timm 权重下载测试同门控）。
 - 多进程 DDP 测试：`AUTOVISION_DDP_TESTS=1 pytest tests/test_torchrun_distributed.py`。
 - TensorRT int8 引擎构建测试（慢，需 tensorrt + CUDA）：`AUTOVISION_TRT_TESTS=1 pytest tests/test_trt_int8.py`。
+- 私有用户自持权重集成测试（需本地 store）：`AUTOVISION_USER_HELD_TESTS=1 pytest tests/test_user_held_detr_assets.py`。
 - 贡献入口：[CONTRIBUTING.md](CONTRIBUTING.md)（环境 / 门禁 / 许可与溯源红线）；
-  发布与版本政策 [docs/release_process.md](docs/release_process.md)；变更记录 [CHANGELOG.md](CHANGELOG.md)。
+  发布与版本政策 [docs/release_process.md](docs/release_process.md)；变更记录 [CHANGELOG.md](CHANGELOG.md)；
+  安全漏洞披露见 [SECURITY.md](SECURITY.md)（请勿公开 issue）。
 - 文档：模型库（许可 / sha256 / 官方指标 / 加载代码）[docs/model_zoo.md](docs/model_zoo.md)
   （由 `scripts/gen_model_zoo.py` 从注册表机器生成）；as-built 架构总览
   [docs/framework_design.md](docs/framework_design.md)；基准表与口径协议
@@ -650,8 +764,12 @@ python scripts/check_docs_links.py && mkdocs build --strict              # 文�
 
 ## 已知限制
 
-- 定位：训练 + 参考推理框架；serving 是参考实现，不提供鉴权、TLS、多进程编排，
-  漂移检测 / A-B / 金丝雀不在范围内。
+- 定位：训练 + 参考推理框架；serving 支持可选 API key、请求体/像素上限与
+  `/readyz`，但仍不提供 TLS、多进程编排、限流；漂移检测 / A-B / 金丝雀不在范围内。
+- `16-mixed` 在 CUDA/NPU 上走 `GradScaler`（实例状态随 checkpoint 恢复）；
+  确定性训练需显式 `AUTOVISION_DETERMINISTIC=1`，部分算子无确定性实现会报错。
+- 内置 COCO/VOC 数据集条目未钉官方 sha256；如需强制完整性，设置
+  `AUTOVISION_REQUIRE_DATASET_HASHES=1` 并使用带摘要的镜像条目。
 - GTR 模型（含 `detr/gtrvit-*`）不可导出 ONNX / TensorRT（GLA 自定义 CUDA 核无
   ONNX 降级，导出入口以明确错误拒绝）。
 - 动态 H/W 不支持 HF 骨干（`detr/dinov2-*`、`detr/dinov3-*`）；ONNX FP16 parity

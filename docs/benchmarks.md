@@ -113,7 +113,7 @@ parity 与导出侧同一 `verify_onnx_export_outputs` 契约（比较输入为*
 时内置"第二尺寸 parity 探针"通过；legacy（TorchScript）导出器的动态尺寸图为
 "假动态"（尺寸被烘成常量，其他尺寸触发 ORT broadcast 错误），已被门禁拒绝并
 改为 fail-closed（含 `input_dynamic_shapes` 规格标记路径）。int8 ONNX↔fp32 的
-QDQ 对拍读数与折叠记录见 gap-analysis §3.6。
+QDQ 对拍读数由 `scripts/measure_int8_accuracy.py` 复现。
 
 ### 2.3 四后端同尺寸复测（2026-10-17，P1 部署广度第二轮）
 

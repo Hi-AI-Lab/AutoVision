@@ -54,17 +54,18 @@ autovision-cli predict model=runs/det1/exported_models/exported_best.pt source=c
 
 ## 安装
 
-Python ≥ 3.10。当前尚未上传 PyPI；使用源码安装（模型包按 extras 惰性加载，缺失时
+Python ≥ 3.10。源码安装是当前可用路径；PyPI 发布后可用
+`pip install autovision-framework`（模型包按 extras 惰性加载，缺失时
 对应清单为空而不是报错）：
 
 ```bash
 pip install -e ".[transformers,timm,export]"    # 常用: HF 骨干 + timm + ONNX 导出
 pip install -e ".[rfdetr,export]"               # 预训练 RF-DETR 直接推理
 pip install -e ".[video]"                       # 参考推理运行时(视频/RTSP, OpenCV)
-pip install -e ".[dev]"                         # 开发(pytest / ruff, CI 同款)
+pip install -e ".[dev,export,serving,video,transformers]"  # 开发/全量测试
 ```
 
-PyPI 发行名 `autovision-framework` 已预留，首次发布后可用。
+PyPI 发行名计划使用 `autovision-framework`，发布后可用。
 
 GTR 全族（MIT）需要 `gtr` extra；完整 extras 表见仓库 README。预训练权重从
 HuggingFace 下载，受限网络可设镜像；**受限许可权重默认不下载**（DINOv2
@@ -80,8 +81,8 @@ CC-BY-NC 4.0 / DINOv3 License 需显式自证接受条款），许可边界见�
 | 数据 / 变换 | 11 类数据集；mmap 文件清单（内容指纹 / 原子发布）；检测增广全套（mosaic / mixup / copyblend / box-aware eraser）；VOC / YOLO-pose / YOLO-seg 转换 + COCO 合并 |
 | 预训练方法 | DistillationV3、SimCLR、DINO、DINOv2、DINOv3、DenseCL、DetCon B/S、训练中 kNN 探针 |
 | 运行时 | DDP、混合精度、原子 checkpoint + resume、NaN 捕获、JSONL / TB / MLflow / W&B、OTel（opt-in） |
-| 任务层 | 8 个任务面；任务指标支持跨 rank 汇聚（DDP 验证）；误差分析（FP 归因 + top-FP/FN 画廊）+ 伪标注 / 自训练闭环；超参搜索（随机 / 网格 / ASHA + 报告） |
-| 部署 | ONNX（FP16 黑名单 + 数值对拍门禁）、TensorRT、int8 QDQ、benchmark 三后端 parity、参考推理运行时（视频 / RTSP + batch，同源前后处理；可选 ByteTrack 跟踪）、参考 serving（FastAPI + /metrics） |
+| 任务层 | 8 个任务面；任务指标支持跨 rank 汇聚（DDP 验证）；误差分析（FP 归因 + 混淆矩阵 + top-FP/FN 画廊）+ 伪标注 / 自训练闭环；超参搜索（随机 / 网格 / ASHA + 报告）；任务感知可视化（框 / mask / 旋转框 / 姿态 / 语义与全景分割 / 深度） |
+| 部署 | ONNX（FP16 黑名单 + 数值对拍门禁）、TensorRT、int8 QDQ、benchmark 三后端 parity、参考推理运行时（视频 / RTSP + 三段式管线 + batch，同源前后处理；可选 ByteTrack 跟踪、LineZone / PolygonZone 计数、轨迹平滑；mask 默认 RLE）、参考 serving（FastAPI + TLS/多 worker + 限流 + 漂移 + A/B + `/metrics`） |
 
 各模型的许可 / sha256 / 官方指标 / 一行加载代码见[模型库](model_zoo.md)。
 

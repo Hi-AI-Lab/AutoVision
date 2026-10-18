@@ -25,7 +25,6 @@ from autovision.geometry.box_ops import (
     elementwise_siou,
     generalized_box_iou_loss,
 )
-from autovision.runtime.distributed import reduce_dict
 from autovision.tasks.detection.shared.denoising import (
     get_cdn_matched_indices,
 )
@@ -361,4 +360,7 @@ class RTDETRCriterionV2(nn.Module):
                 weights[f"{key}_enc_{enc_index}"] = value
         total = sum(losses[key] * weight for key, weight in weights.items() if key in losses)
         losses["loss"] = total
-        return reduce_dict(losses, average=False)
+        # Keep the loss graph-attached: DDP averages gradients across ranks,
+        # so the training loss must not be all-reduced/detached here.
+        # ``reduce_dict`` is for logging only and would break backward.
+        return losses

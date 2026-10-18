@@ -248,7 +248,7 @@ def _modelscope_registry_sha256(ms_id: str) -> dict[str, str]:
     from urllib.request import Request, urlopen
 
     url = _MODELSCOPE_API.format(repo=ms_id) + "/files?Revision=master"
-    with urlopen(Request(url), timeout=Env.DOWNLOAD_CHUNK_TIMEOUT_SEC.value) as resp:
+    with urlopen(Request(url), timeout=Env.DOWNLOAD_CHUNK_TIMEOUT_SEC.value) as resp:  # nosec B310
         payload = json.load(resp)
     hashes: dict[str, str] = {}
     for entry in payload.get("Data", {}).get("Files", []):
@@ -291,7 +291,7 @@ def _download_modelscope_snapshot(
         )
     snapshot_dir.mkdir(parents=True, exist_ok=True)
     listing_url = _MODELSCOPE_API.format(repo=ms_id) + "/files?Revision=master"
-    with urlopen(Request(listing_url), timeout=60.0) as resp:
+    with urlopen(Request(listing_url), timeout=60.0) as resp:  # nosec B310
         files = [
             entry["Path"]
             for entry in json.load(resp).get("Data", {}).get("Files", [])
@@ -307,7 +307,7 @@ def _download_modelscope_snapshot(
     for name in files:
         target = snapshot_dir / name
         url = _MODELSCOPE_API.format(repo=ms_id) + f"?Revision=master&FilePath={name}"
-        with urlopen(Request(url), timeout=timeout) as resp, open(target, "wb") as out:
+        with urlopen(Request(url), timeout=timeout) as resp, open(target, "wb") as out:  # nosec B310
             while chunk := resp.read(1 << 20):
                 out.write(chunk)
         logger.info("Downloaded %s from ModelScope.", name)

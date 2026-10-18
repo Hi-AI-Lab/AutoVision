@@ -72,7 +72,10 @@ class GTRDepthEstimationTrain(TrainModel):
             ).squeeze(1)
         else:
             depth_for_loss = depth
-        return self._silog(depth_for_loss, gt), depth
+        # Return the GT-aligned map: validation metrics compare against the
+        # transformed GT (canvas resolution), so upsampling predictions back
+        # to the original frame here would make the shapes disagree.
+        return self._silog(depth_for_loss, gt), depth_for_loss
 
     def training_step(self, batch: dict, step: int) -> TaskStepResult:
         loss, _ = self._forward_loss(batch)
@@ -83,11 +86,6 @@ class GTRDepthEstimationTrain(TrainModel):
     @torch.no_grad()
     def validation_step(self, batch: dict, step: int) -> TaskStepResult:
         loss, depth = self._forward_loss(batch)
-        model = self.model
-        decoded = model.postprocess(
-            depth,
-            [{"orig_w": w, "orig_h": h} for w, h in batch["original_size"]],
-        )
         evaluator = self._evaluators.setdefault(
             "val",
             DepthMetricCollector(
@@ -95,10 +93,8 @@ class GTRDepthEstimationTrain(TrainModel):
                 max_depth=self.model_args.max_depth,
             ),
         )
-        evaluator.update(
-            torch.stack([item["depth"] for item in decoded]),
-            batch["depth"],
-        )
+        # Predictions and GT are both on the transformed canvas here.
+        evaluator.update(depth, batch["depth"])
         return TaskStepResult(
             loss=loss, log_dict={"val_loss/silog": float(loss.detach())}
         )

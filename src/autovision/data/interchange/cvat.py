@@ -3,9 +3,10 @@
 
 from __future__ import annotations
 
-import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
+
+from defusedxml import ElementTree as ET
 
 from autovision.data.interchange.common import CocoBuilder, polygon_area
 from autovision.errors import AutoVisionError
@@ -34,13 +35,23 @@ def _image_size(
     width, height = image.get("width"), image.get("height")
     if width is not None and height is not None:
         return int(float(width)), int(float(height))
+    if images_dir is None:
+        raise AutoVisionError(
+            f"CVAT image '{file_name}' has no width/height and no images_dir "
+            "was supplied; refusing to open an arbitrary path from the XML."
+        )
+    base = Path(images_dir).resolve()
     path = Path(file_name)
-    if images_dir is not None and not path.is_absolute():
-        path = images_dir / path
+    path = path if path.is_absolute() else base / path
+    resolved = path.resolve()
+    if resolved != base and base not in resolved.parents:
+        raise AutoVisionError(
+            f"CVAT image path '{file_name}' escapes images_dir '{base}'."
+        )
     try:
         from PIL import Image
 
-        with Image.open(path) as handle:
+        with Image.open(resolved) as handle:
             return int(handle.width), int(handle.height)
     except Exception as error:  # noqa: BLE001 - CVAT must provide a size
         raise AutoVisionError(

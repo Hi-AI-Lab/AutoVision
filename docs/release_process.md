@@ -32,7 +32,13 @@
 
    ```bash
    ruff check src tests scripts
+   bandit -r src/autovision -ll -ii -q
+   mypy src/autovision/errors.py src/autovision/runtime/env.py \
+       src/autovision/runtime/checkpoint.py src/autovision/runtime/fsdp.py \
+       src/autovision/config
    pytest tests -q
+   python scripts/smoke_enterprise.py --json smoke-report.json
+   # CI 的 core coverage gate（19 个测试文件，--cov-fail-under=30）见 ci.yml
    python scripts/check_provenance.py
    python scripts/check_layering.py
    python scripts/check_docs_links.py

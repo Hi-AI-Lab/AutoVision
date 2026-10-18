@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.metadata
+import re
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -27,22 +28,57 @@ DEFAULT_ALLOWLIST: frozenset[str] = frozenset(
     }
 )
 
-_ALIASES = {
-    "apache 2.0": "Apache-2.0",
-    "apache-2.0": "Apache-2.0",
-    "apache software license": "Apache-2.0",
-    "mit": "MIT",
-    "mit license": "MIT",
-    "bsd": "BSD-3-Clause",
-    "bsd-3-clause": "BSD-3-Clause",
-    "bsd 3-clause": "BSD-3-Clause",
-    "bsd-2-clause": "BSD-2-Clause",
-    "isc": "ISC",
-    "python software foundation license": "PSF-2.0",
-    "psf-2.0": "PSF-2.0",
-    "mozilla public license 2.0": "MPL-2.0",
-    "mpl-2.0": "MPL-2.0",
+# Explicit, case-insensitive alias table.  Keys are anchored regexes matched
+# with ``fullmatch`` (never substring search), so e.g. "permitted" cannot be
+# mistaken for MIT.  More specific patterns win.
+_ALIASES: dict[str, str] = {
+    # MIT family.
+    r"mit[\s-]+no[\s-]+attribution(?:[\s-]+licen[cs]e)?": "MIT-0",
+    r"mit[\s-]*0(?:\.0)?": "MIT-0",
+    r"(?:the[\s-]+)?mit(?:[\s-]+licen[cs]e)?": "MIT",
+    # BSD family.
+    r"(?:bsd[\s-]*2[\s-]*clause|simplified[\s-]+bsd|freebsd)" r"(?:[\s-]+licen[cs]e)?": "BSD-2-Clause",
+    r"(?:bsd[\s-]*3[\s-]*clause|3[\s-]*clause[\s-]+bsd|(?:new|modified|revised)[\s-]+bsd|bsd)" r"(?:[\s-]+licen[cs]e)?": "BSD-3-Clause",
+    # Apache.
+    r"apache(?:[\s-]+software)?[\s-]+licen[cs]e" r"(?:,?[\s-]+(?:version[\s-]+)?2(?:\.0)?)?": "Apache-2.0",
+    r"(?:apache|asl)[\s-]*2(?:\.0)?": "Apache-2.0",
+    # ISC.
+    r"isc(?:[\s-]+licen[cs]e)?": "ISC",
+    # Mozilla Public License.
+    r"(?:mozilla[\s-]+public[\s-]+licen[cs]e|mpl)" r"(?:,?[\s-]+(?:(?:version|v)\.?[\s-]+)?2(?:\.0)?)?": "MPL-2.0",
+    # GNU GPL 2/3, only and or-later ("+" is the deprecated or-later form).
+    r"(?:gnu[\s-]+general[\s-]+public[\s-]+licen[cs]e|gnu[\s-]+gpl|gpl)" r"[\s-]*,?[\s-]*(?:v|version[\s-]+)?2(?:\.0)?(?:[\s-]+only)?": "GPL-2.0-only",
+    r"(?:gnu[\s-]+general[\s-]+public[\s-]+licen[cs]e|gnu[\s-]+gpl|gpl)" r"[\s-]*,?[\s-]*(?:v|version[\s-]+)?2(?:\.0)?[\s-]*(?:\+|or[\s-]+(?:any[\s-]+)?later)": "GPL-2.0-or-later",
+    r"(?:gnu[\s-]+general[\s-]+public[\s-]+licen[cs]e|gnu[\s-]+gpl|gpl)" r"[\s-]*,?[\s-]*(?:v|version[\s-]+)?3(?:\.0)?(?:[\s-]+only)?": "GPL-3.0-only",
+    r"(?:gnu[\s-]+general[\s-]+public[\s-]+licen[cs]e|gnu[\s-]+gpl|gpl)" r"[\s-]*,?[\s-]*(?:v|version[\s-]+)?3(?:\.0)?[\s-]*(?:\+|or[\s-]+(?:any[\s-]+)?later)": "GPL-3.0-or-later",
+    # GNU LGPL / AGPL.
+    r"(?:lgpl|gnu[\s-]+lesser[\s-]+general[\s-]+public[\s-]+licen[cs]e)" r"[\s-]*,?[\s-]*(?:v|version[\s-]+)?2\.1(?:[\s-]+only)?": "LGPL-2.1-only",
+    r"(?:lgpl|gnu[\s-]+lesser[\s-]+general[\s-]+public[\s-]+licen[cs]e)" r"[\s-]*,?[\s-]*(?:v|version[\s-]+)?3(?:\.0)?(?:[\s-]+only)?": "LGPL-3.0-only",
+    r"(?:agpl|gnu[\s-]+affero[\s-]+general[\s-]+public[\s-]+licen[cs]e)" r"[\s-]*,?[\s-]*(?:v|version[\s-]+)?3(?:\.0)?(?:[\s-]+only)?": "AGPL-3.0-only",
+    # Public domain / permissive.
+    r"(?:the[\s-]+)?unlicen[cs]e": "Unlicense",
+    r"(?:cc[\s-]*0(?:[\s-]+1(?:\.0)?)?|creative[\s-]+commons[\s-]+zero(?:[\s-]+1(?:\.0)?)?)" r"(?:[\s-]+universal)?": "CC0-1.0",
+    # Creative Commons.
+    r"(?:cc[\s-]*by[\s-]*4(?:\.0)?|creative[\s-]+commons[\s-]+attribution[\s-]+4(?:\.0)?" r"(?:[\s-]+international)?)": "CC-BY-4.0",
+    r"(?:cc[\s-]*by[\s-]*nc[\s-]*4(?:\.0)?|creative[\s-]+commons[\s-]+attribution" r"[\s-]+non[\s-]*commercial[\s-]+4(?:\.0)?(?:[\s-]+international)?)": "CC-BY-NC-4.0",
+    r"(?:cc[\s-]*by[\s-]*sa[\s-]*4(?:\.0)?|creative[\s-]+commons[\s-]+attribution" r"[\s-]+share[\s-]*alike[\s-]+4(?:\.0)?(?:[\s-]+international)?)": "CC-BY-SA-4.0",
+    # Python Software Foundation.
+    r"psf(?:[\s-]+licen[cs]e)?(?:[\s-]*,?[\s-]*(?:v|version[\s-]+)?2(?:\.0)?)?": "PSF-2.0",
+    r"python[\s-]+software[\s-]+foundation[\s-]+licen[cs]e" r"(?:,?[\s-]+(?:v|version[\s-]+)?2(?:\.0)?)?": "PSF-2.0",
+    r"python(?:[\s-]+licen[cs]e)?[\s-]*,?[\s-]*(?:v|version[\s-]+)?2(?:\.0)?": "Python-2.0",
+    # Non-SPDX license still tracked explicitly by the registry.
+    r"dino[\s-]*v?3(?:[\s-]+licen[cs]e)?": "DINOv3 License",
 }
+
+_ATOM_PUNCTUATION = " \t\r\n.,;:!?\"'()[]{}"
+_SPDX_OPERATOR = re.compile(r"(?<![\w-])(AND|OR|WITH)(?![\w-])", re.IGNORECASE)
+_COMPILED_ALIASES: tuple[tuple[re.Pattern[str], str], ...] = tuple(
+    sorted(
+        ((re.compile(pattern, re.IGNORECASE), spdx) for pattern, spdx in _ALIASES.items()),
+        key=lambda item: len(item[0].pattern),
+        reverse=True,
+    )
+)
 
 
 @dataclass(frozen=True)
@@ -55,18 +91,46 @@ class LicenseEntry:
         return {"name": self.name, "version": self.version, "license": self.license}
 
 
+def _match_atom(atom: str) -> str | None:
+    """Return the canonical id for one license atom, or None if unknown."""
+    cleaned = atom.strip(_ATOM_PUNCTUATION)
+    if not cleaned:
+        return None
+    for pattern, spdx in _COMPILED_ALIASES:
+        if pattern.fullmatch(cleaned):
+            return spdx
+    return None
+
+
 def normalize_license(value: str | None) -> str:
-    """Map common metadata strings to an SPDX-ish id; unknown is explicit."""
+    """Map a license name or SPDX expression to canonical identifiers.
+
+    ``AND``/``OR``/``WITH`` are preserved in order.  Every atom must resolve
+    through the explicit alias table; if any atom is unknown the whole value
+    becomes ``"UNKNOWN"`` so compliance never silently allows it.
+    """
     if not value:
         return "UNKNOWN"
     text = " ".join(str(value).split())
-    lowered = text.lower()
-    for alias, spdx in _ALIASES.items():
-        if alias in lowered:
-            return spdx
-    if len(text) <= 64 and " " not in text:
-        return text
-    return "UNKNOWN"
+    if not text:
+        return "UNKNOWN"
+
+    # Exact whole-string match first: real license names may contain operator
+    # words or hyphens (e.g. "GPL-2.0-or-later", "GNU ... v3.0 or later").
+    atom = _match_atom(text)
+    if atom is not None:
+        return atom
+
+    tokens: list[str] = []
+    for index, part in enumerate(_SPDX_OPERATOR.split(text)):
+        if index % 2:
+            tokens.append(part.upper())
+            continue
+        atom = _match_atom(part)
+        if atom is None:
+            return "UNKNOWN"
+        tokens.append(atom)
+    return " ".join(tokens)
 
 
 def _license_from_metadata(metadata: Any) -> str:

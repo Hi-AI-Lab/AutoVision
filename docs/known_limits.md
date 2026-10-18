@@ -4,9 +4,70 @@
 
 ## 定位
 
-训练 + 参考推理框架。训练、评测、导出是生产路径；跟踪与 serving 是参考实现，
-不提供鉴权、TLS、多进程编排，漂移检测 / A-B / 金丝雀不在范围内（`/metrics` 是
-起点，按产品需求在其上构建）。
+训练 + 参考推理框架。训练、评测、导出是生产路径；跟踪与 serving 是参考实现。
+serving 支持可选 API key（`AUTOVISION_SERVING_API_KEY` 或 `api_key=`）、请求体/像素
+上限、线程池推理、有界排队（`queue_timeout_s`，饱和返回 503）、`/readyz`、TLS、
+多 worker、进程内 token-bucket 限流、预测分布漂移（PSI，`/drift`）与 A/B/canary
+分流；`/docs` 与 `/openapi.json` 默认关闭。全局配额、告警、跨进程一致限流、
+A/B 统计显著性与金丝雀自动回滚仍属生产网关职责。
+
+## 运行与完整性
+
+- **确定性**：`AUTOVISION_DETERMINISTIC=1` 开启 torch 确定性算子与 cuDNN
+  deterministic（部分算子无确定性实现会报错，且通常更慢）；默认关闭。
+- **fp16**：CUDA/NPU 上 `precision="16-mixed"` 使用 `GradScaler`，其状态随
+  checkpoint 保存/恢复；bf16/fp32 不需要。
+- **下载完整性**：权重下载校验钉住的 sha256；数据集下载写入临时文件并原子
+  替换，缓存压缩包在解压前重新校验 size/sha256（有钉住值时）。内置 COCO/VOC
+  数据集条目没有官方摘要，默认只告警。设置
+  `AUTOVISION_REQUIRE_DATASET_HASHES=1` 可拒绝未钉摘要的数据集下载；
+  `AUTOVISION_OFFLINE=1` 同时拒绝数据集与权重下载。
+- **旧 teacher checkpoint**：当前导出的 task model 可被 pickle-free 加载器读取；
+  旧导出若嵌入 `__class__` 等对象，默认拒绝。只有可信本地产物才可设置
+  `AUTOVISION_TRUST_TEACHER_CHECKPOINT=1` 启用完整 unpickler（RCE 风险自担）。
+- **mmap 缓存键**：包含标签文件（COCO JSON / YOLO `.txt` 等）的路径、大小与
+  mtime，以及 `ignore_classes` 指纹；编辑标签或改变忽略类别会重建缓存，
+  `overwrite=True` 会强制重建。user-held 权重解析现在强制校验 sha256（按
+  路径/大小/mtime 缓存摘要）。
+- **EoMT 权重**：`load_weights=True` 强制 DINOv2/DINOv3 许可 opt-in；
+  hub checkpoint 未在 `WEIGHT_MANIFEST` 中钉 sha256 时默认拒绝，只有显式
+  `AUTOVISION_ALLOW_UNPINNED_WEIGHTS=1` 才加载（可信镜像）。class head 会按
+  目标类别数/query 数重建；EoMT 现可走 ONNX 导出（legacy TorchScript 路径，
+  动态 batch 关闭）。
+- **可视化/视频工具**：`visualize/effects.py` 与 `geometry/boxes.py` /
+  `geometry/masks.py` 的框、mask、polygon 工具只依赖 NumPy/Pillow；
+  `mask_to_polygons` 惰性依赖 OpenCV（`video` extra）。`process_video` /
+  `VideoSink` / `ImageSink` 是同步、RGB 约定的轻量管线，不替代
+  `run_stream` 的 reader/infer/writer 三段式、后端切换与 JSONL 持久化。
+- **运行清单**：每次训练在输出目录写 `run_manifest.json`（命令、git commit、
+  环境白名单、依赖版本、GPU）；resume 写独立的 `run_manifest.resume-*.json`，
+  不覆盖原始记录。
+- **早停/回调**：task training 支持 `early_stopping_patience` /
+  `early_stopping_min_delta`（CLI `trainer_args`）与 Python API 的 callback 钩子；
+  pretrain 仍按 epochs 跑满。
+
+## 企业能力边界
+
+- **训练并行**：DDP（torchrun）、FSDP 任务训练
+  （`trainer_args={"parallel": "fsdp"}`，full-state checkpoint/resume/导出，
+  2-rank 单卡测试）与梯度检查点已实现；FSDP 的 EMA 更新需按
+  `AUTOVISION_FSDP_EMA_INTERVAL` 做 full-param gather，整模型未做 auto-wrap。
+  DeepSpeed / ZeRO / 弹性训练未接入；多机 NCCL 与故障注入未在公开 CI 验证，
+  边界见[并行训练](parallelism.md)。
+- **注册表**：文件系统后端与 MLflow 后端都执行标准部署门禁
+  （`gates=None` 默认 fail-closed）；rollback/audit 仍以文件系统后端为准。
+- **CI**：公开 CI 为 Ubuntu + Python 3.10/3.11 的 CPU 任务，测试作业安装
+  `serving`/`video`/`transformers` 测试依赖；新增核心子集 coverage 下限、bandit
+  （medium/high）、核心模块 mypy 与 `scripts/smoke_enterprise.py` 冒烟门禁。TensorRT/OpenVINO/多机 DDP 等重环境
+  用例按门控变量跳过；真实 TensorRT engine/parity 已在 RTX 4090D + TensorRT 11.4 上验证
+  int8 QDQ 路径（含 `export_tensorrt(verify=True)` 门禁）；公开 CI/夜间
+  self-hosted workflow（`.github/workflows/trt-nightly.yml`）继续覆盖。
+- **serving**：TLS、多 worker、进程内限流、漂移与 A/B/canary 分流已提供；
+  `/metrics` 与 `/drift` 在设置 API key 后同样要求鉴权（K8s 探针保持公开）；
+  限流桶与漂移窗口在多 worker 下各自独立（跨 worker 聚合需指标后端/网关），
+  `/drift` 是服务级聚合（A/B 混合流量会混合分布）；无模型热加载（用滚动重启），
+  `deploy/k8s/` 提供 Deployment/Service/HPA/PDB/PVC 参考清单；全局配额、告警、
+  A/B 统计显著性与自动回滚仍需平台承接（见上文定位）。
 
 ## 许可状态与 STA 迁移
 
@@ -32,7 +93,11 @@
 - Label Studio 的旋转矩形（`rotation != 0`）按轴对齐框导入，旋转角保留在
   标注字段；旋转框训练仍使用 YOLO-OBB / DOTA 格式。
 - 多路流运行时 v1 不做跨路跟踪 / ReID；tracking 仅单路 `run_stream`。
-  每路渲染 writer 在该路分辨率变化时重建。
+  每路渲染 writer 在该路分辨率变化时重建。`LineZone` / `PolygonZone` /
+  `TrackSmoother` 与 reader/infer/writer 三段式管线也只接入单路
+  `run_stream`；`run_multi_stream` 保持每源独立批处理。
+- serving 的 `max_image_pixels` 按单图限制，不限制一次请求的总像素与 RLE
+  响应字节数；高并发大图 / 稠密 mask 场景需在网关层再加总预算。
 
 ## 检测谱系状态
 

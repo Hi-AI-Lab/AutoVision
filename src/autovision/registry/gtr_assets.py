@@ -38,15 +38,11 @@ __all__ = [
     "resolve_gtr_asset",
 ]
 
-#: Known user-held locations for the GTR checkpoints, in preference order:
-#: the consolidated model store first, then the historical research-tree
-#: download dir. Resolution: ``AUTOVISION_GTR_ROOT`` env override, else the
-#: first existing candidate, else the first candidate as the reported
-#: default (error messages point at the primary location).
-_GTR_ROOT_CANDIDATES = (
-    Path.home() / "Research/Model/gtr",
-    Path.home() / "Research/Project/Dino-Dome-Research/weight/gtr",
-)
+#: Known user-held location for the GTR checkpoints. Resolution:
+#: ``AUTOVISION_GTR_ROOT`` env override, else this path (error messages point
+#: at it). The historical research-tree fallback is intentionally not shipped:
+#: it is a private, machine-specific location.
+_GTR_ROOT_CANDIDATES = (Path.home() / "Research/Model/gtr",)
 
 
 def _resolve_asset_root() -> Path:

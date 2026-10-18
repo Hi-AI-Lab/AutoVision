@@ -5,7 +5,7 @@ The synthetic corpus below mimics the real VOC2007 layout (20 classes with
 their canonical names, per-object ``difficult`` flags, ImageSets splits);
 the official download host throttles to ~14 kB/s in some environments, so
 the automated gate exercises the same code path on a generated tree and the
-real-corpus run is recorded separately (gap-analysis §3.7).
+real-corpus run is recorded separately.
 """
 
 import json

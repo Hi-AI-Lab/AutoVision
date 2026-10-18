@@ -50,8 +50,15 @@ def test_coco_class_table_is_complete():
     assert len(COCO_CLASSES) == 80
     assert COCO_CLASSES[0] == "person"
     assert COCO_CLASSES[-1] == "toothbrush"
+    # RF-DETR keeps the COCO category-id head: 0=N/A, 1=person, 67=dining table.
     names = pretrained_class_names("rfdetr/rf-detr-small")
-    assert names[0] == "person" and names[79] == "toothbrush"
+    assert len(names) == 91
+    assert names[0] == "N/A"
+    assert names[1] == "person"
+    assert names[67] == "dining table"
+    # GTR/DETR use the contiguous 0..79 head.
+    gtr_names = pretrained_class_names("detr/gtrvit-s")
+    assert gtr_names[0] == "person" and gtr_names[79] == "toothbrush"
 
 
 def test_model_without_task_weights_is_rejected():
@@ -78,7 +85,7 @@ def test_rfdetr_builder_uses_native_resolution_and_loads_weights(monkeypatch):
     network = build_pretrained_detection("rfdetr/rf-detr-small")
     assert isinstance(network, FakeRFDetr)
     assert seen["model"] == "rf-detr-small"
-    assert seen["num_classes"] == 80
+    assert seen["num_classes"] == 91  # COCO category-id head (0=N/A, 1..90)
     assert seen["image_size"] == (512, 512)
     assert seen["load_weights"] is True
     assert network.training is False

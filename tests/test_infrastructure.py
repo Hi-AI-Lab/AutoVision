@@ -48,6 +48,41 @@ class TestCI:
         # Compliance: CI must not enable telemetry.
         assert variables.get("AUTOVISION_TELEMETRY", "0") != "1"
 
+    def test_ci_covers_the_supported_python_range(self):
+        import yaml
+
+        workflow = yaml.safe_load(
+            (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+        )
+        matrix = workflow["jobs"]["test"]["strategy"]["matrix"]["python-version"]
+        # requires-python is >=3.10; CI must exercise both ends of the
+        # supported range rather than only the release interpreter.
+        assert {"3.10", "3.11"} <= set(map(str, matrix))
+
+
+class TestSecurityPolicy:
+    def test_security_policy_exists_and_names_the_private_channel(self):
+        text = (ROOT / "SECURITY.md").read_text()
+        assert "Reporting a vulnerability" in text
+        assert "Security Advisories" in text
+        assert "Do not open a public issue" in text
+
+    def test_dependabot_covers_python_and_actions(self):
+        pytest.importorskip("yaml")
+        import yaml
+
+        config = yaml.safe_load((ROOT / ".github" / "dependabot.yml").read_text())
+        ecosystems = {update["package-ecosystem"] for update in config["updates"]}
+        assert {"pip", "github-actions"} <= ecosystems
+
+
+class TestPep561Packaging:
+    def test_py_typed_marker_is_present_and_shipped(self):
+        assert (ROOT / "src" / "autovision" / "py.typed").is_file()
+        config = tomllib.loads((ROOT / "pyproject.toml").read_text())
+        package_data = config["tool"]["setuptools"]["package-data"]
+        assert "py.typed" in package_data["autovision"]
+
 
 class TestDocker:
     def test_dockerfile_exists_and_smoke_wired(self):
@@ -132,14 +167,13 @@ class TestDocs:
         stale = sorted(pattern for pattern, hit in matched.items() if not hit)
         assert not stale, f"stale exclude_docs entries: {stale}"
 
-    def test_strategy_docs_stay_out_of_the_site(self):
+    def test_internal_strategy_docs_are_not_in_the_public_tree(self):
+        """Internal roadmap/analysis material must not ship in the public tree."""
+        assert not (ROOT / "docs" / "strategy").exists()
         pytest.importorskip("yaml")
         import yaml
 
         config = yaml.safe_load((ROOT / "mkdocs.yml").read_text())
-        # The internal analysis draft is decision material, not a published
-        # page — excluded from the site, still present in the repository.
-        assert "strategy/gap-analysis.md" in str(config["exclude_docs"])
         assert not any(
             "strategy/" in target for target in _nav_paths(config["nav"])
         )
@@ -272,10 +306,25 @@ class TestRelease:
             f"package version is {autovision.__version__}"
         )
 
+    def test_release_tag_filters_exclude_legacy_tags(self):
+        """Only vX.Y.Z tags may enter the release pipeline.
+
+        ``v0.2-clean`` is a legacy non-release tag whose tree carries 0.1.0;
+        a ``v*`` glob would let it trigger the PyPI publish job.
+        """
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+        assert 'tags: ["v*.*.*"]' in workflow
+        assert 'tags: ["v*"]' not in workflow
+        gitlab = (ROOT / ".gitlab-ci.yml").read_text()
+        assert "$CI_COMMIT_TAG =~ /^v[0-9]+\\.[0-9]+\\.[0-9]+/" in gitlab
+
     def test_contributor_entry_points_exist(self):
         contributing = (ROOT / "CONTRIBUTING.md").read_text()
         for gate in (
             "ruff check src tests scripts",
+            "bandit -r src/autovision",
+            "mypy src/autovision/errors.py",
+            "scripts/smoke_enterprise.py",
             "pytest tests -q",
             "scripts/check_provenance.py",
             "scripts/check_layering.py",
@@ -328,3 +377,78 @@ class TestPackaging:
             "list_models", "list_methods", "extract_video_frames",
         ):
             assert callable(getattr(autovision, name, None)), f"{name} missing"
+
+    def test_lockfile_uses_the_public_pypi_index(self):
+        """The committed lockfile must install outside the project network."""
+        text = (ROOT / "uv.lock").read_text()
+        assert "agentsmirror" not in text
+        assert 'registry = "https://pypi.org/simple"' in text
+
+
+class TestCIInstallsTestDependencies:
+    def test_optional_test_extras_are_installed(self):
+        """Collection imports DETR/EoMT transformers and serves FastAPI.
+
+        The CI test job must install the same optional packages the test
+        modules import at module level; `[dev,export]` alone fails during
+        collection.
+        """
+        from pathlib import Path
+
+        import yaml
+
+        workflow = yaml.safe_load(
+            (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml")
+            .read_text()
+        )
+        steps = workflow["jobs"]["test"]["steps"]
+        install = " ".join(
+            str(step.get("run", "")) for step in steps
+            if "pip install" in str(step.get("run", ""))
+        )
+        for extra in ("dev", "export", "serving", "video", "transformers"):
+            assert extra in install, f"CI test job misses extra '{extra}': {install}"
+
+
+class TestCIQualityGates:
+    def test_sast_type_and_coverage_gates_are_wired(self):
+        from pathlib import Path
+
+        import yaml
+
+        root = Path(__file__).resolve().parents[1]
+        workflow = yaml.safe_load(
+            (root / ".github" / "workflows" / "ci.yml").read_text()
+        )
+        commands = " ".join(
+            str(step.get("run", ""))
+            for job in workflow["jobs"].values()
+            for step in job.get("steps", [])
+        )
+        assert "bandit -r src/autovision" in commands
+        assert "mypy src/autovision/errors.py" in commands
+        assert "--cov-fail-under=" in commands
+        dev = tomllib.loads((root / "pyproject.toml").read_text())["project"][
+            "optional-dependencies"
+        ]["dev"]
+        for package in ("bandit", "mypy", "pytest-cov"):
+            assert any(item.startswith(package) for item in dev), package
+
+
+class TestTensorRTNightly:
+    def test_nightly_targets_self_hosted_gpu_and_gated_tests(self):
+        import yaml
+
+        root = Path(__file__).resolve().parents[1]
+        workflow = yaml.safe_load(
+            (root / ".github" / "workflows" / "trt-nightly.yml").read_text()
+        )
+        job = workflow["jobs"]["trt-parity"]
+        assert "self-hosted" in job["runs-on"]
+        assert "gpu" in job["runs-on"]
+        commands = " ".join(
+            str(step.get("run", "")) + " " + str(step.get("env", {}))
+            for step in job["steps"]
+        )
+        assert "AUTOVISION_TRT_TESTS" in commands
+        assert (root / "scripts" / "verify_tensorrt_engine.py").is_file()

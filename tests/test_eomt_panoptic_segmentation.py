@@ -547,6 +547,10 @@ class TestPanopticEndToEnd:
                 steps=3,
                 batch_size=2,
                 num_workers=0,
+                # Bit-exact comparison: CPU avoids GPU bf16 reduction-order
+                # differences (GPU determinism is the opt-in
+                # AUTOVISION_DETERMINISTIC path, not this seed test).
+                devices="cpu",
                 model_args={**MODEL_KWARGS, "lr_warmup_steps": 2},
             )
             runs.append(result.best_metrics)

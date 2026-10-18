@@ -1,10 +1,10 @@
 # Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """User-held DINOv3 detector assets: registry ↔ store consistency (D1-a).
 
-The store lives outside the git tree; store-dependent tests auto-skip
-(trees without it stay green). Registry shape and build-contract tests run
-everywhere. Container sha verification: one 40 MB spot check by default,
-the full ~4 GB sweep is opt-in via ``AUTOVISION_USER_HELD_TESTS=1``.
+Registry shape and build-contract tests run everywhere. Store-dependent
+tests require both a local store and ``AUTOVISION_USER_HELD_TESTS=1``;
+they are private-asset integration checks, not part of the default release
+suite. The full ~4 GB sha sweep uses the same opt-in.
 """
 
 from __future__ import annotations
@@ -188,8 +188,12 @@ class TestConfigAcceptsNames:
         assert args.warm_start == "dinov3-vitt16"
 
 
+@pytest.mark.skipif(
+    os.environ.get("AUTOVISION_USER_HELD_TESTS") != "1",
+    reason="set AUTOVISION_USER_HELD_TESTS=1 to run private-store integration tests",
+)
 class TestStoreConsistency:
-    """Store-dependent: run on the dev box, skip where the store is absent."""
+    """Store-dependent: opt-in on machines that hold the private store."""
 
     @_store_present
     def test_manifest_matches_registry(self):
@@ -304,3 +308,30 @@ class TestStoreConsistency:
     def test_full_sha256_verification_all_assets(self):
         for asset in USER_HELD_ASSETS.values():
             verify_user_held_asset(asset)
+
+
+def test_verify_user_held_asset_detects_tampering_and_caches(tmp_path, monkeypatch):
+    import hashlib
+
+    import autovision.registry.user_held_assets as held
+
+    held_dir = tmp_path / "unit-test"
+    held_dir.mkdir()
+    weights = held_dir / "weights.pt"
+    weights.write_bytes(b"real-weights")
+    good = hashlib.sha256(b"real-weights").hexdigest()
+    monkeypatch.setattr(held, "USER_HELD_ROOT", tmp_path)
+    asset = held.UserHeldAsset(
+        name="unit-test",
+        model_name="unit/test",
+        origin="unit-test",
+        source_sha256=good,
+        weights_sha256=good,
+        warm_start_sha256=good,
+        license_id="DINOv3 License",
+        redistributable=False,
+    )
+    held.verify_user_held_asset(asset, files=("weights.pt",))  # cached success
+    weights.write_bytes(b"tampered")
+    with pytest.raises(held.UserHeldAssetError, match="sha256 mismatch"):
+        held.verify_user_held_asset(asset, files=("weights.pt",))

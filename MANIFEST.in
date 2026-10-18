@@ -10,3 +10,8 @@ include docs/provenance/LEDGER.md
 # GTR GLA kernel and MSDA extension remain reproducible from the sdist.
 recursive-include src/autovision/tasks/detection/shared/gtr/csrc *.cu *.cuh *.sh *.py
 recursive-include src/autovision/tasks/detection/shared/_msda_src *.cpp *.cu *.cuh *.h
+
+# Runnable task examples (not installed in the wheel; shipped in the sdist).
+recursive-include examples/tasks *.py *.md
+# Only the CC0 demo image ships; see examples/tasks/assets/README.md.
+recursive-include examples/tasks/assets *.jpg

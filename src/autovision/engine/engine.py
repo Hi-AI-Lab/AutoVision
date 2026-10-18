@@ -17,6 +17,7 @@ import random
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -46,16 +47,104 @@ def _is_rank_zero_internal() -> bool:
     return is_global_rank_zero()
 
 
+def _set_accelerator_device(device: torch.device) -> None:
+    """Make ``device`` the current device for this process.
+
+    DDP requires every rank to select its local device before the process
+    group is created / the model is placed: without it, APIs that allocate
+    on the *current* device (and some NCCL initialization paths) use
+    ``cuda:0`` on every rank.
+    """
+    if device.type == "cuda" and device.index is not None:
+        torch.cuda.set_device(device)
+    elif device.type == "npu" and device.index is not None:
+        torch.npu.set_device(device)
+
+
+def _log_metrics_safely(logger_fn: Any, metrics: dict[str, Any], step: int) -> None:
+    """Call an experiment logger without letting it abort training.
+
+    W&B/MLflow/TensorBoard are I/O-backed side channels: a network or disk
+    failure must degrade observability, not kill a long-running fit (the
+    callback path already follows this contract).
+    """
+    if logger_fn is None:
+        return
+    try:
+        logger_fn(metrics, step)
+    except Exception:  # noqa: BLE001 - experiment loggers are non-fatal
+        logger.warning(
+            "logger_fn failed at step %d; continuing training.",
+            step, exc_info=True,
+        )
+
+
+def _rank_zero_write_barrier(
+    device: torch.device, world_size: int, success: bool
+) -> None:
+    """Propagate a rank-zero artifact-write failure to every rank.
+
+    Without this, rank zero exits while the other ranks enter the next
+    collective and hang until the process-group timeout. The barrier runs on
+    every rank even when rank zero failed (the flag is all-reduced).
+    """
+    if world_size <= 1 or not torch.distributed.is_initialized():
+        return
+    flag = torch.tensor(
+        [1 if success else 0], device=device, dtype=torch.int32
+    )
+    torch.distributed.all_reduce(flag, op=torch.distributed.ReduceOp.MIN)
+    if int(flag.item()) == 0:
+        raise RuntimeError(
+            "rank zero failed to write a checkpoint/export artifact; "
+            "aborting all ranks (see rank-zero logs)."
+        )
+
+
 def seed_everything(seed: int) -> None:
     """Seed python, numpy, and torch globally.
 
     Dataloader worker processes re-seed from the global torch RNG per worker
     (PyTorch default ``base_seed`` mechanism), so worker randomness follows
     the global seed.
+
+    ``AUTOVISION_DETERMINISTIC=1`` additionally asks PyTorch for deterministic
+    kernels. This is opt-in: some ops have no deterministic implementation and
+    will raise at runtime, and deterministic kernels can be noticeably slower.
     """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+    if Env.DETERMINISTIC.value:
+        # cuBLAS requires this workspace shape before CUDA is initialized;
+        # setting it late is harmless but may not affect already-created
+        # handles.
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        torch.use_deterministic_algorithms(True)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+
+def _build_grad_scaler(precision: str, device_type: str) -> Any | None:
+    """Loss scaler for ``16-mixed``; bf16/fp32 do not need one.
+
+    fp16 autocast without loss scaling silently underflows small gradients
+    (common on T4/V100-class GPUs, which do not have bf16). torch's
+    ``GradScaler`` is used when the device backend supports it; NPU builds
+    that lack the API fall back with a warning rather than failing the run.
+    """
+    if precision != "16-mixed" or device_type not in ("cuda", "npu"):
+        return None
+    try:
+        return torch.amp.GradScaler(device_type)
+    except (AttributeError, TypeError, RuntimeError):
+        if device_type == "cuda":
+            return torch.cuda.amp.GradScaler()
+        logger.warning(
+            "GradScaler is unavailable for device '%s'; fp16 runs without "
+            "loss scaling.", device_type,
+        )
+        return None
 
 
 class _TrainWindow:
@@ -229,6 +318,7 @@ class Engine:
             raise ValueError(f"max_epochs must be >= 1, got {max_epochs}")
         seed_everything(seed)
         device = resolve_device(devices)
+        _set_accelerator_device(device)
         method.to(device)
 
         # ── distributed setup (torchrun) ──
@@ -238,7 +328,8 @@ class Engine:
         if world_size > 1:
             if not torch.distributed.is_initialized():
                 torch.distributed.init_process_group(
-                    backend=ddp_backend_for(device.type)
+                    backend=ddp_backend_for(device.type),
+                    timeout=timedelta(seconds=Env.DDP_TIMEOUT_SEC.value),
                 )
             ddp_method = nn.parallel.DistributedDataParallel(
                 method,
@@ -270,6 +361,15 @@ class Engine:
         )
         method.total_steps = max_epochs * steps_per_epoch
 
+        if precision in ("bf16-mixed", "16-mixed") and not supports_amp(device.type):
+            logger.warning("Mixed precision requested without CUDA/NPU; using fp32.")
+            precision = "32-true"
+        autocast_dtype = {
+            "bf16-mixed": torch.bfloat16,
+            "16-mixed": torch.float16,
+        }.get(precision)
+        scaler = _build_grad_scaler(precision, device.type)
+
         # ── checkpoint resolution ──
         start_epoch = 0
         global_step = 0
@@ -280,19 +380,13 @@ class Engine:
         if resume_interrupted:
             last_path = out_dir / "checkpoints" / "last.ckpt"
             if last_path.exists():
-                start_epoch, global_step = self._resume(last_path, method, optimizer, scheduler, device)
+                start_epoch, global_step = self._resume(
+                    last_path, method, optimizer, scheduler, device, scaler=scaler
+                )
             else:
                 logger.info("No last.ckpt found; starting from scratch.")
         elif checkpoint is not None:
             self._load_weights(checkpoint, method, device)
-
-        if precision in ("bf16-mixed", "16-mixed") and not supports_amp(device.type):
-            logger.warning("Mixed precision requested without CUDA/NPU; using fp32.")
-            precision = "32-true"
-        autocast_dtype = {
-            "bf16-mixed": torch.bfloat16,
-            "16-mixed": torch.float16,
-        }.get(precision)
 
         epochs_run = 0
         run_metrics: dict[str, float] = {}
@@ -346,11 +440,28 @@ class Engine:
                                 f"{loss}. Check for data issues or lower the learning rate."
                             )
                         optimizer.zero_grad(set_to_none=True)
-                        loss.backward()
+                        if scaler is not None:
+                            scaler.scale(loss).backward()
+                            # Gradients are still scaled here; unscale before
+                            # clipping/inspection so the norm is meaningful.
+                            scaler.unscale_(optimizer)
+                        else:
+                            loss.backward()
                         method.clip_gradients(optimizer)
                         method.on_before_optimizer_step(optimizer)
-                        optimizer.step()
-                        scheduler.step()
+                        if scaler is not None:
+                            scale_before = scaler.get_scale()
+                            scaler.step(optimizer)
+                            scaler.update()
+                            # GradScaler skips the step on inf/nan (halving
+                            # the scale); advancing the scheduler then would
+                            # silently consume a schedule step.
+                            stepped = scaler.get_scale() >= scale_before
+                        else:
+                            optimizer.step()
+                            stepped = True
+                        if stepped:
+                            scheduler.step()
                         global_step += 1
 
                         if logger_fn is not None and (
@@ -361,7 +472,7 @@ class Engine:
                                 log_dict = method.consume_log_dict()
                                 if log_dict:
                                     metrics.update(log_dict)
-                                logger_fn(metrics, global_step)
+                                _log_metrics_safely(logger_fn, metrics, global_step)
                         else:
                             method.consume_log_dict()  # keep step state clean on all ranks
                 epochs_run += 1
@@ -379,8 +490,7 @@ class Engine:
                     with otel_span("engine.validation", {"epoch": epoch}):
                         knn_metrics = knn_runner.run()
                     run_metrics.update(knn_metrics)
-                    if logger_fn is not None:
-                        logger_fn(knn_metrics, global_step)
+                    _log_metrics_safely(logger_fn, knn_metrics, global_step)
 
                 # Checkpoint at the end of every epoch (rank zero only).
                 if world_size == 1 or torch.distributed.get_rank() == 0:
@@ -393,6 +503,7 @@ class Engine:
                             epoch=epoch,
                             global_step=global_step,
                             normalize_args=normalize_args,
+                            scaler=scaler,
                         )
         finally:
             end_span(fit_span)
@@ -423,7 +534,13 @@ class Engine:
 
     @staticmethod
     def _resume(
-        path: Path, method: nn.Module, optimizer, scheduler, device: torch.device
+        path: Path,
+        method: nn.Module,
+        optimizer,
+        scheduler,
+        device: torch.device,
+        *,
+        scaler: Any | None = None,
     ) -> tuple[int, int]:
         ckpt = Checkpoint.from_path(path, map_location=str(device))
         raw = {"state_dict": dict(ckpt.state_dict)}
@@ -434,6 +551,8 @@ class Engine:
             optimizer.load_state_dict(engine_state["optimizer"])
         if "scheduler" in engine_state:
             scheduler.load_state_dict(engine_state["scheduler"])
+        if scaler is not None and "scaler" in engine_state:
+            scaler.load_state_dict(engine_state["scaler"])
         logger.info(
             "Resumed from '%s' at epoch %d (step %d).",
             path, ckpt.autovision.epoch + 1, ckpt.autovision.global_step,
@@ -457,14 +576,21 @@ class Engine:
         epoch: int,
         global_step: int,
         normalize_args: dict | None = None,
+        scaler: Any | None = None,
     ) -> None:
         checkpoint = {"state_dict": method.state_dict()}
         method.on_save_checkpoint(checkpoint)
+        engine_state = {
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+        }
+        if scaler is not None:
+            engine_state["scaler"] = scaler.state_dict()
         metadata = CheckpointMetadata(
             epoch=epoch,
             global_step=global_step,
             normalize_args=normalize_args,
-            engine_state={"optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict()},
+            engine_state=engine_state,
         )
         Checkpoint(state_dict=checkpoint["state_dict"], autovision=metadata).save(path)
 
@@ -478,6 +604,8 @@ class TaskFitResult:
     exported_model_path: Path | None = None
     best_exported_model_path: Path | None = None
     best_metrics: dict[str, float] = field(default_factory=dict)
+    stopped_early: bool = False
+    stop_step: int | None = None
 
 
 class _InfiniteCycleIterator:
@@ -551,9 +679,56 @@ class TaskEngine(Engine):
         model_init_args: dict | None = None,
         debug_args: Any = None,
         visualize_examples: bool = True,
+        early_stopping_patience: int | None = None,
+        early_stopping_min_delta: float = 0.0,
+        callbacks: list[Any] | None = None,
+        gradient_checkpointing: bool = False,
+        parallel: str = "ddp",
     ) -> TaskFitResult:
+        """Run the step loop and return the fitted artifacts.
+
+        Early stopping: ``early_stopping_patience`` consecutive validations
+        without an improvement greater than ``early_stopping_min_delta`` stop
+        the run (requires ``val_dataloader`` and ``val_every_num_steps``).
+        ``callbacks`` are duck-typed objects; the optional hooks are
+        ``on_train_start(steps, out_dir)``, ``on_step_end(step, log_dict)``,
+        ``on_validation_end(step, metrics)``, ``on_early_stop(step,
+        best_metric, patience)`` and ``on_train_end(result)``. Hooks run on
+        rank zero only; a callback exception is logged and never aborts
+        training.
+        """
         if steps < 1:
             raise ValueError(f"steps must be >= 1, got {steps}")
+        if gradient_accumulation_steps < 1:
+            raise ValueError(
+                "gradient_accumulation_steps must be >= 1, got "
+                f"{gradient_accumulation_steps}."
+            )
+        parallel = str(parallel).lower()
+        if parallel not in ("ddp", "fsdp"):
+            raise NotImplementedError(
+                f"parallel='{parallel}' is not implemented; supported: "
+                "ddp (default) and fsdp. DeepSpeed/ZeRO/elastic training "
+                "need an external launcher (see docs/parallelism.md)."
+            )
+        out_dir = Path(out_dir)
+        if early_stopping_patience is not None:
+            if early_stopping_patience < 1:
+                raise ValueError(
+                    "early_stopping_patience must be >= 1, got "
+                    f"{early_stopping_patience}."
+                )
+            if val_dataloader is None or not val_every_num_steps:
+                raise ValueError(
+                    "early_stopping_patience requires a val_dataloader and "
+                    "val_every_num_steps; otherwise no intermediate metric "
+                    "can trigger the stop."
+                )
+        if early_stopping_min_delta < 0:
+            raise ValueError(
+                f"early_stopping_min_delta must be >= 0, got "
+                f"{early_stopping_min_delta}."
+            )
         world_size = int(os.getenv("WORLD_SIZE", "1"))
         from autovision.debug.debug_args import DebugArgs
         from autovision.debug.nan_capture import NaNCaptureMonitor
@@ -584,8 +759,32 @@ class TaskEngine(Engine):
             )
         seed_everything(seed)
         device = resolve_device(devices)
+        _set_accelerator_device(device)
+        if parallel == "fsdp":
+            if world_size < 2:
+                raise ValueError(
+                    "parallel='fsdp' needs torchrun with WORLD_SIZE >= 2; "
+                    "a single process has nothing to shard."
+                )
+            if device.type != "cuda":
+                raise ValueError(
+                    "parallel='fsdp' requires CUDA; torch FSDP refuses CPU "
+                    f"parameters (resolved device: '{device}')."
+                )
         train_model.to(device)
-        if device.type == "cuda":
+        if gradient_checkpointing:
+            enable_fn = getattr(train_model, "enable_gradient_checkpointing", None)
+            patched = enable_fn() if callable(enable_fn) else 0
+            if patched:
+                logger.info(
+                    "Gradient checkpointing enabled on %d module(s).", patched
+                )
+            else:
+                logger.warning(
+                    "gradient_checkpointing=True but no checkpointable "
+                    "blocks were found; continuing without it."
+                )
+        if device.type == "cuda" and not Env.DETERMINISTIC.value:
             # Ampere+ tensor cores for the fp32 remainder (EMA, optimizer,
             # non-autocast ops); autocast-covered bf16 ops are unaffected.
             torch.backends.cuda.matmul.allow_tf32 = True
@@ -593,27 +792,35 @@ class TaskEngine(Engine):
 
         # ── distributed setup (torchrun) ──
         ddp_train_model: nn.Module = train_model
+        fsdp_train_model: nn.Module | None = None
         train_sampler = None
         val_sampler = None
         if world_size > 1:
             if not torch.distributed.is_initialized():
                 torch.distributed.init_process_group(
-                    backend=ddp_backend_for(device.type)
+                    backend=ddp_backend_for(device.type),
+                    timeout=timedelta(seconds=Env.DDP_TIMEOUT_SEC.value),
                 )
-            ddp_train_model = nn.parallel.DistributedDataParallel(
-                train_model,
-                device_ids=[device.index] if device.type in ("cuda", "npu") else None,
-                # The EMA state is per-rank by construction; buffers are not
-                # broadcast every step.
-                broadcast_buffers=False,
-                # Step-dependent branches (early-epoch heads, debug hooks)
-                # leave some parameters grad-free on individual steps; DDP
-                # then aborts with "expected to have finished reduction in
-                # the prior iteration". Baseline matches with
-                # ddp_find_unused_parameters_true.
-                # Opt out (stable step shapes) via AUTOVISION_DDP_FIND_UNUSED=0.
-                find_unused_parameters=Env.DDP_FIND_UNUSED.value,
-            )
+            if parallel == "fsdp":
+                from autovision.runtime.fsdp import wrap_fsdp
+
+                fsdp_train_model = wrap_fsdp(train_model, device)
+                ddp_train_model = fsdp_train_model
+            else:
+                ddp_train_model = nn.parallel.DistributedDataParallel(
+                    train_model,
+                    device_ids=[device.index] if device.type in ("cuda", "npu") else None,
+                    # The EMA state is per-rank by construction; buffers are not
+                    # broadcast every step.
+                    broadcast_buffers=False,
+                    # Step-dependent branches (early-epoch heads, debug hooks)
+                    # leave some parameters grad-free on individual steps; DDP
+                    # then aborts with "expected to have finished reduction in
+                    # the prior iteration". Baseline matches with
+                    # ddp_find_unused_parameters_true.
+                    # Opt out (stable step shapes) via AUTOVISION_DDP_FIND_UNUSED=0.
+                    find_unused_parameters=Env.DDP_FIND_UNUSED.value,
+                )
             train_sampler = torch.utils.data.distributed.DistributedSampler(
                 train_dataloader.dataset, shuffle=True, drop_last=True
             )
@@ -646,18 +853,35 @@ class TaskEngine(Engine):
                 val_dataloader, precision, world_size,
             )
 
+        if precision in ("bf16-mixed", "16-mixed") and not supports_amp(device.type):
+            precision = "32-true"
+        autocast_dtype = {"bf16-mixed": torch.bfloat16, "16-mixed": torch.float16}.get(precision)
+        scaler = _build_grad_scaler(precision, device.type)
+
         start_step = 0
         restored_best_metric: float | None = None
         if resume_interrupted:
             last_path = out_dir / "checkpoints" / "last.ckpt"
             if last_path.exists():
                 ckpt = Checkpoint.from_path(last_path, map_location=str(device))
-                train_model.load_state_dict(ckpt.state_dict)
                 engine_state = ckpt.autovision.engine_state
-                if "optimizer" in engine_state:
-                    optimizer.load_state_dict(engine_state["optimizer"])
+                if fsdp_train_model is not None:
+                    from autovision.runtime.fsdp import load_full_state_dict
+
+                    load_full_state_dict(
+                        fsdp_train_model,
+                        optimizer,
+                        ckpt.state_dict,
+                        engine_state.get("optimizer"),
+                    )
+                else:
+                    train_model.load_state_dict(ckpt.state_dict)
+                    if "optimizer" in engine_state:
+                        optimizer.load_state_dict(engine_state["optimizer"])
                 if "scheduler" in engine_state:
                     scheduler.load_state_dict(engine_state["scheduler"])
+                if scaler is not None and "scaler" in engine_state:
+                    scaler.load_state_dict(engine_state["scaler"])
                 start_step = engine_state.get("step", -1) + 1
                 # Restore the best-metric baseline: without it the first
                 # post-resume validation resets tracking and a WORSE metric
@@ -688,59 +912,142 @@ class TaskEngine(Engine):
                 logger.info("Resumed task training at step %d.", start_step)
         elif checkpoint is not None:
             ckpt = Checkpoint.from_path(checkpoint, map_location="cpu")
-            train_model.load_train_state_dict = getattr(  # hook if available
-                train_model, "load_train_state_dict", train_model.load_state_dict
-            )
-            train_model.load_train_state_dict(ckpt.state_dict)  # type: ignore[misc]
+            if fsdp_train_model is not None:
+                from autovision.runtime.fsdp import load_full_state_dict
 
-        if precision in ("bf16-mixed", "16-mixed") and not supports_amp(device.type):
-            precision = "32-true"
-        autocast_dtype = {"bf16-mixed": torch.bfloat16, "16-mixed": torch.float16}.get(precision)
+                load_full_state_dict(
+                    fsdp_train_model, optimizer, ckpt.state_dict, None
+                )
+            else:
+                train_model.load_train_state_dict = getattr(  # hook if available
+                    train_model, "load_train_state_dict", train_model.load_state_dict
+                )
+                train_model.load_train_state_dict(ckpt.state_dict)  # type: ignore[misc]
 
         step_hooks = step_hooks or []
         infinite_loader = _InfiniteCycleIterator(train_dataloader, sampler=train_sampler)
         train_window = _TrainWindow()
+        no_improve = 0
+        stopped_early = False
+        last_completed_step = start_step - 1
         best_metric: float | None = restored_best_metric
         best_metrics: dict[str, float] = {}
         watch_key = getattr(train_model, "watch_metric", None) or "val_metric/map"
         result = TaskFitResult(out_dir=out_dir, steps_run=0)
+        callbacks = list(callbacks or [])
+
+        def _invoke(name: str, *args: Any) -> None:
+            for callback in callbacks:
+                hook = getattr(callback, name, None)
+                if not callable(hook):
+                    continue
+                try:
+                    hook(*args)
+                except Exception:  # noqa: BLE001 - callbacks are non-fatal
+                    logger.warning(
+                        "callback %s.%s failed; continuing training.",
+                        type(callback).__name__, name, exc_info=True,
+                    )
+
+        is_rank_zero_run = world_size == 1 or _is_rank_zero_internal()
+        if is_rank_zero_run:
+            _invoke("on_train_start", steps, out_dir)
+
+        last_full_state: dict[str, Any] | None = None
+
+        def _collect_state() -> tuple[dict[str, Any], dict[str, Any]]:
+            if fsdp_train_model is not None:
+                from autovision.runtime.fsdp import collect_full_state_dict
+
+                return collect_full_state_dict(
+                    fsdp_train_model, optimizer, rank0_only=True
+                )
+            return train_model.state_dict(), optimizer.state_dict()
 
         def save_checkpoint(step: int, best_or_last: str) -> None:
+            nonlocal last_full_state
             with otel_span("engine.checkpoint", {"step": step, "kind": best_or_last}):
-                checkpoint_dict: dict = {"state_dict": train_model.state_dict()}
-                if hasattr(train_model, "on_save_checkpoint"):
-                    train_model.on_save_checkpoint(checkpoint_dict)
-                engine_state: dict = {
-                    "optimizer": optimizer.state_dict(),
-                    "scheduler": scheduler.state_dict(),
-                    "step": step,
-                    # Closure read at call time: the best baseline rides in
-                    # every checkpoint so a resume can restore it.
-                    "best_metric": best_metric,
-                }
-                if "ema" in checkpoint_dict:
-                    engine_state["ema"] = checkpoint_dict["ema"]
-                metadata = CheckpointMetadata(
-                    epoch=step,
-                    global_step=step,
-                    normalize_args=normalize_args,
-                    engine_state=engine_state,
-                )
-                Checkpoint(
-                    state_dict=checkpoint_dict["state_dict"], autovision=metadata
-                ).save(out_dir / "checkpoints" / f"{best_or_last}.ckpt")
+                # FSDP gathers collectively on every rank; the other ranks
+                # return empty dicts and must not write. Non-FSDP only
+                # materializes the (potentially large) state on rank zero;
+                # the others still join the failure barrier below.
+                is_zero = world_size == 1 or _is_rank_zero_internal()
+                if fsdp_train_model is not None or is_zero:
+                    state, optim_state = _collect_state()
+                else:
+                    state, optim_state = {}, {}
+                last_full_state = state
+                write_ok = True
+                write_error: Exception | None = None
+                if is_zero:
+                    try:
+                        checkpoint_dict: dict = {"state_dict": state}
+                        if hasattr(train_model, "on_save_checkpoint"):
+                            # EMA is a plain object (not an FSDP-managed
+                            # module), so this stays a full sidecar.
+                            train_model.on_save_checkpoint(checkpoint_dict)
+                        engine_state: dict = {
+                            "optimizer": optim_state,
+                            "scheduler": scheduler.state_dict(),
+                            "step": step,
+                            # Closure read at call time: the best baseline
+                            # rides in every checkpoint so a resume can
+                            # restore it.
+                            "best_metric": best_metric,
+                        }
+                        if "ema" in checkpoint_dict:
+                            engine_state["ema"] = checkpoint_dict["ema"]
+                        if scaler is not None:
+                            engine_state["scaler"] = scaler.state_dict()
+                        metadata = CheckpointMetadata(
+                            epoch=step,
+                            global_step=step,
+                            normalize_args=normalize_args,
+                            engine_state=engine_state,
+                        )
+                        Checkpoint(
+                            state_dict=checkpoint_dict["state_dict"],
+                            autovision=metadata,
+                        ).save(out_dir / "checkpoints" / f"{best_or_last}.ckpt")
+                    except Exception as error:  # noqa: BLE001 - propagate via barrier
+                        write_ok = False
+                        write_error = error
+                        logger.exception(
+                            "rank zero failed to write the %s checkpoint.",
+                            best_or_last,
+                        )
+                # All ranks participate, so a rank-zero disk/permission
+                # failure aborts the job instead of hanging on the next
+                # collective.
+                _rank_zero_write_barrier(device, world_size, write_ok)
+                if write_error is not None:
+                    raise write_error
 
-        def export_weights(step: int, best_or_last: str) -> Path:
+        def export_weights(
+            step: int, best_or_last: str, state: dict[str, Any] | None = None
+        ) -> Path:
             export_dir = out_dir / "exported_models"
             export_dir.mkdir(parents=True, exist_ok=True)
             path = export_dir / f"exported_{best_or_last}.pt"
+            if fsdp_train_model is None:
+                export_state = train_model.get_export_state_dict()
+            elif getattr(train_model, "ema_model", None) is not None:
+                # EMA is outside FSDP (plain object): its weights are full.
+                export_state = {
+                    f"ema_model.{key}": value
+                    for key, value in train_model.ema_model.model.state_dict().items()
+                }
+            else:
+                # Full FSDP state keys are ``model.*``; the task-model
+                # loaders accept that prefix.
+                export_state = state if state is not None else last_full_state or {}
             torch.save(
                 {
                     "schema_version": 1,
                     "kind": "task_model",
                     "model_class_path": model_class_path,
                     "model_init_args": model_init_args or {},
-                    "train_model": train_model.get_export_state_dict(),
+                    "train_model": export_state,
                     "normalize_args": normalize_args,
                     "version": __import__("autovision", fromlist=["__version__"]).__version__,
                 },
@@ -836,16 +1143,51 @@ class TaskEngine(Engine):
                             raise RuntimeError(
                                 f"Non-finite loss at step {step}. Check data or lower lr."
                             )
-                        loss.backward()
+                        if scaler is not None:
+                            scaler.scale(loss).backward()
+                        else:
+                            loss.backward()
                         # Kept on-device: one sync at logging time instead
                         # of one per microbatch.
                         accumulated_loss = accumulated_loss + step_result.loss.detach()
+                    if scaler is not None:
+                        # Unscale once after the accumulation window so the
+                        # gradient checks and clip see real magnitudes.
+                        scaler.unscale_(optimizer)
                     if nan_monitor is not None:
                         nan_monitor.check_gradients(train_model)
                     train_model.clip_gradients(optimizer)
-                optimizer.step()
-                scheduler.step()
-                train_model.on_train_batch_end()
+                if scaler is not None:
+                    scale_before = scaler.get_scale()
+                    scaler.step(optimizer)
+                    scaler.update()
+                    stepped = scaler.get_scale() >= scale_before
+                else:
+                    optimizer.step()
+                    stepped = True
+                if stepped:
+                    scheduler.step()
+                if (
+                    fsdp_train_model is not None
+                    and getattr(train_model, "ema_model", None) is not None
+                ):
+                    # EMA keeps full parameter copies; FSDP's main model is
+                    # sharded between forwards. Gather for the EMA update
+                    # only (writeback=False), at the configured interval.
+                    interval = max(1, Env.FSDP_EMA_INTERVAL.value)
+                    if (step + 1) % interval == 0:
+                        from torch.distributed.fsdp import (
+                            FullyShardedDataParallel as FSDP,
+                        )
+
+                        with FSDP.summon_full_params(
+                            fsdp_train_model, recurse=True, writeback=False
+                        ):
+                            train_model.on_train_batch_end()
+                else:
+                    train_model.on_train_batch_end()
+                if is_rank_zero_run:
+                    _invoke("on_step_end", step + 1, dict(step_result.log_dict))
 
                 is_rank_zero = world_size == 1 or _is_rank_zero_internal()
                 train_window.update(step_result.log_dict)
@@ -875,7 +1217,7 @@ class TaskEngine(Engine):
                         metrics["lr_backbone"] = backbone_lrs[0]
                     seconds_per_step = round(train_window.seconds_per_step(), 3)
                     metrics["seconds_per_step"] = seconds_per_step
-                    logger_fn(metrics, step + 1)
+                    _log_metrics_safely(logger_fn, metrics, step + 1)
                     logger.info(
                         "Step %d/%d | train_loss %.4f | lr %.2e%s | %.2f s/step",
                         step + 1, steps, metrics["train_loss"], metrics["lr"],
@@ -893,11 +1235,14 @@ class TaskEngine(Engine):
                     and save_every_num_steps > 0
                     and (step + 1) % save_every_num_steps == 0
                 )
-                if (is_save_step or is_last_step) and is_rank_zero:
+                if is_save_step or (is_last_step and save_last):
                     save_checkpoint(step, "last")
-                    result.checkpoint_path = out_dir / "checkpoints" / "last.ckpt"
-                    result.exported_model_path = export_weights(step, "last")
-                    logger.info("Saved last checkpoint at step %d.", step + 1)
+                    if is_rank_zero:
+                        result.checkpoint_path = out_dir / "checkpoints" / "last.ckpt"
+                        result.exported_model_path = export_weights(
+                            step, "last", last_full_state
+                        )
+                        logger.info("Saved last checkpoint at step %d.", step + 1)
 
                 do_validation = (
                     val_dataloader is not None
@@ -920,7 +1265,22 @@ class TaskEngine(Engine):
                         if val_sampler is not None:
                             val_sampler.set_epoch(step)
                         val_losses = []
-                        with torch.no_grad():
+                        # Validation calls the unwrapped model directly; FSDP
+                        # keeps parameters sharded outside its own forward, so
+                        # gather them for the eval pass (writeback=False).
+                        if fsdp_train_model is not None:
+                            from torch.distributed.fsdp import (
+                                FullyShardedDataParallel as FSDP,
+                            )
+
+                            param_context = FSDP.summon_full_params(
+                                fsdp_train_model,
+                                recurse=True,
+                                writeback=False,
+                            )
+                        else:
+                            param_context = nullcontext()
+                        with param_context, torch.no_grad():
                             for val_batch in val_dataloader:
                                 val_batch = self._to_device(val_batch, device)
                                 val_result = train_model.validation_step(val_batch, step)
@@ -961,7 +1321,7 @@ class TaskEngine(Engine):
                         torch.distributed.broadcast_object_list(payload, src=0)
                         val_metrics = payload[0]
                     if logger_fn is not None and is_rank_zero:
-                        logger_fn(val_metrics, step + 1)
+                        _log_metrics_safely(logger_fn, val_metrics, step + 1)
                     if is_rank_zero:
                         report = None
                         report_fn = getattr(train_model, "validation_report", None)
@@ -987,14 +1347,24 @@ class TaskEngine(Engine):
                                 "Validation at step %d: %s", step + 1,
                                 {k: round(v, 4) for k, v in watched.items()},
                             )
+                    if is_rank_zero_run:
+                        _invoke("on_validation_end", step + 1, dict(val_metrics))
                     watch_value = val_metrics.get(watch_key, -val_metrics["val_loss"])
-                    if best_metric is None or watch_value > best_metric:
+                    improved = (
+                        best_metric is None
+                        or watch_value > best_metric + early_stopping_min_delta
+                    )
+                    if improved:
                         best_metric = watch_value
                         best_metrics = dict(val_metrics)
-                        if save_best and is_rank_zero:
+                        no_improve = 0
+                        if save_best:
                             save_checkpoint(step, "best")
-                            result.best_checkpoint_path = out_dir / "checkpoints" / "best.ckpt"
-                            result.best_exported_model_path = export_weights(step, "best")
+                            if is_rank_zero:
+                                result.best_checkpoint_path = out_dir / "checkpoints" / "best.ckpt"
+                                result.best_exported_model_path = export_weights(
+                                    step, "best", last_full_state
+                                )
                         if is_rank_zero:
                             logger.info(
                                 "Best %s improved to %.4f (step %d)",
@@ -1011,7 +1381,39 @@ class TaskEngine(Engine):
                                     {"best_metric": watch_value, "step": step + 1}
                                 )
                             )
+                    else:
+                        no_improve += 1
+                        if (
+                            early_stopping_patience is not None
+                            and no_improve >= early_stopping_patience
+                        ):
+                            stopped_early = True
+                            last_completed_step = step
+                            if save_last:
+                                save_checkpoint(step, "last")
+                            if is_rank_zero:
+                                logger.info(
+                                    "Early stopping at step %d: %s did not "
+                                    "improve for %d validations (best %.4f).",
+                                    step + 1, watch_key, no_improve,
+                                    best_metric if best_metric is not None else float("nan"),
+                                )
+                                # Persist the latest weights even when this is
+                                # not a scheduled save step (unless the user
+                                # disabled last-checkpoint retention).
+                                if save_last:
+                                    result.checkpoint_path = out_dir / "checkpoints" / "last.ckpt"
+                                    result.exported_model_path = export_weights(
+                                        step, "last", last_full_state
+                                    )
+                                _invoke(
+                                    "on_early_stop",
+                                    step + 1, best_metric, no_improve,
+                                )
+                            train_model.train()
+                            break
                     train_model.train()
+                last_completed_step = step
 
         finally:
             end_span(fit_span)
@@ -1019,8 +1421,12 @@ class TaskEngine(Engine):
                 underflow_monitor.remove_hooks()
             if world_size > 1 and torch.distributed.is_initialized():
                 torch.distributed.destroy_process_group()
-        result.steps_run = steps - start_step
+        result.steps_run = max(0, last_completed_step - start_step + 1)
         result.best_metrics = best_metrics
+        result.stopped_early = stopped_early
+        result.stop_step = last_completed_step + 1 if stopped_early else None
+        if is_rank_zero_run:
+            _invoke("on_train_end", result)
         return result
 
     @staticmethod

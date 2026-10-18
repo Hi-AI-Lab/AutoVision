@@ -27,7 +27,10 @@ class TaskNetwork(nn.Module):
         ignore_args: set[str] | None = None,
     ) -> None:
         super().__init__()
-        ignore = ignore_args or set()
+        # ``init_args=locals()`` captures the ``__class__`` cell too. It is
+        # not a constructor argument, and persisting a class object in an
+        # export makes the pickle-free loader reject an otherwise safe file.
+        ignore = set(ignore_args or ()) | {"__class__"}
         self._init_args: dict[str, Any] = {
             key: value for key, value in init_args.items() if key not in ignore
         }
@@ -122,16 +125,26 @@ class TaskNetwork(nn.Module):
         nms_iou_threshold: float = 0.3,
         global_local_iou_threshold: float = 0.1,
         padding_mode: str = "resize",
+        batch_size: int | None = None,
+        merge: str = "nms",
+        overlap_metric: str = "iou",
     ) -> dict[str, torch.Tensor]:
         """Slicing-aided hyper inference (SAHI) for small objects.
 
         The original-resolution image is tiled with overlap (baseline
         semantics: tile_size defaults to the model input size, a resized
-        full-image view serves as the global tile, all views run in one
-        batch), per-view predictions are filtered by ``threshold``, then
-        merged by ``combine_object_detection_tiles`` (per-label NMS, tile
-        boxes offset to original coordinates, tiles duplicating a
-        same-label global box suppressed).
+        full-image view serves as the global tile), per-view predictions are
+        filtered by ``threshold``, then merged by
+        ``combine_object_detection_tiles`` (per-label NMS/NMM, tile boxes
+        offset to original coordinates, tiles duplicating a same-label
+        global box suppressed or merged).
+
+        ``batch_size`` bounds how many views (global + tiles) go through one
+        forward pass; ``None`` keeps the historical single-batch behavior.
+        On large rasters this prevents the tile stack from multiplying peak
+        VRAM. ``merge="nmm"`` unions overlapping fragments (better for
+        truncated/adjacent objects); ``overlap_metric="ios"`` makes the
+        overlap test sensitive to nested boxes.
 
         Only object-detection task models (postprocess output with
         ``bboxes``/``scores``/``labels`` tensors) are supported; anything
@@ -148,6 +161,8 @@ class TaskNetwork(nn.Module):
             tile_image,
         )
 
+        if batch_size is not None and batch_size < 1:
+            raise ValueError(f"batch_size must be >= 1 or None, got {batch_size}.")
         was_training = self.training
         self.eval()
         try:
@@ -173,20 +188,28 @@ class TaskNetwork(nn.Module):
                     edge_h = edge_w = tile_size
                 tile_metas.append({"orig_w": edge_w, "orig_h": edge_h})
 
-            # Global view (resized full image) + all tiles in one batch.
+            # Global view (resized full image) + all tiles; optional chunking
+            # bounds peak memory on large rasters.
             global_tensor, global_meta = self.preprocess_image(original)
             tile_tensors = []
             for tile in tiles:
                 tile_tensor, _ = self.preprocess_image(tile)
                 tile_tensors.append(tile_tensor)
-            batch = torch.stack([global_tensor, *tile_tensors])
-            results = self.postprocess(
-                self.forward_backend(
-                    self.preprocess_batch(batch).to(self._module_device())
-                ),
-                [global_meta, *tile_metas],
-                threshold=threshold,
-            )
+            views = [global_tensor, *tile_tensors]
+            metas = [global_meta, *tile_metas]
+            chunk = batch_size or len(views)
+            results: list[Any] = []
+            for start in range(0, len(views), chunk):
+                batch = torch.stack(views[start : start + chunk])
+                results.extend(
+                    self.postprocess(
+                        self.forward_backend(
+                            self.preprocess_batch(batch).to(self._module_device())
+                        ),
+                        metas[start : start + chunk],
+                        threshold=threshold,
+                    )
+                )
 
             global_output = results[0]
             if "bboxes" not in global_output:
@@ -203,6 +226,8 @@ class TaskNetwork(nn.Module):
                 (width, height),
                 nms_iou_threshold=nms_iou_threshold,
                 global_local_iou_threshold=global_local_iou_threshold,
+                merge=merge,
+                overlap_metric=overlap_metric,
             )
         finally:
             if was_training:

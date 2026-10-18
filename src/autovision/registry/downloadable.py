@@ -16,6 +16,7 @@ from pathlib import Path
 from autovision.encoders.weight_verification import compute_file_sha256
 from autovision.errors import AutoVisionError
 from autovision.registry.assets import LicenseRef
+from autovision.runtime.env import Env
 
 __all__ = [
     "ASSET_MANIFEST",
@@ -116,6 +117,12 @@ def resolve_downloadable(
             "Cached model '%s' failed sha256 verification; re-downloading.", name
         )
         target.unlink()
+    if Env.OFFLINE.value:
+        raise DownloadableModelError(
+            f"AUTOVISION_OFFLINE=1 and no verified cache for '{name}' at "
+            f"'{target}'. Run once without AUTOVISION_OFFLINE to populate "
+            "the cache, or pre-seed it with a sha256-matching file."
+        )
     last_error: DownloadableModelError | None = None
     for source in (entry.url, *entry.mirrors):
         try:
@@ -153,7 +160,9 @@ def _download(url: str, target: Path) -> None:
 
     logger.info("Downloading model from %s", url)
     try:
-        with urllib.request.urlopen(url) as response:  # noqa: S310 (pinned urls)
+        with urllib.request.urlopen(  # noqa: S310  # nosec B310
+            url, timeout=Env.DOWNLOAD_CHUNK_TIMEOUT_SEC.value
+        ) as response:
             target.write_bytes(response.read())
     except Exception as error:  # noqa: BLE001 (clear network failure surface)
         if target.exists():

@@ -234,3 +234,39 @@ class TestGtrDepthClosure:
         assert tuple(prediction["depth"].shape) == (48, 72)
         assert torch.isfinite(prediction["depth"]).all()
         assert float(prediction["depth"].min()) > 0
+
+
+class TestDepthValidationResolution:
+    def test_validation_uses_gt_canvas_resolution(self):
+        # Regression: validation used to upsample predictions to the
+        # original frame and compare them against canvas-resized GT, which
+        # crashes (or silently mis-scores) when the two sizes differ.
+        from types import SimpleNamespace
+
+        from torch import nn
+
+        from autovision.tasks.depth_estimation.gtr.train_model import (
+            GTRDepthEstimationTrain,
+        )
+
+        class _FakeDepthModel(nn.Module):
+            def forward_backend(self, x):
+                return torch.ones(x.shape[0], 8, 8)
+
+        train = object.__new__(GTRDepthEstimationTrain)
+        nn.Module.__init__(train)
+        train.model = _FakeDepthModel()
+        train.model_args = SimpleNamespace(
+            min_depth=0.001, max_depth=10.0, silog_lambd=0.15
+        )
+        train._evaluators = {}
+        batch = {
+            "image": torch.randn(1, 3, 16, 24),
+            "depth": torch.full((1, 16, 24), 2.0),
+            "original_size": [(48, 32)],
+        }
+        result = train.validation_step(batch, step=0)
+        assert torch.isfinite(result.loss)
+        metrics = train.compute_metrics("val")
+        assert "val_metric/abs_rel" in metrics
+        assert np.isfinite(metrics["val_metric/abs_rel"])

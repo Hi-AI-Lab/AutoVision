@@ -12,14 +12,14 @@
 Python ≥ 3.10，以 pip 安装为准（与 CI 同款）：
 
 ```bash
-pip install -e ".[dev,export]"   # 测试 + 导出链（CI 同款）
+pip install -e ".[dev,export,serving,video,transformers]"   # 测试 + 导出 + 服务/视频依赖（CI 同款）
 pip install -e ".[docs]"         # mkdocs 站点构建（改文档时需要）
 pytest tests -q                  # 全量测试（CPU 可跑）
 ```
 
-已知未决项：`uv.lock` 的冲突声明（`super-gradients` 与 `transformers` /
-`export` 的依赖互斥）尚未补全，`uv lock` 当前会以「不可满足」报错——在修好
-之前请使用 pip 路径（CI 也是 pip）。
+`uv.lock` 由公共 PyPI 生成，可用 `uv lock --check` 验证复现性；CI 与发布门禁
+以 pip 路径为准。重新生成时必须显式使用公共索引：
+`UV_DEFAULT_INDEX=https://pypi.org/simple uv lock`。
 
 ## 提交前必须通过的门禁
 
@@ -28,7 +28,13 @@ pytest tests -q                  # 全量测试（CPU 可跑）
 
 ```bash
 ruff check src tests scripts             # lint（规则集见 pyproject.toml）
+bandit -r src/autovision -ll -ii -q      # SAST（medium/high）
+mypy src/autovision/errors.py src/autovision/runtime/env.py \
+    src/autovision/runtime/checkpoint.py src/autovision/runtime/fsdp.py \
+    src/autovision/config                # 核心模块类型门禁
 pytest tests -q                          # 测试（含金标准快照）
+python scripts/smoke_enterprise.py --json smoke-report.json  # 企业冒烟
+# CI 另有 core coverage gate（19 个文件，--cov-fail-under=30）
 python scripts/check_provenance.py       # 溯源门禁（禁词扫描 + allowlist 卫生）
 python scripts/check_layering.py         # 分层契约（单向依赖）
 python scripts/check_docs_links.py       # 公开树断链检查（链接 + 反引号仓库路径）

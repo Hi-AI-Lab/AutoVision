@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import queue
+import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -23,15 +26,15 @@ import torch
 from autovision.errors import AutoVisionError
 from autovision.inference.engine import InferenceEngine
 from autovision.inference.video import AnnotatedVideoWriter, VideoFrameStream
+from autovision.results import InferenceResult
+from autovision.tracking.analytics import LineZone, PolygonZone, TrackSmoother
+from autovision.tracking.byte_track import Track
 from autovision.types import PathLike
+from autovision.visualize.zones import draw_zones
 
 __all__ = ["StreamRunResult", "run_stream"]
 
 logger = logging.getLogger("autovision")
-
-#: Tensors above this element count are summarized instead of serialized
-#: (dense outputs — depth maps, masks — would bloat the JSONL).
-_JSON_MAX_ELEMENTS = 10_000
 
 
 @dataclass(frozen=True)
@@ -46,34 +49,28 @@ class StreamRunResult:
     backend: str
     #: Number of distinct track ids over the run (0 when tracking is off).
     tracks: int = 0
+    #: Wall-clock seconds spent decoding, inferring, rendering and encoding.
+    decode_s: float = 0.0
+    infer_s: float = 0.0
+    render_s: float = 0.0
+    write_s: float = 0.0
+    #: Cumulative line-zone and current polygon-zone counts.
+    zones: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def fps(self) -> float:
+        """End-to-end throughput (decoded frames per wall-clock second)."""
+        return self.frames / self.elapsed_s if self.elapsed_s > 0 else 0.0
 
     def summary(self) -> str:
+        """One-line run summary for the CLI."""
         video = f", video={self.video_path}" if self.video_path else ""
         tracked = f", tracks={self.tracks}" if self.tracks else ""
         return (
             f"frames={self.frames} backend={self.backend} "
-            f"elapsed={self.elapsed_s:.2f}s jsonl={self.predictions_path}{video}{tracked}"
+            f"fps={self.fps:.1f} elapsed={self.elapsed_s:.2f}s "
+            f"jsonl={self.predictions_path}{video}{tracked}"
         )
-
-
-def _jsonable(value: Any) -> Any:
-    if isinstance(value, np.ndarray):
-        if value.dtype.kind in "biufc":
-            return _jsonable(torch.from_numpy(np.ascontiguousarray(value)))
-        return value.tolist()
-    if isinstance(value, np.generic):
-        return value.item()
-    if not torch.is_tensor(value):
-        return value
-    if value.numel() > _JSON_MAX_ELEMENTS:
-        return {
-            "shape": list(value.shape),
-            "summarized": True,
-            "mean": float(value.float().mean()),
-            "min": float(value.float().min()),
-            "max": float(value.float().max()),
-        }
-    return value.detach().cpu().tolist()
 
 
 def _render_frame(
@@ -83,14 +80,24 @@ def _render_frame(
     tracks: list[Any] | None = None,
     track_class_names: dict[int, str] | None = None,
 ) -> Any:
-    """Overlay detection boxes on one RGB frame; pass-through otherwise.
+    """Overlay the result's visual layers on one RGB frame; pass-through otherwise.
 
-    With ``tracks`` the track id joins the label (``#7 cat 0.91``); the id
-    is matched to its detection by the tracker's bbox. ``class_names``
-    drives the DETECTION labels; ``track_class_names`` the track labels
-    (``None`` keeps bare ids — e.g. frames with no class ids at all).
+    Detection boxes, oriented polygons, pose keypoints, masks and depth maps
+    are all rendered through :func:`draw_prediction`; an unknown record keeps
+    the original frame.
     """
-    if "bboxes" not in record:
+    if not any(
+        key in record
+        for key in (
+            "bboxes",
+            "polygons",
+            "keypoints",
+            "mask",
+            "masks",
+            "depth",
+            "labels",
+        )
+    ):
         return frame
     from PIL import ImageDraw
 
@@ -113,6 +120,71 @@ def _render_frame(
     return np.asarray(rendered)
 
 
+def _finite_or_none(value: float) -> float | None:
+    """JSON-safe float: non-finite values become ``null``."""
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def _as_numpy(value: Any) -> np.ndarray:
+    """Tensor/array/list -> NumPy array (no copy for NumPy inputs)."""
+    if torch.is_tensor(value):
+        return value.detach().cpu().numpy()
+    return np.asarray(value)
+
+
+def _track_record(
+    record: dict[str, Any],
+    tracker: Any,
+    class_names: dict[int, str] | None,
+) -> tuple[list[Any] | None, dict[int, str] | None]:
+    """Feed one detection record to ByteTrack; return tracks and label map."""
+    if tracker is None or "bboxes" not in record:
+        return None, class_names
+    boxes = _as_numpy(record["bboxes"]).reshape(-1, 4)
+    scores = record.get("scores")
+    labels = record.get("labels")
+    score_array = (
+        np.ones(boxes.shape[0], dtype=np.float32)
+        if scores is None
+        else _as_numpy(scores).reshape(-1)
+    )
+    label_array = None if labels is None else _as_numpy(labels).reshape(-1)
+    tracks = tracker.update(boxes, score_array, label_array)
+    if label_array is None:
+        # ByteTrack defaults to class 0 when no labels are supplied; expose
+        # "unknown" (-1) instead of fabricating a real class id.
+        tracks = [
+            Track(
+                track_id=track.track_id,
+                bbox=track.bbox,
+                score=track.score,
+                class_id=-1,
+                state=track.state,
+                age=track.age,
+            )
+            for track in tracks
+        ]
+    # No class ids in this record — label the tracks with the bare id instead
+    # of a fabricated class-0 name.
+    return tracks, (class_names if label_array is not None else None)
+
+
+def _safe_render(
+    frame: np.ndarray,
+    record: dict[str, Any],
+    class_names: dict[int, str] | None,
+    tracks: list[Any] | None,
+    track_names: dict[int, str] | None,
+) -> np.ndarray:
+    """Render one frame, falling back to the source frame on a bad record."""
+    try:
+        return _render_frame(frame, record, class_names, tracks, track_names)
+    except Exception as error:  # noqa: BLE001 - rendering must not kill the run
+        logger.warning("Frame rendering failed (%s); writing the source frame.", error)
+        return frame
+
+
 def run_stream(
     source: PathLike,
     out_dir: PathLike,
@@ -129,6 +201,13 @@ def run_stream(
     render: bool = True,
     max_frames: int | None = None,
     class_names: dict[int, str] | None = None,
+    mask_format: str = "rle",
+    max_json_elements: int = 10_000,
+    prefetch: int = 8,
+    writer_buffer: int = 8,
+    line_zones: Sequence[LineZone] | None = None,
+    polygon_zones: Sequence[PolygonZone] | None = None,
+    smooth: bool = False,
     track: bool = False,
     track_thresh: float = 0.5,
     track_buffer: int = 30,
@@ -147,9 +226,36 @@ def run_stream(
     one run, in stream order (batch aggregation does not reorder frames).
     The tracker receives the source's real frame rate, so ``track_buffer``
     keeps its documented meaning (frames at that rate).
+
+    The loop is a three-stage pipeline: a reader thread decodes into a
+    bounded queue (``prefetch``), the caller thread batches/infers and
+    updates tracker state in frame order, and a writer thread encodes the
+    rendered frames (``writer_buffer``). ``StreamRunResult`` reports the
+    per-stage seconds and end-to-end FPS.
+
+    ``line_zones`` / ``polygon_zones`` (``track=True`` required) add
+    cumulative crossing counts and current in-zone counts to every JSONL
+    entry and to the rendered video. ``smooth=True`` averages each track's
+    box over recent frames for rendering; the JSONL predictions stay raw.
+    ``mask_format`` is ``"rle"`` (default), ``"dense"`` or ``"none"``.
     """
     if batch_size < 1:
         raise AutoVisionError(f"batch_size must be >= 1, got {batch_size}.")
+    if mask_format not in {"rle", "dense", "none"}:
+        raise AutoVisionError(
+            "mask_format must be 'rle', 'dense', or 'none', "
+            f"got {mask_format!r}."
+        )
+    if max_json_elements < 1:
+        raise AutoVisionError(
+            f"max_json_elements must be >= 1, got {max_json_elements}."
+        )
+    if prefetch < 1:
+        raise AutoVisionError(f"prefetch must be >= 1, got {prefetch}.")
+    if writer_buffer < 1:
+        raise AutoVisionError(
+            f"writer_buffer must be >= 1, got {writer_buffer}."
+        )
     if engine is None:
         if model is None:
             raise AutoVisionError("run_stream needs either engine= or model=.")
@@ -181,97 +287,270 @@ def run_stream(
             frame_rate=max(1, int(round(fps))),
         )
 
-    writer: AnnotatedVideoWriter | None = None
+    line_zone_list = list(line_zones or ())
+    polygon_zone_list = list(polygon_zones or ())
+    if (line_zone_list or polygon_zone_list) and not track:
+        raise AutoVisionError(
+            "line_zones/polygon_zones require track=True (zones count tracks)."
+        )
+    if smooth and not track:
+        raise AutoVisionError("smooth=True requires track=True (track smoothing).")
+    zone_names = [zone.name for zone in line_zone_list] + [
+        zone.name for zone in polygon_zone_list
+    ]
+    if len(zone_names) != len(set(zone_names)):
+        raise AutoVisionError(
+            "Zone names must be unique across line_zones and polygon_zones."
+        )
+    smoother = TrackSmoother() if smooth else None
 
-    frames_done = 0
-    track_ids: set[int] = set()
-    buffer: list[Any] = []
-    buffer_indices: list[int] = []
+    stats = {"decode_s": 0.0, "infer_s": 0.0, "render_s": 0.0, "write_s": 0.0}
+    read_queue: queue.Queue[tuple[int, np.ndarray] | None] = queue.Queue(
+        maxsize=prefetch
+    )
+    write_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=writer_buffer)
+    stop_event = threading.Event()
+    writer_stop = threading.Event()
+    writer_done = threading.Event()
+    reader_error: list[BaseException] = []
+    writer_error: list[BaseException] = []
 
-    def flush() -> None:
-        nonlocal frames_done, writer
-        if not buffer:
-            return
-        tensors = [
-            torch.from_numpy(frame).permute(2, 0, 1) for frame in buffer
-        ]
-        records = engine.run_batch(tensors, threshold=threshold)
-        for frame, index, record in zip(buffer, buffer_indices, records):
-            entry: dict[str, Any] = {"frame": index}
-            if stream.info.fps and stream.info.fps > 0:
-                entry["time_s"] = round(index / stream.info.fps, 4)
-            entry["predictions"] = {
-                key: _jsonable(value) for key, value in record.items()
-            }
-            tracks = None
-            track_names = class_names
-            if tracker is not None and "bboxes" in record:
-                import numpy as _np
+    def reader_worker() -> None:
+        iterator = None
+        try:
+            iterator = iter(stream)
+            while not stop_event.is_set():
+                read_started = time.perf_counter()
+                try:
+                    item = next(iterator)
+                except StopIteration:
+                    break
+                stats["decode_s"] += time.perf_counter() - read_started
+                while not stop_event.is_set():
+                    try:
+                        read_queue.put(item, timeout=0.1)
+                        break
+                    except queue.Full:
+                        continue
+        except BaseException as error:  # noqa: BLE001 - re-raised by the caller
+            reader_error.append(error)
+        finally:
+            if iterator is not None:
+                try:
+                    # Release the VideoCapture even when the main thread stops
+                    # early.
+                    iterator.close()
+                except BaseException as error:  # noqa: BLE001
+                    reader_error.append(error)
+            # Always make the main loop's blocking get() wake up; the caller
+            # drains this queue in its own finally block.
+            sentinel_deadline = time.monotonic() + 5.0
+            while time.monotonic() < sentinel_deadline:
+                try:
+                    read_queue.put(None, timeout=0.2)
+                    break
+                except queue.Full:
+                    continue
+            else:
+                logger.warning("Could not enqueue the reader sentinel.")
 
-                boxes = record["bboxes"].detach().cpu().numpy() if torch.is_tensor(
-                    record["bboxes"]
-                ) else _np.asarray(record["bboxes"])
-                scores = record.get("scores")
-                labels = record.get("labels")
-                tracks = tracker.update(
-                    boxes,
-                    _np.asarray(scores.detach().cpu() if torch.is_tensor(scores) else scores),
-                    _np.asarray(labels.detach().cpu() if torch.is_tensor(labels) else labels)
-                    if labels is not None
-                    else None,
-                )
-                if labels is None:
-                    # No class ids in this record — label the tracks with the
-                    # bare id instead of a fabricated class-0 name.
-                    track_names = None
-                track_ids.update(t.track_id for t in tracks)
-                entry["tracks"] = [
-                    {
-                        "track_id": t.track_id,
-                        "bbox": list(t.bbox),
-                        "score": round(float(t.score), 6),
-                        "class_id": t.class_id,
-                        "age": t.age,
-                    }
-                    for t in tracks
-                ]
-            handle.write(json.dumps(entry) + "\n")
-            if render:
-                if writer is None:
-                    # Lazy: live streams report a 0x0 probe result.
+    def writer_worker() -> None:
+        writer_obj: AnnotatedVideoWriter | None = None
+        try:
+            while True:
+                try:
+                    frame = write_queue.get(timeout=0.1)
+                except queue.Empty:
+                    if writer_stop.is_set():
+                        break
+                    continue
+                if writer_obj is None:
                     height, width = frame.shape[:2]
-                    writer = AnnotatedVideoWriter(
+                    writer_obj = AnnotatedVideoWriter(
                         out_dir / "annotated.mp4",
                         fps=stream.info.fps,
                         frame_size=(width, height),
                     )
-                writer.write(_render_frame(frame, record, class_names, tracks, track_names))
-        frames_done += len(buffer)
-        buffer.clear()
-        buffer_indices.clear()
+                write_started = time.perf_counter()
+                writer_obj.write(frame)
+                stats["write_s"] += time.perf_counter() - write_started
+        except BaseException as error:  # noqa: BLE001 - re-raised by the caller
+            writer_error.append(error)
+            # Keep draining until the producer stops, so it cannot block on a
+            # full queue after the writer has failed.
+            while not writer_stop.is_set():
+                try:
+                    write_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+        finally:
+            if writer_obj is not None:
+                writer_obj.close()
+            writer_done.set()
 
-    try:
-        with predictions_path.open("w", encoding="utf-8") as handle:
-            for index, frame in stream:
-                buffer.append(frame)
-                buffer_indices.append(index)
+    frames_done = 0
+    track_ids: set[int] = set()
+    buffer: list[tuple[int, np.ndarray]] = []
+
+    def flush() -> None:
+        nonlocal frames_done
+        if not buffer:
+            return
+        tensors = [torch.from_numpy(frame).permute(2, 0, 1) for _, frame in buffer]
+        infer_started = time.perf_counter()
+        records = engine.run_batch(tensors, threshold=threshold)
+        stats["infer_s"] += time.perf_counter() - infer_started
+        if len(records) != len(buffer):
+            raise AutoVisionError(
+                f"engine returned {len(records)} records for {len(buffer)} frames."
+            )
+        for (index, frame), record in zip(buffer, records):
+            entry: dict[str, Any] = {"frame": index}
+            if stream.info.fps and stream.info.fps > 0:
+                entry["time_s"] = round(index / stream.info.fps, 4)
+            entry["predictions"] = InferenceResult.from_record(record).to_json(
+                masks=mask_format, max_elements=max_json_elements
+            )
+            tracks, track_names = _track_record(record, tracker, class_names)
+            render_tracks = tracks
+            if tracks is not None:
+                track_ids.update(track.track_id for track in tracks)
+                if smoother is not None:
+                    render_tracks = smoother.update(tracks)
+                if line_zone_list or polygon_zone_list:
+                    entry["zones"] = {
+                        "lines": {
+                            zone.name: zone.update(tracks).as_dict()
+                            for zone in line_zone_list
+                        },
+                        "polygons": {
+                            zone.name: zone.update(tracks).as_dict()
+                            for zone in polygon_zone_list
+                        },
+                    }
+                entry["tracks"] = [
+                    {
+                        "track_id": track.track_id,
+                        "bbox": [_finite_or_none(value) for value in track.bbox],
+                        "score": _finite_or_none(track.score),
+                        "class_id": track.class_id,
+                        "age": track.age,
+                    }
+                    for track in tracks
+                ]
+            handle.write(json.dumps(entry, allow_nan=False) + "\n")
+            if render:
+                render_started = time.perf_counter()
+                rendered = _safe_render(
+                    frame, record, class_names, render_tracks, track_names
+                )
+                if line_zone_list or polygon_zone_list:
+                    try:
+                        from PIL import Image
+
+                        canvas = (
+                            Image.fromarray(rendered)
+                            if isinstance(rendered, np.ndarray)
+                            else rendered
+                        )
+                        rendered = np.asarray(
+                            draw_zones(canvas, line_zone_list, polygon_zone_list)
+                        )
+                    except Exception as error:  # noqa: BLE001 - keep the frame
+                        logger.warning(
+                            "Zone rendering failed (%s); writing the frame without "
+                            "zone overlays.",
+                            error,
+                        )
+                stats["render_s"] += time.perf_counter() - render_started
+                write_queue.put(rendered)
+            frames_done += 1
+        buffer.clear()
+
+    reader_thread = threading.Thread(
+        target=reader_worker, name="autovision-reader", daemon=True
+    )
+    writer_thread = (
+        threading.Thread(
+            target=writer_worker, name="autovision-writer", daemon=True
+        )
+        if render
+        else None
+    )
+
+    writer_timed_out = False
+    with predictions_path.open("w", encoding="utf-8") as handle:
+        reader_thread.start()
+        if writer_thread is not None:
+            writer_thread.start()
+        try:
+            while True:
+                item = read_queue.get()
+                if item is None:
+                    break
+                buffer.append(item)
                 if len(buffer) >= batch_size:
                     flush()
             flush()
-    finally:
-        if writer is not None:
-            writer.close()
+            if reader_error:
+                raise reader_error[0]
+        finally:
+            stop_event.set()
+            # A reader parked on a full queue must be drained before join;
+            # bound the drain so a wedged decoder cannot hang shutdown.
+            drain_deadline = time.monotonic() + 10.0
+            while (
+                reader_thread.is_alive()
+                and time.monotonic() < drain_deadline
+            ):
+                try:
+                    read_queue.get(timeout=0.1)
+                except queue.Empty:
+                    pass
+            reader_thread.join(timeout=1.0)
+            if reader_thread.is_alive():
+                logger.warning("Reader thread did not stop within 10s.")
+            if writer_thread is not None:
+                # The writer exits after draining once stop is set; no
+                # sentinel is needed, so a full queue cannot block shutdown.
+                writer_stop.set()
+                if not writer_done.wait(timeout=30.0):
+                    writer_timed_out = True
+                writer_thread.join(timeout=1.0)
+                if writer_thread.is_alive():
+                    logger.warning("Writer thread did not stop within 30s.")
+
+    if writer_error:
+        raise writer_error[0]
+    if writer_timed_out:
+        raise AutoVisionError(
+            "Video writer did not finish within 30s; the output may be "
+            "incomplete. Increase writer_buffer or lower the render load."
+        )
 
     elapsed = time.perf_counter() - started
+    video_candidate = out_dir / "annotated.mp4"
     video_path: Path | None = None
-    if writer is not None:
-        if frames_done:
-            video_path = writer.path
-        else:
-            writer.path.unlink(missing_ok=True)
+    if render and frames_done and video_candidate.exists():
+        video_path = video_candidate
+    elif render:
+        video_candidate.unlink(missing_ok=True)
+    zone_summary: dict[str, Any] = {}
+    if line_zone_list or polygon_zone_list:
+        zone_summary = {
+            "lines": {
+                zone.name: zone.counts.as_dict() for zone in line_zone_list
+            },
+            "polygons": {
+                zone.name: zone.counts.as_dict() for zone in polygon_zone_list
+            },
+        }
     logger.info(
-        "Stream inference finished: %d frames in %.2fs (%s).",
-        frames_done, elapsed, predictions_path,
+        "Stream inference finished: %d frames in %.2fs (%.1f fps, %s).",
+        frames_done,
+        elapsed,
+        frames_done / elapsed if elapsed > 0 else 0.0,
+        predictions_path,
     )
     return StreamRunResult(
         out_dir=out_dir,
@@ -281,4 +560,9 @@ def run_stream(
         elapsed_s=elapsed,
         backend=engine.backend,
         tracks=len(track_ids),
+        decode_s=stats["decode_s"],
+        infer_s=stats["infer_s"],
+        render_s=stats["render_s"],
+        write_s=stats["write_s"],
+        zones=zone_summary,
     )

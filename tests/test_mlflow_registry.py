@@ -241,7 +241,9 @@ class TestRegister:
 class TestPromote:
     def test_dev_to_staging_creates_new_version(self, registry, model_file):
         registry.register(model_file, name="detector", version="1.0.0", stage="dev")
-        promoted = registry.promote(name="detector", version="1.0.0", to_stage="staging")
+        promoted = registry.promote(
+            name="detector", version="1.0.0", to_stage="staging", gates=[]
+        )
         assert promoted.stage == "staging"
         assert promoted.version == "1.0.0"
         assert promoted.path.read_bytes() == b"weights-bytes-v1"
@@ -262,6 +264,14 @@ class TestPromote:
     def test_promote_to_dev_rejected(self, registry, model_file):
         with pytest.raises(RegistryError, match="Cannot promote to 'dev'"):
             registry.promote(name="detector", version="1.0.0", to_stage="dev")
+
+    def test_default_gates_fail_closed_without_model_card(self, registry, model_file):
+        registry.register(model_file, name="detector", version="1.0.0", stage="dev")
+        with pytest.raises(RegistryError, match="Deployment gates failed"):
+            registry.promote(name="detector", version="1.0.0", to_stage="staging")
+        assert not registry.exists(
+            name="detector", version="1.0.0", stage="staging"
+        )
 
     def test_duplicate_target_rejected(self, registry, model_file):
         registry.register(model_file, name="detector", version="1.0.0", stage="dev")
@@ -369,7 +379,7 @@ class TestRealMlflowFileStore:
         entry = registry.get(name="detector", stage="dev", version="1.0.0")
         assert entry.path.read_bytes() == b"weights-bytes-v1"
         promoted = registry.promote(
-            name="detector", version="1.0.0", to_stage="staging"
+            name="detector", version="1.0.0", to_stage="staging", gates=[]
         )
         assert promoted.stage == "staging"
         assert promoted.path.read_bytes() == b"weights-bytes-v1"
@@ -383,3 +393,47 @@ class TestRealMlflowFileStore:
         registry.register(model_file, name="detector", version="1.0.0", stage="dev")
         with pytest.raises(RegistryError, match="one stage at a time"):
             registry.promote(name="detector", version="1.0.0", to_stage="prod")
+
+
+class TestRegistryHardening:
+    def test_sidecars_are_logged_and_downloaded(self, registry, model_file):
+        card = Path(str(model_file) + ".modelcard.json")
+        card.write_text('{"license": "Apache-2.0"}')
+        entry = registry.register(model_file, name="detector", version="1.0.0")
+        local_card = Path(str(entry.path) + ".modelcard.json")
+        assert local_card.is_file()
+        assert local_card.read_text() == '{"license": "Apache-2.0"}'
+
+    def test_get_rejects_tampered_artifact(self, registry, model_file):
+        registry.register(model_file, name="detector", version="1.0.0")
+        client: FakeMlflowClient = registry.client
+        run_id = client.model_versions[0].run_id
+        assert run_id is not None
+        _corrupt_run_artifact(client, run_id)
+        with pytest.raises(RegistryError, match="failed sha256"):
+            registry.get(name="detector", stage="dev", version="1.0.0")
+
+    def test_list_entries_skips_foreign_model_versions(self, registry, model_file):
+        registry.register(model_file, name="detector", version="1.0.0")
+        client: FakeMlflowClient = registry.client
+        client.create_model_version("foreign", "file:///tmp/x.pt", None, {})
+        entries = registry.list_entries()
+        assert [entry.name for entry in entries] == ["detector"]
+
+
+def test_gates_run_against_downloaded_sidecars(registry, model_file):
+    card = Path(str(model_file) + ".modelcard.json")
+    card.write_text('{"license": "Apache-2.0"}')
+    registry.register(model_file, name="detector", version="1.0.0", stage="dev")
+
+    class _SeesCard:
+        name = "sees_card"
+
+        def check(self, entry):
+            sidecar = Path(str(entry.path) + ".modelcard.json")
+            return [] if sidecar.is_file() else ["model card sidecar missing"]
+
+    promoted = registry.promote(
+        name="detector", version="1.0.0", to_stage="staging", gates=[_SeesCard()]
+    )
+    assert promoted.stage == "staging"

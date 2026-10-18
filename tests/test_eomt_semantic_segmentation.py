@@ -274,3 +274,65 @@ class TestEomtEndToEnd:
         prediction = loaded.predict(torch.rand(3, 64, 64))
         assert prediction["mask"].shape == (64, 64)
         assert prediction["mask"].max().item() < 3
+
+
+class TestEomtExportAndWeights:
+    def test_forward_matches_backend(self):
+        model = make_model()
+        x = torch.randn(1, 3, 64, 64)
+        with torch.no_grad():
+            direct = model(x)
+            backend = model.forward_backend(x)
+        for left, right in zip(direct, backend):
+            torch.testing.assert_close(left, right)
+
+    def test_onnx_export_uses_forward(self, tmp_path):
+        pytest.importorskip("onnx")
+        pytest.importorskip("onnxruntime")
+        model = make_model()
+        out = model.export_onnx(
+            tmp_path / "eomt.onnx",
+            batch_size=1,
+            dynamic_batch_size=False,
+            simplify=False,
+            verify=True,
+        )
+        assert out.is_file() and out.stat().st_size > 0
+
+    def test_hub_weights_require_license_opt_in(self, monkeypatch):
+        monkeypatch.delenv("AUTOVISION_DINOV2_WEIGHTS", raising=False)
+        with pytest.raises(PermissionError, match="CC-BY-NC"):
+            build_eomt_model(3, load_weights=True, **MODEL_KWARGS)
+        monkeypatch.delenv("AUTOVISION_DINOV3_WEIGHTS", raising=False)
+        with pytest.raises(PermissionError, match="DINOv3"):
+            build_eomt_model(
+                3, variant="dinov3", load_weights=True, **MODEL_KWARGS
+            )
+
+    def test_unpinned_hub_weights_fail_closed(self, monkeypatch):
+        monkeypatch.setenv("AUTOVISION_DINOV2_WEIGHTS", "1")
+        monkeypatch.delenv("AUTOVISION_ALLOW_UNPINNED_WEIGHTS", raising=False)
+        with pytest.raises(PermissionError, match="no pinned sha256"):
+            build_eomt_model(3, load_weights=True, **MODEL_KWARGS)
+
+    def test_class_head_transfers_from_checkpoint_layout(self, monkeypatch):
+        from transformers import EomtConfig, EomtForUniversalSegmentation
+
+        checkpoint_model = EomtForUniversalSegmentation(
+            EomtConfig(num_labels=2, num_queries=4)
+        )
+        monkeypatch.setattr(
+            EomtForUniversalSegmentation,
+            "from_pretrained",
+            classmethod(
+                lambda cls, source, config=None, **kwargs: checkpoint_model
+            ),
+        )
+        monkeypatch.setenv("AUTOVISION_DINOV2_WEIGHTS", "1")
+        monkeypatch.setenv("AUTOVISION_ALLOW_UNPINNED_WEIGHTS", "1")
+        model = build_eomt_model(
+            5, load_weights=True, **{**MODEL_KWARGS, "num_queries": 8}
+        )
+        assert model.class_predictor.out_features == 6
+        assert model.query.num_embeddings == 8
+        assert model.config.num_labels == 5

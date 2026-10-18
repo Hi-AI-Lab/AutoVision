@@ -18,7 +18,15 @@ autovision-cli registry action=audit
 ```
 
 - `gates=all` 运行标准门禁；`gates=none` 仅做 sha 校验与晋级（测试/紧急通道）。
+  Python API 的 `promote(gates=None)` 默认运行标准门禁（fail-closed）；
+  只有显式传 `gates=[]` 才跳过。
 - `actor=` 写入审计日志；默认读 `AUTOVISION_ACTOR`，否则 `local`。
+- 读写路径（register / promote / get / list / rollback / current / audit）使用
+  跨进程文件锁；读操作不会看到半拷贝条目。注册 key 拒绝 `.`、`..`、路径分隔符、
+  NUL 和空白键。
+- MLflow 后端：注册/晋级会随产物保存并取回 model card / postprocess sidecar，
+  `promote(gates=...)` 对取回的副本执行同一套门禁（默认门禁同样 fail-closed），
+  `get` 重新校验 sha256，`list_entries` 跳过同 registry 中的非 AutoVision 模型版本。
 
 ## 门禁
 

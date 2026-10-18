@@ -601,3 +601,62 @@ class TestFileLogging:
         finally:
             logger.handlers = previous_handlers
             logger.setLevel(previous_level)
+
+
+class TestLoggerLifecycleRegressions:
+    def test_get_loggers_is_rank_zero_only(self, tmp_path, monkeypatch):
+        import autovision.observability.loggers as logger_module
+
+        monkeypatch.setattr(logger_module, "is_global_rank_zero", lambda: False)
+        assert logger_module.get_loggers(None, tmp_path) == []
+
+    def test_finalize_isolates_backend_failures(self, caplog):
+        from autovision.observability.loggers import finalize_loggers
+
+        calls = []
+
+        class _Broken:
+            def finalize(self):
+                raise RuntimeError("backend down")
+
+        class _Good:
+            def finalize(self):
+                calls.append("good")
+
+        with caplog.at_level("WARNING", logger="autovision"):
+            finalize_loggers([_Broken(), _Good()])
+        assert calls == ["good"]
+        assert "finalize failed" in caplog.text
+
+    def test_file_handler_is_replaced_between_runs(self, tmp_path):
+        import logging as logging_module
+
+        from autovision.runtime.logging import set_up_file_logging
+
+        logger = logging_module.getLogger("autovision")
+        previous_level = logger.level
+        previous_handlers = logger.handlers[:]
+        first = tmp_path / "run_a" / "train.log"
+        second = tmp_path / "run_b" / "train.log"
+        try:
+            logger.handlers = []
+            set_up_file_logging(first)
+            logger.info("record-from-run-a")
+            set_up_file_logging(second)
+            logger.info("record-from-run-b")
+            for handler in logger.handlers:
+                handler.flush()
+            assert sum(
+                bool(getattr(h, "_autovision_file_handler", False))
+                for h in logger.handlers
+            ) == 1
+            assert "record-from-run-a" in first.read_text()
+            assert "record-from-run-b" not in first.read_text()
+            assert "record-from-run-b" in second.read_text()
+        finally:
+            for handler in logger.handlers[:]:
+                if getattr(handler, "_autovision_file_handler", False):
+                    logger.removeHandler(handler)
+                    handler.close()
+            logger.handlers = previous_handlers
+            logger.setLevel(previous_level)

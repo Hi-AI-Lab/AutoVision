@@ -38,7 +38,6 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from autovision.runtime.distributed import reduce_dict
 from autovision.tasks.detection.shared.defe import (
     defe_count_loss,
     defe_density_loss,
@@ -389,7 +388,9 @@ class DFINECriterionV2(nn.Module):
             ssl_only_losses["loss"] = (
                 ssl_only_losses["loss_ssl"] * self.weight_dict["loss_ssl"]
             )
-            return reduce_dict(ssl_only_losses, average=False)
+            # Keep the loss graph-attached for backward; logging reductions
+            # belong to the train model, not the criterion.
+            return ssl_only_losses
 
         num_boxes = sum(int(t["boxes"].shape[0]) for t in targets)
         num_boxes = torch.tensor(
@@ -915,7 +916,10 @@ class DFINECriterionV2(nn.Module):
             losses[key] * weight for key, weight in weights.items() if key in losses
         )
         losses["loss"] = total
-        return reduce_dict(losses, average=False)
+        # Keep the loss graph-attached: DDP averages gradients across ranks,
+        # so the training loss must not be all-reduced/detached here.
+        # ``reduce_dict`` is for logging only and would break backward.
+        return losses
 
     def _get_go_indices(
         self,

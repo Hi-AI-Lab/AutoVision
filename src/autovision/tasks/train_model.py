@@ -103,6 +103,19 @@ class TrainModel(nn.Module):
     def on_train_batch_end(self) -> None:
         """Per-step hook (EMA update)."""
 
+    def enable_gradient_checkpointing(self) -> int:
+        """Trade compute for activation memory; return patched module count.
+
+        HF backbones use their native implementation; custom ViT/GTR
+        backbones have their ``blocks``/``layers`` wrapped. Safe to call
+        twice (patched blocks are tracked).
+        """
+        from autovision.tasks.shared.gradient_checkpointing import (
+            enable_gradient_checkpointing,
+        )
+
+        return enable_gradient_checkpointing(self)
+
     def update_metrics(self, outputs: Any, batch: dict, split: str) -> None:
         """Feed predictions/targets to the metric collection."""
 

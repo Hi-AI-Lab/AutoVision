@@ -13,6 +13,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from autovision.export.tensorrt_helpers import (
     _enable_half_precision,
@@ -133,3 +134,69 @@ class TestGracefulDegradation:
         from autovision.tasks import RTDETRObjectDetection
 
         assert hasattr(RTDETRObjectDetection, "export_tensorrt")
+
+
+class TestEngineParity:
+    def test_flatten_tensors_is_deterministic(self):
+        from autovision.export.tensorrt_helpers import _flatten_tensors
+
+        value = {
+            "b": [torch.ones(1)],
+            "a": (torch.zeros(1), {"c": torch.full((1,), 2.0)}),
+        }
+        flattened = _flatten_tensors(value)
+        # Insertion order mirrors the forward/export output order.
+        assert [float(t.item()) for t in flattened] == [1.0, 0.0, 2.0]
+
+    def test_verify_engine_outputs_passes_within_tolerance(self, monkeypatch, tmp_path):
+        import autovision.export.tensorrt_helpers as helpers
+
+        inputs = torch.ones(1, 3)
+
+        class _FakeRunner:
+            def __init__(self, engine_path, *, device="cuda"):
+                del engine_path, device
+
+            def run(self, images):
+                return [images * 2.0]
+
+        monkeypatch.setattr(helpers, "TensorRTEngineRunner", _FakeRunner)
+        helpers.verify_engine_outputs(
+            tmp_path / "unused.engine", [inputs * 2.0], inputs
+        )
+
+    def test_verify_engine_outputs_fails_closed(self, monkeypatch, tmp_path):
+        import autovision.export.tensorrt_helpers as helpers
+
+        inputs = torch.ones(1, 3)
+
+        class _WrongRunner:
+            def __init__(self, engine_path, *, device="cuda"):
+                del engine_path, device
+
+            def run(self, images):
+                return [images * 3.0]
+
+        monkeypatch.setattr(helpers, "TensorRTEngineRunner", _WrongRunner)
+        with pytest.raises(RuntimeError, match="parity check failed"):
+            helpers.verify_engine_outputs(
+                tmp_path / "unused.engine", [inputs * 2.0], inputs
+            )
+
+    def test_verify_engine_outputs_rejects_shape_mismatch(self, monkeypatch, tmp_path):
+        import autovision.export.tensorrt_helpers as helpers
+
+        inputs = torch.ones(1, 3)
+
+        class _ShapeRunner:
+            def __init__(self, engine_path, *, device="cuda"):
+                del engine_path, device
+
+            def run(self, images):
+                return [torch.ones(1, 4)]
+
+        monkeypatch.setattr(helpers, "TensorRTEngineRunner", _ShapeRunner)
+        with pytest.raises(RuntimeError, match="shape mismatch"):
+            helpers.verify_engine_outputs(
+                tmp_path / "unused.engine", [torch.ones(1, 3)], inputs
+            )

@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import torch
 
-from autovision.metrics.instance_segmentation import COCOMaskAPEvaluator
+from autovision.metrics.instance_segmentation import (
+    COCOMaskAPEvaluator,
+    resize_masks,
+)
 from autovision.tasks.detection.detr.train_model import (
     DETRObjectDetectionTrain,
 )
@@ -77,7 +80,7 @@ class GTRSegTrain(DETRObjectDetectionTrain):
         evaluator.update_targets(
             [
                 {
-                    "masks": masks,
+                    "masks": resize_masks(masks, height, width),
                     "labels": labels,
                     "size": (int(height), int(width)),
                 }

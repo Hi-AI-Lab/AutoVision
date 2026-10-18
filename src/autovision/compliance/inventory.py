@@ -131,4 +131,32 @@ def dataset_inventory(
         ) from error
     if not isinstance(payload, dict):
         raise AutoVisionError("Dataset snapshot must be a JSON object.")
-    return {"path": str(path), "snapshot": payload}, []
+    issues: list[dict[str, str]] = []
+    try:
+        from autovision.data.versioning import verify_dataset_snapshot
+
+        result = verify_dataset_snapshot(payload)
+    except Exception as error:  # noqa: BLE001 - evidence is the finding
+        issues.append(
+            {
+                "severity": "warning",
+                "kind": "dataset_snapshot_unverifiable",
+                "detail": (
+                    "Dataset snapshot could not be re-derived (data moved, "
+                    f"incomplete, or legacy format): {error}"
+                ),
+            }
+        )
+    else:
+        if not result.get("ok", False):
+            issues.append(
+                {
+                    "severity": "error",
+                    "kind": "dataset_snapshot_drift",
+                    "detail": (
+                        "Dataset content does not match the snapshot: "
+                        f"{result.get('differences', [])[:5]}"
+                    ),
+                }
+            )
+    return {"path": str(path), "snapshot": payload}, issues

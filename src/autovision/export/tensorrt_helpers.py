@@ -809,17 +809,121 @@ class TensorRTEngineRunner:
     def run(self, images: torch.Tensor) -> list[torch.Tensor]:
         import numpy
 
-        images = images.contiguous().to(device=self.device, dtype=self.input_dtype)
-        self.context.set_input_shape(self.input_name, list(images.shape))
-        self.context.set_tensor_address(self.input_name, images.data_ptr())
-        outputs: list[torch.Tensor] = []
-        for name in self.output_names:
-            shape = list(self.context.get_tensor_shape(name))
-            dtype = self._trt.nptype(self.engine.get_tensor_dtype(name))
-            torch_dtype = torch.from_numpy(numpy.zeros(1, dtype=dtype)).dtype
-            buffer = torch.empty(shape, dtype=torch_dtype, device=self.device)
-            self.context.set_tensor_address(name, buffer.data_ptr())
-            outputs.append(buffer)
-        self.context.execute_async_v3(self.stream.cuda_stream)
-        self.stream.synchronize()
+        with torch.cuda.device(self.device):
+            images = images.contiguous().to(
+                device=self.device, dtype=self.input_dtype
+            )
+            if self.context.set_input_shape(
+                self.input_name, list(images.shape)
+            ) is False:
+                raise RuntimeError(
+                    "TensorRT rejected the input shape "
+                    f"{list(images.shape)} for '{self.input_name}' (is the "
+                    "batch outside the engine's optimization profile?)."
+                )
+            if self.context.set_tensor_address(
+                self.input_name, images.data_ptr()
+            ) is False:
+                raise RuntimeError(
+                    f"TensorRT rejected the input address for "
+                    f"'{self.input_name}'."
+                )
+            outputs: list[torch.Tensor] = []
+            for name in self.output_names:
+                shape = list(self.context.get_tensor_shape(name))
+                if any(dimension < 0 for dimension in shape):
+                    raise RuntimeError(
+                        f"TensorRT output '{name}' still has dynamic shape "
+                        f"{shape} after setting the input; the engine profile "
+                        "does not resolve it."
+                    )
+                dtype = self._trt.nptype(self.engine.get_tensor_dtype(name))
+                torch_dtype = torch.from_numpy(numpy.zeros(1, dtype=dtype)).dtype
+                buffer = torch.empty(shape, dtype=torch_dtype, device=self.device)
+                if self.context.set_tensor_address(
+                    name, buffer.data_ptr()
+                ) is False:
+                    raise RuntimeError(
+                        f"TensorRT rejected the output address for '{name}'."
+                    )
+                outputs.append(buffer)
+            if self.context.execute_async_v3(self.stream.cuda_stream) is False:
+                raise RuntimeError(
+                    "TensorRT execution failed (execute_async_v3 returned False)."
+                )
+            self.stream.synchronize()
         return outputs
+
+
+def _flatten_tensors(value: ty.Any) -> list[torch.Tensor]:
+    """Flatten nested dict/list/tuple/dataclass outputs into tensor order."""
+    import dataclasses
+
+    if isinstance(value, torch.Tensor):
+        return [value]
+    if dataclasses.is_dataclass(value):
+        return _flatten_tensors(
+            [getattr(value, field.name) for field in dataclasses.fields(value)]
+        )
+    if isinstance(value, dict):
+        flattened: list[torch.Tensor] = []
+        # Preserve insertion order: it mirrors the forward's return order,
+        # which is the order the exporter assigns to graph outputs.
+        for item in value.values():
+            flattened.extend(_flatten_tensors(item))
+        return flattened
+    if isinstance(value, (list, tuple)):
+        flattened = []
+        for item in value:
+            flattened.extend(_flatten_tensors(item))
+        return flattened
+    return []
+
+
+def verify_engine_outputs(
+    engine_path: str | pathlib.Path,
+    expected: ty.Any,
+    inputs: torch.Tensor,
+    *,
+    device: str = "cuda",
+    atol: float = 5e-3,
+    rtol: float = 1e-2,
+) -> None:
+    """Fail-closed parity check: serialized engine vs eager reference.
+
+    ``expected`` is the eager model output (tensor or nested
+    dict/list/tuple). Raising here is intentional: an engine that builds but
+    computes different values must never be published.
+    """
+    runner = TensorRTEngineRunner(engine_path, device=device)
+    with torch.no_grad():
+        actual = runner.run(inputs)
+    expected_tensors = _flatten_tensors(expected)
+    if not expected_tensors:
+        raise RuntimeError(
+            "TensorRT parity check received no reference tensors; pass the "
+            "eager model's tensor output."
+        )
+    if len(actual) != len(expected_tensors):
+        raise RuntimeError(
+            "TensorRT parity check output-count mismatch: engine produced "
+            f"{len(actual)}, reference produced {len(expected_tensors)}."
+        )
+    for index, (reference, produced) in enumerate(
+        zip(expected_tensors, actual, strict=True)
+    ):
+        reference = reference.detach().to(produced.device, produced.dtype)
+        if tuple(reference.shape) != tuple(produced.shape):
+            raise RuntimeError(
+                f"TensorRT parity check output {index} shape mismatch: "
+                f"engine {tuple(produced.shape)} vs reference "
+                f"{tuple(reference.shape)}."
+            )
+        try:
+            torch.testing.assert_close(
+                produced, reference, atol=atol, rtol=rtol
+            )
+        except AssertionError as error:
+            raise RuntimeError(
+                f"TensorRT parity check failed for output {index}: {error}"
+            ) from error

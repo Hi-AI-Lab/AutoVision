@@ -23,13 +23,17 @@ with verified download + cache.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import shutil
+import threading
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
+
+from filelock import FileLock, Timeout
 
 from autovision.encoders.weight_verification import compute_file_sha256
 from autovision.errors import AutoVisionError
@@ -86,14 +90,71 @@ def _version_sort_key(version: str) -> tuple[int, ...] | tuple[str, ...]:
         return (version,)
 
 
+_LOCK_TIMEOUT_SEC = 30.0
+
+
+def _locked(method):
+    """Serialize registry operations across processes/threads.
+
+    The filesystem registry is shared state: writes must not race, and a
+    reader must not observe a half-copied entry (the manifest is written
+    last). ``FileLock`` is reentrant inside one thread, so nested
+    ``_write_current``/``_append_audit`` calls do not deadlock.
+    """
+
+    @functools.wraps(method)
+    def wrapper(self: "ModelRegistry", *args: Any, **kwargs: Any) -> Any:
+        try:
+            # FileLock serializes processes; the RLock serializes threads
+            # sharing this instance (FileLock alone is reentrant per thread
+            # and would let two threads through on the same fd). Both are
+            # reentrant, so nested _write_current/_append_audit calls work.
+            with self._thread_lock, self._lock:
+                return method(self, *args, **kwargs)
+        except Timeout as error:
+            raise RegistryError(
+                f"Timed out after {_LOCK_TIMEOUT_SEC:.0f}s waiting for the "
+                f"registry lock '{self._lock_path}'."
+            ) from error
+
+    return wrapper
+
+
+def _validate_key_part(label: str, value: str) -> None:
+    if not isinstance(value, str) or not value.strip():
+        raise RegistryError(
+            f"Invalid registry key: {label}={value!r} "
+            "(must be a non-empty string)."
+        )
+    if value != value.strip():
+        raise RegistryError(
+            f"Invalid registry key: {label}={value!r} "
+            "(leading/trailing whitespace)."
+        )
+    if value in (".", "..") or "/" in value or "\\" in value or "\x00" in value:
+        raise RegistryError(
+            f"Invalid registry key: {label}={value!r} (path separators, NUL, "
+            "'/' and '..' are not allowed)."
+        )
+
+
+def _validate_key(name: str, version: str) -> None:
+    _validate_key_part("name", name)
+    _validate_key_part("version", version)
+
+
 class ModelRegistry:
     """Filesystem-backed model asset registry with a promotion gate."""
 
     def __init__(self, root: Path | str) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
+        self._lock_path = self.root / ".registry.lock"
+        self._lock = FileLock(str(self._lock_path), timeout=_LOCK_TIMEOUT_SEC)
+        self._thread_lock = threading.RLock()
 
     # ── registration ────────────────────────────────────────────────────
+    @_locked
     def register(
         self,
         model_file: Path | str,
@@ -148,6 +209,7 @@ class ModelRegistry:
         return entry
 
     # ── promotion gate ──────────────────────────────────────────────────
+    @_locked
     def promote(
         self,
         *,
@@ -162,11 +224,17 @@ class ModelRegistry:
 
         ``gates`` are evaluated against the promoted copy; any failure
         removes the target and raises. The stage's ``current`` pointer is
-        updated only after the gates pass.
+        updated only after the gates pass. ``gates=None`` applies the
+        default deployment gates (fail-closed); pass ``gates=[]`` only for
+        an explicit, audited bypass.
         """
         self._validate_stage(to_stage)
         if to_stage == "dev":
             raise RegistryError("Cannot promote to 'dev'.")
+        if gates is None:
+            from autovision.registry.deployment_gates import default_gates
+
+            gates = default_gates()
         # Promotion gate: exactly one stage forward (dev -> staging -> prod).
         source_stage = MODEL_STAGES[MODEL_STAGES.index(to_stage) - 1]
         if not self.exists(name=name, version=version, stage=source_stage):
@@ -228,6 +296,7 @@ class ModelRegistry:
         return entry
 
     # ── lookup ──────────────────────────────────────────────────────────
+    @_locked
     def get(
         self,
         *,
@@ -237,24 +306,30 @@ class ModelRegistry:
     ) -> RegistryEntry:
         """Load an entry; ``version=None`` resolves the latest in the stage."""
         self._validate_stage(stage)
+        _validate_key_part("name", name)
+        if version is not None:
+            _validate_key_part("version", version)
         stage_dir = self.root / stage / name
         if version is None:
             versions = self._list_versions(stage_dir)
             if not versions:
                 raise RegistryError(f"No versions of '{name}' in '{stage}'.")
             version = max(versions, key=_version_sort_key)
-        entry_dir = stage_dir / version
+        entry_dir = self._entry_dir(name, stage, version)
         if not entry_dir.is_dir():
             raise RegistryError(
                 f"Registry entry '{name}' v{version} not found in '{stage}'."
             )
         return self._read_entry(entry_dir)
 
+    @_locked
     def exists(
         self, *, name: str, version: str, stage: RegistryStage
     ) -> bool:
-        return (self.root / stage / name / version).is_dir()
+        self._validate_stage(stage)
+        return self._entry_dir(name, stage, version).is_dir()
 
+    @_locked
     def list_entries(self, stage: RegistryStage | None = None) -> list[RegistryEntry]:
         """List entries, optionally filtered by stage."""
         stages = [stage] if stage is not None else list(MODEL_STAGES)
@@ -271,6 +346,7 @@ class ModelRegistry:
         return entries
 
     # ── deployment pointer / rollback / audit ───────────────────────────
+    @_locked
     def current(
         self, *, name: str, stage: RegistryStage = "prod"
     ) -> RegistryEntry:
@@ -281,6 +357,7 @@ class ModelRegistry:
             return self.get(name=name, stage=stage, version=version)
         return self.get(name=name, stage=stage)
 
+    @_locked
     def rollback(
         self,
         *,
@@ -304,6 +381,7 @@ class ModelRegistry:
         )
         return entry
 
+    @_locked
     def audit_log(self) -> list[dict[str, Any]]:
         """Read the append-only audit log (empty when absent)."""
         path = self.root / "audit.jsonl"
@@ -322,10 +400,7 @@ class ModelRegistry:
 
     # ── internals ───────────────────────────────────────────────────────
     def _entry_dir(self, name: str, stage: str, version: str) -> Path:
-        if not name or not version or "/" in name or "/" in version:
-            raise RegistryError(
-                f"Invalid registry key: name='{name}' version='{version}'."
-            )
+        _validate_key(name, version)
         return self.root / stage / name / version
 
     def _read_entry(self, entry_dir: Path) -> RegistryEntry:
@@ -366,6 +441,7 @@ class ModelRegistry:
                 shutil.copy2(sidecar, Path(str(target) + suffix))
 
     def _current_path(self, name: str, stage: str) -> Path:
+        _validate_key_part("name", name)
         return self.root / stage / name / "current.json"
 
     def _read_current(self, name: str, stage: str) -> str | None:
@@ -379,6 +455,7 @@ class ModelRegistry:
         version = payload.get("version")
         return str(version) if version else None
 
+    @_locked
     def _write_current(self, name: str, stage: str, version: str) -> None:
         path = self._current_path(name, stage)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -387,6 +464,7 @@ class ModelRegistry:
         temporary.write_text(json.dumps(payload, indent=2, sort_keys=True))
         temporary.replace(path)
 
+    @_locked
     def _append_audit(
         self,
         *,

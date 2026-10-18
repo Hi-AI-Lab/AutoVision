@@ -7,7 +7,10 @@ from typing import Any
 
 import torch
 
-from autovision.metrics.instance_segmentation import COCOMaskAPEvaluator
+from autovision.metrics.instance_segmentation import (
+    COCOMaskAPEvaluator,
+    resize_masks,
+)
 from autovision.tasks.instance_segmentation.dinov2_eomt.config import (
     Dinov2EomtInstanceSegmentationTrainArgs,
 )
@@ -100,7 +103,7 @@ class Dinov2EomtInstanceSegmentationTrain(Dinov2EomtSemanticSegmentationTrain):
         evaluator.update_targets(
             [
                 {
-                    "masks": mask.to(x.device),
+                    "masks": resize_masks(mask.to(x.device), h, w),
                     "labels": classes.to(x.device),
                     "size": (h, w),
                 }

@@ -2,6 +2,7 @@
 """Tests for the model asset registry and downloadable model cache."""
 
 import json
+import threading
 
 import pytest
 
@@ -73,22 +74,22 @@ class TestPromote:
     def test_single_step_promotion(self, tmp_path, model_file):
         registry = ModelRegistry(tmp_path / "registry")
         registry.register(model_file, name="detector", version="1.0.0")
-        entry = registry.promote(name="detector", version="1.0.0", to_stage="staging")
+        entry = registry.promote(name="detector", version="1.0.0", to_stage="staging", gates=[])
         assert entry.stage == "staging"
         assert entry.sha256 == compute_file_sha256(model_file)
-        entry = registry.promote(name="detector", version="1.0.0", to_stage="prod")
+        entry = registry.promote(name="detector", version="1.0.0", to_stage="prod", gates=[])
         assert entry.stage == "prod"
 
     def test_skip_stage_rejected(self, tmp_path, model_file):
         registry = ModelRegistry(tmp_path / "registry")
         registry.register(model_file, name="detector", version="1.0.0")
         with pytest.raises(RegistryError, match="not found in 'staging'"):
-            registry.promote(name="detector", version="1.0.0", to_stage="prod")
+            registry.promote(name="detector", version="1.0.0", to_stage="prod", gates=[])
 
     def test_promotion_requires_existing_source(self, tmp_path):
         registry = ModelRegistry(tmp_path / "registry")
         with pytest.raises(RegistryError, match="not found in 'dev'"):
-            registry.promote(name="ghost", version="1.0.0", to_stage="staging")
+            registry.promote(name="ghost", version="1.0.0", to_stage="staging", gates=[])
 
     def test_cannot_promote_to_dev(self, tmp_path, model_file):
         registry = ModelRegistry(tmp_path / "registry")
@@ -99,9 +100,9 @@ class TestPromote:
     def test_promotion_is_idempotent_guarded(self, tmp_path, model_file):
         registry = ModelRegistry(tmp_path / "registry")
         registry.register(model_file, name="detector", version="1.0.0")
-        registry.promote(name="detector", version="1.0.0", to_stage="staging")
+        registry.promote(name="detector", version="1.0.0", to_stage="staging", gates=[])
         with pytest.raises(RegistryError, match="immutable"):
-            registry.promote(name="detector", version="1.0.0", to_stage="staging")
+            registry.promote(name="detector", version="1.0.0", to_stage="staging", gates=[])
 
 
 # ── lookup ──────────────────────────────────────────────────────────────
@@ -131,7 +132,7 @@ class TestLookup:
         registry = ModelRegistry(tmp_path / "registry")
         registry.register(model_file, name="a", version="1.0.0")
         registry.register(model_file, name="b", version="1.0.0")
-        registry.promote(name="a", version="1.0.0", to_stage="staging")
+        registry.promote(name="a", version="1.0.0", to_stage="staging", gates=[])
         assert {e.name for e in registry.list_entries(stage="dev")} == {"a", "b"}
         assert {e.name for e in registry.list_entries(stage="staging")} == {"a"}
         assert len(registry.list_entries()) == 3
@@ -264,3 +265,66 @@ class TestMirrorFallback:
         monkeypatch.setattr(dl, "_download", fake_download)
         out = dl.resolve_downloadable("mirror-sha-test", cache_dir=tmp_path)
         assert out.read_bytes() == payload
+
+
+# ── hardening: key validation + cross-process mutation lock ─────────────
+
+
+class TestRegistryHardening:
+    @pytest.mark.parametrize("name", ["..", ".", "a/b", "a\\b", "", "  "])
+    def test_invalid_names_are_rejected(self, tmp_path, model_file, name):
+        registry = ModelRegistry(tmp_path / "registry")
+        with pytest.raises(RegistryError, match="Invalid registry key"):
+            registry.register(model_file, name=name, version="1.0.0")
+
+    @pytest.mark.parametrize("version", ["..", ".", "1/2", "1\\2", "", "  "])
+    def test_invalid_versions_are_rejected(self, tmp_path, model_file, version):
+        registry = ModelRegistry(tmp_path / "registry")
+        with pytest.raises(RegistryError, match="Invalid registry key"):
+            registry.register(model_file, name="detector", version=version)
+
+    def test_lookup_paths_validate_too(self, tmp_path):
+        registry = ModelRegistry(tmp_path / "registry")
+        with pytest.raises(RegistryError, match="Invalid registry key"):
+            registry.get(name="..", version="escape")
+        with pytest.raises(RegistryError, match="Invalid registry key"):
+            registry.exists(name="..", version="escape", stage="dev")
+        with pytest.raises(RegistryError, match="Invalid registry key"):
+            registry.current(name="..", stage="prod")
+
+    def test_concurrent_registration_has_exactly_one_winner(self, tmp_path, model_file):
+        registry = ModelRegistry(tmp_path / "registry")
+        barrier = threading.Barrier(2)
+        outcomes: list[str] = []
+        lock = threading.Lock()
+
+        def worker() -> None:
+            barrier.wait()
+            try:
+                registry.register(model_file, name="detector", version="1.0.0")
+                outcome = "ok"
+            except RegistryError:
+                outcome = "error"
+            with lock:
+                outcomes.append(outcome)
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+
+        assert sorted(outcomes) == ["error", "ok"]
+        # The winning entry is complete and readable.
+        entry = registry.get(name="detector", version="1.0.0", stage="dev")
+        assert entry.path.is_file()
+        assert entry.sha256 == compute_file_sha256(model_file)
+
+
+def test_promote_defaults_to_fail_closed_gates(tmp_path, model_file):
+    registry = ModelRegistry(tmp_path / "registry")
+    registry.register(model_file, name="ungated", version="1.0.0")
+    with pytest.raises(RegistryError, match="Deployment gates failed|missing model card"):
+        registry.promote(name="ungated", version="1.0.0", to_stage="staging")
+    # Nothing is promoted when the default gates fail.
+    assert not registry.exists(name="ungated", version="1.0.0", stage="staging")

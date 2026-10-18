@@ -227,7 +227,7 @@ class TestModelCard:
                 LatencyRecord(
                     backend="tensorrt", precision="fp16",
                     hardware="NVIDIA T4", batch_size=1, p50_ms=1.2,
-                    script="scripts/finetune_spectrum_s.py",
+                    script="scripts/train_spectrum.py",
                 )
             ]
         )

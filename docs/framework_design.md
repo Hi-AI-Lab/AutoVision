@@ -3,8 +3,8 @@
 | 文档属性 | 内容 |
 |---|---|
 | 版本 | v4.0（as-built 总览） |
-| 状态 | v0.2.0 发布基线 |
-| 日期 | 2026-10-16 |
+| 状态 | v0.3.0 发布基线 |
+| 日期 | 2026-10-19 |
 | 读者 | 框架研发、算法团队、平台 / MLOps、安全合规 |
 | 关联 | [模型库](model_zoo.md)、[基准](benchmarks.md)、[发布流程](release_process.md)、[贡献指南](contributing.md) |
 
@@ -43,9 +43,9 @@ AST 静态扫描在 CI 强制（数字越小越高层，高层可依赖低层）
 | `cli` | 30 条命令；参数校验与 Python API 完全同源 | `cli/_app.py` |
 | `engine` | step 循环、DDP / AMP、原子 checkpoint + resume、回调编排（`Engine` / `TaskEngine` 双引擎） | `engine/engine.py` |
 | `hpo` | 超参搜索：空间规格（分布 / 网格）、随机 / 网格 / ASHA 驱动、报告与断点复用 | `hpo/space.py`、`hpo/search.py`、`hpo/asha.py` |
-| `inference` | 视频 / 流推理运行时：batch 聚合、后端切换（torch / ONNX / TRT / OpenVINO）、同源前后处理；单路跟踪 / 多路流共享批处理 | `inference/engine.py`、`inference/stream.py`、`inference/multi_stream.py` |
-| `tracking` | 多目标跟踪：ByteTrack 关联（卡尔曼 + 三阶段 IoU 与官方门限，class-aware） | `tracking/byte_track.py` |
-| `serving` | 参考推理 serving：FastAPI `/predict`（批处理）+ `/healthz` + Prometheus `/metrics` | `serving/app.py`、`serving/metrics.py` |
+| `inference` | 视频 / 流推理运行时：三段式 reader / infer / writer 管线、batch 聚合、后端切换（torch / ONNX / TRT / OpenVINO）、同源前后处理；单路跟踪 / 区域计数 / 平滑 / 多路流共享批处理；统一结果容器 `InferenceResult`（mask 默认 RLE）；逐帧 `process_video` / `VideoSink` / `ImageSink` / `FPSMonitor` | `autovision/results.py`、`inference/stream.py`、`inference/multi_stream.py`、`inference/video.py` |
+| `tracking` | 多目标跟踪：ByteTrack 关联（卡尔曼 + 三阶段 IoU 与官方门限，class-aware）；LineZone / PolygonZone 计数与 TrackSmoother | `tracking/byte_track.py`、`tracking/analytics.py` |
+| `serving` | 参考推理 serving：FastAPI `/predict`（批处理，mask 默认 RLE）+ `/healthz` + `/readyz` + `/drift` + Prometheus `/metrics`；TLS/多 worker/限流/A-B 分流 | `serving/app.py`、`serving/server.py`、`serving/drift.py`、`serving/ratelimit.py` |
 | `pretext` | 自监督预训练与蒸馏方法（method 契约 + 注册表） | `pretext/`（DistillationV3、DINO(v2/v3)、SimCLR、DenseCL、DetCon） |
 | `tasks` | 8 个任务面；TaskModel / TrainModel 双层契约、损失、训练配方；伪标注 `tasks/detection/shared/pseudo_label.py` | `tasks/<task>/`，检测谱系 `tasks/detection/detr/variants.py` |
 | `augment` | 检测增广全套（mosaic / mixup / copyblend / box-aware eraser）+ 逐 step 窗口调度；多视图协议；mosaic 几何共享模块（关键点感知 pose mosaic 复用） | `augment/detection/`、`augment/mosaic_geometry.py` |
@@ -62,8 +62,37 @@ AST 静态扫描在 CI 强制（数字越小越高层，高层可依赖低层）
 | `observability` | JSONL / TensorBoard / MLflow / W&B 记录器、OTel（opt-in，遥测默认关闭） | `observability/` |
 | `export` | ONNX / TensorRT / OpenVINO 导出管线（对拍门禁）、int8 QDQ、版本化后处理规格 + 端到端框级 parity、benchmark、参数量 / FLOPs 统计 | `export/` |
 | `debug` | NaN 捕获、underflow / overflow 检查 | `debug/nan_capture.py` |
-| `visualize` | 检测可视化与预测渲染 | `visualize/detection.py` |
-| `geometry`、`errors` | 几何工具与异常类型（叶层） | `geometry/`、`errors.py` |
+| `visualize` | 任务感知渲染：检测框 / mask / 旋转框 / 姿态骨架 / 语义与全景分割 / 深度；统一 `InferenceResult` 分派与区域叠加；隐私/轨迹/热力/角标/光晕等增强标注器；COCO/GHUM 与自定义骨架注册表 | `visualize/annotators.py`、`visualize/effects.py`、`visualize/skeletons.py`、`visualize/detection.py`、`visualize/zones.py` |
+| `geometry`、`errors` | 几何工具与异常类型（叶层）：可微 torch 框运算 + 推理侧 NumPy 框/mask/polygon 工具（IoU/NMS/NMM、坐标转换、RDP 简化） | `geometry/`、`errors.py` |
+
+### 2.1 supervision 能力映射
+
+[supervision](https://github.com/roboflow/supervision) 0.30（MIT）是推理侧
+可视化与视频工具的重要参考。AutoVision 只迁移与本仓库契约一致的部分，不引入
+第二个结果容器；下表是当前映射（“新增”指本轮迁移）：
+
+| supervision 能力 | AutoVision 对应 | 状态 |
+|---|---|---|
+| `Detections` / 各类 `from_*` 转换器 | `InferenceResult` + `data/convert.py`、`data/interchange/` | 已有（容器不同） |
+| Box / Label / Mask / Polygon 标注器 | `visualize/annotators.py` | 已有 |
+| `KeyPoints`、`Skeleton` | `visualize/skeletons.py` + `KeypointAnnotator(skeleton=...)` | 新增注册表/自定义骨架 |
+| `TraceAnnotator` / `HeatMapAnnotator` | `visualize/effects.py` | 新增 |
+| `BlurAnnotator` / `PixelateAnnotator` | `visualize/effects.py`（mask 感知） | 新增 |
+| `BoxCornerAnnotator` / `RoundBoxAnnotator` | `visualize/effects.py` | 新增 |
+| `HaloAnnotator` / `EdgeAnnotator` / `BackgroundOverlayAnnotator` | `visualize/effects.py` | 新增 |
+| `box_iou` / NMS / NMM / 框坐标转换 | `geometry/boxes.py` | 新增 |
+| `mask_to_xyxy` / `polygon_to_mask` / `mask_to_polygons` / RDP | `geometry/masks.py` | 新增 |
+| `process_video` / `VideoSink` / `ImageSink` / `FPSMonitor` | `inference/video.py` | 新增（同步管线，复用 RGB 约定） |
+| `LineZone` / `PolygonZone` / `ByteTrack` | `tracking/` + `visualize/zones.py` | 已有 |
+| `InferenceSlicer` | `tasks/shared/sahi.py`、`tiling_utils.py` | 已有（模型 API 内） |
+| mAP / ConfusionMatrix | `metrics/` | 已有 |
+| 数据集 load/save | `data/convert.py`、`data/interchange/`、各任务 Dataset | 已有（接口按训练侧设计） |
+
+**刻意不迁移**：`sv.Detections` 作为第二套结果对象（会与 `InferenceResult`
+重复，违反单一容器契约）；`IconAnnotator` / `ComparisonAnnotator` 等依赖外部
+图标资产或双图拼接的展示型功能（需要额外资产登记，暂不进入核心路径）。
+`mask_to_polygons` 惰性依赖 OpenCV（`video` extra），其余新增工具只依赖
+NumPy/Pillow。
 
 ## 3. 任务面
 

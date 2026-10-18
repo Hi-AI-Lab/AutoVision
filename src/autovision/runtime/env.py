@@ -38,6 +38,8 @@ class EnvVar(Generic[T]):
     _default: Any = field(kw_only=True)
     _type: Callable[[Any], T] = field(kw_only=True)
     convert_empty_str_to_default: bool = True
+    #: Redact from Env.values() diagnostics (keys, tokens, credentials).
+    secret: bool = False
 
     def default(self) -> T:
         return self._default() if callable(self._default) else self._default
@@ -102,6 +104,30 @@ class Env:
         "AUTOVISION_DOWNLOAD_CHUNK_TIMEOUT_SEC", _default=180.0, _type=float
     )
     OFFLINE = EnvVar[bool]("AUTOVISION_OFFLINE", _default=False, _type=_parse_bool)
+    # Optional API key for the reference serving app (create_app(api_key=...)
+    # takes precedence). Prefer this over putting the key on the CLI.
+    SERVING_API_KEY = EnvVar[str | None](
+        "AUTOVISION_SERVING_API_KEY", _default=None,
+        _type=_parse_optional_str, secret=True,
+    )
+    # Opt-in deterministic training: torch determinism + cuDNN deterministic,
+    # no benchmark autotuning. Some ops have no deterministic kernel and will
+    # raise; slower. See engine.seed_everything.
+    DETERMINISTIC = EnvVar[bool](
+        "AUTOVISION_DETERMINISTIC", _default=False, _type=_parse_bool
+    )
+    # Dataset downloads only succeed when the registry entry pins a sha256.
+    # The built-in COCO/VOC entries currently have no official digest, so this
+    # is opt-in for shops that mirror and pin their own artifacts.
+    REQUIRE_DATASET_HASHES = EnvVar[bool](
+        "AUTOVISION_REQUIRE_DATASET_HASHES", _default=False, _type=_parse_bool
+    )
+    # EoMT (and any future adapter) fails closed when a hub checkpoint has
+    # no pinned sha256 in WEIGHT_MANIFEST. Setting this is an explicit
+    # acceptance of an unpinned download (trusted mirror / air-gapped copy).
+    ALLOW_UNPINNED_WEIGHTS = EnvVar[bool](
+        "AUTOVISION_ALLOW_UNPINNED_WEIGHTS", _default=False, _type=_parse_bool
+    )
     MIRROR_URL = EnvVar[str | None](
         "AUTOVISION_MIRROR_URL", _default=None, _type=_parse_optional_str
     )
@@ -132,6 +158,24 @@ class Env:
     # Optional OpenTelemetry span emission (see _observability.otel); the
     # opentelemetry-api package itself is supplied by the host application.
     OTEL = EnvVar[bool]("AUTOVISION_OTEL", _default=False, _type=_parse_bool)
+    # Legacy exported teacher checkpoints may embed a ``__class__`` object
+    # that the pickle-free loader rejects. The full unpickler is an
+    # arbitrary-code-execution surface, so it is opt-in for a trusted local
+    # artifact only; current exports are safe-loadable.
+    TRUST_TEACHER_CHECKPOINT = EnvVar[bool](
+        "AUTOVISION_TRUST_TEACHER_CHECKPOINT", _default=False, _type=_parse_bool
+    )
+    # Process-group watchdog: a rank that dies before a collective must fail
+    # the job instead of hanging forever. Applies to DDP and FSDP init.
+    DDP_TIMEOUT_SEC = EnvVar[float](
+        "AUTOVISION_DDP_TIMEOUT_SEC", _default=1800.0, _type=float
+    )
+    # FSDP keeps EMA as a full (unsharded) copy; updating it requires a
+    # full-parameter gather. 1 updates every step (correct, slow); raise it
+    # to trade EMA freshness for throughput on large models.
+    FSDP_EMA_INTERVAL = EnvVar[int](
+        "AUTOVISION_FSDP_EMA_INTERVAL", _default=1, _type=int
+    )
     # DDP static-graph tuning: find_unused_parameters costs a full graph
     # traversal per step; queue/EMA-free methods with stable step shapes
     # can set AUTOVISION_DDP_FIND_UNUSED=0 to shed that tax.
@@ -153,9 +197,17 @@ class Env:
 
     @staticmethod
     def values() -> dict[str, Any]:
-        """Snapshot of all variable values (for run metadata / diagnostics)."""
-        return {
-            attr.name: attr.value
-            for attr in Env.__dict__.values()
-            if isinstance(attr, EnvVar)
-        }
+        """Snapshot of all variable values (for run metadata / diagnostics).
+
+        Variables declared ``secret=True`` are redacted; the live value is
+        still available through the descriptor itself.
+        """
+        values: dict[str, Any] = {}
+        for attr in Env.__dict__.values():
+            if not isinstance(attr, EnvVar):
+                continue
+            value = attr.value
+            if attr.secret and value is not None:
+                value = "<redacted>"
+            values[attr.name] = value
+        return values

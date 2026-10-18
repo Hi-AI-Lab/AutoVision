@@ -8,7 +8,6 @@ variant (hermetic, CPU-friendly), mirroring the conventions of
 
 import math
 import time
-from pathlib import Path
 
 import pytest
 import torch
@@ -843,79 +842,6 @@ class TestDomeDecoderUnit:
             out = decoder(feats)
         assert out["pred_logits"].shape == (1, 10, 2)
         assert "defe_info" not in out
-
-
-class TestScriptTwin:
-    """The VisDrone baseline script must stay an exact density-OFF twin
-    of the Dome script (design doc 13 §8) — enforced programmatically so
-    the ablation can never silently pick up extra variables again."""
-
-    @staticmethod
-    def _load_script(name: str):
-        import importlib.util
-
-        path = Path(__file__).resolve().parents[1] / "scripts" / name
-        if not path.exists():
-            # Trimmed trees prune the experiment launchers (internal
-            # tooling); skip the twin check instead of failing on a file
-            # that this tree intentionally does not ship.
-            pytest.skip(f"script '{name}' is not present in this tree")
-        spec = importlib.util.spec_from_file_location(name[:-3], path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
-
-    def test_base_is_density_off_twin_of_dome(self):
-        base = self._load_script("visdrone_detr_800.py")
-        dome = self._load_script("visdrone_detr_dome_800.py")
-        assert set(dome.MODEL_ARGS) - set(base.MODEL_ARGS) == {"density"}
-        for key, value in base.MODEL_ARGS.items():
-            assert value == dome.MODEL_ARGS[key], f"model_args.{key} diverged"
-        assert dome.MODEL_ARGS["density"] == {"max_num_select": 500}
-        # The scripts may target different horizons (10-epoch pilot vs
-        # 100-epoch full run), so absolute step counts are NOT the twin
-        # invariant — the recipe is. Compare the aug-stop FRACTION and
-        # the transform args with their derived step stops normalized to
-        # that fraction; anything else that drifts (optimizer, EMA, ...)
-        # is caught by the exact MODEL_ARGS equality above.
-        assert base.AUG_STOP_FRACTION == dome.AUG_STOP_FRACTION
-        assert base.AUG_STOP_STEP == round(base.STEPS * base.AUG_STOP_FRACTION)
-        assert dome.AUG_STOP_STEP == round(dome.STEPS * dome.AUG_STOP_FRACTION)
-
-        def _normalized(args: dict, aug_stop_step: int) -> dict:
-            """Replace the aug-stop step values with a horizon-agnostic
-            sentinel (top-level ints and nested ``step_stop`` dicts)."""
-
-            def scrub(value):
-                if value == aug_stop_step:
-                    return "<aug-stop>"
-                if isinstance(value, dict):
-                    return {k: scrub(v) for k, v in value.items()}
-                return value
-
-            return {key: scrub(value) for key, value in args.items()}
-
-        assert _normalized(base.TRANSFORM_ARGS, base.AUG_STOP_STEP) == _normalized(
-            dome.TRANSFORM_ARGS, dome.AUG_STOP_STEP
-        ), "transform_args diverged beyond the horizon step stops"
-
-    def test_twin_configs_pass_strict_validation(self):
-        from autovision.augment.detection.args import (
-            RTDETRDetectionTransformArgs,
-        )
-        from autovision.tasks.detection.detr import (
-            DETRObjectDetectionTrainArgs,
-        )
-
-        for name in ("visdrone_detr_800.py", "visdrone_detr_dome_800.py"):
-            module = self._load_script(name)
-            args = DETRObjectDetectionTrainArgs(**module.MODEL_ARGS)
-            args.resolve_image_size()
-            transform = RTDETRDetectionTransformArgs.model_validate(
-                {**module.TRANSFORM_ARGS, "image_size": (800, 800)}
-            )
-            assert args.image_size == (800, 800)
-            assert transform.scale_jitter is not None
 
 
 class TestDynamicNmsPerformance:

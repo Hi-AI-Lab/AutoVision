@@ -89,3 +89,25 @@ result = model.predict("image.jpg")
   key，否则新导出会用 HF 默认的 `rope_theta` 重算 RoPE。
 - **许可/分发**：这些是第三方权重，建议放在外部 user-held 目录，不要
   提交进仓库；转换器不会把权重打包进发布物。
+
+## Hub 权重加载与许可
+
+`model_args={"load_weights": True}`（或 CLI 等价参数）会从 HuggingFace
+加载 EoMT checkpoint，并执行两道门：
+
+1. **许可 opt-in**：DINOv2 权重为 CC-BY-NC-4.0，需
+   `AUTOVISION_DINOV2_WEIGHTS=1`；DINOv3 权重为 Meta DINOv3 License，需
+   `AUTOVISION_DINOV3_WEIGHTS=1`。框架不替用户接受许可。
+2. **完整性**：checkpoint 必须在 `WEIGHT_MANIFEST` 中钉住 sha256；未钉住的
+   hub 源默认拒绝。可信镜像/离线副本可显式设置
+   `AUTOVISION_ALLOW_UNPINNED_WEIGHTS=1`（会记录 warning，无哈希校验）。
+
+本地 `weight_source` 路径仍受许可门约束。转换后的自持 checkpoint
+（`scripts/import_eomt_checkpoint.py`）通过 `load_task_model` 加载，不走
+这两道下载门；其 sha256 应记录在部署清单/模型卡中。
+
+## 导出
+
+EoMT semantic/instance/panoptic 任务模型现在实现 `forward()`，可走
+`export_onnx`（当前 HF 图使用 legacy TorchScript 导出路径；动态 batch
+关闭，静态分辨率导出）。导出后按常规流程做 onnxruntime 数值对拍。

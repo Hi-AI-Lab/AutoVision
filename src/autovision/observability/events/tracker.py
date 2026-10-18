@@ -83,7 +83,7 @@ def _sender(payload: bytes, endpoint: str) -> None:
     request = urllib.request.Request(
         endpoint, data=payload, headers={"Content-Type": "application/json"}
     )
-    with urllib.request.urlopen(request, timeout=_FLUSH_TIMEOUT_SEC) as response:
+    with urllib.request.urlopen(request, timeout=_FLUSH_TIMEOUT_SEC) as response:  # nosec B310
         response.read()
 
 

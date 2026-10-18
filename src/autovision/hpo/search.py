@@ -16,8 +16,12 @@
 Artifacts land in ``out_dir``: ``trials.jsonl`` (every trial: params,
 budget, metrics, status, per-trial run dir), ``report.md`` (space summary,
 trial table sorted by the objective, the best configuration) and
-``best.json``. A trial whose run dir already holds ``metrics.json`` is
-REUSED, so a crashed or interrupted search resumes where it stopped.
+``best.json``. A trial is REUSED only when its run dir holds both the
+metrics file and a provenance sidecar (``<metrics name>.meta.json``) whose
+sha256 fingerprint over ``params + steps`` matches the current trial, so a
+crashed or interrupted search resumes where it stopped while a changed
+space/budget (or a legacy cache without a sidecar) re-runs instead of
+silently reporting stale metrics.
 
 Trial function contract::
 
@@ -40,8 +44,10 @@ of those names is rejected at run time.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
@@ -203,11 +209,119 @@ def _write_report(
         )
     lines.append(
         "> `trials.jsonl` 为逐试验机器可读记录（含完整指标）；重跑同一次搜索会复用已完成的\n"
-        "> 试验目录（`metrics.json` 命中即跳过），失败试验可删目录后重跑。\n"
+        "> 试验目录（仅当 `metrics.json` 旁的 `<name>.meta.json` 指纹与当前参数/budget 一致\n"
+        "> 时才跳过；参数或 budget 变化会重跑），失败试验可删目录后重跑。\n"
     )
     report = out_dir / "report.md"
     report.write_text("\n".join(lines))
     return report
+
+
+_METADATA_SCHEMA_VERSION = 1
+_METADATA_SUFFIX = ".meta.json"
+
+
+def _metadata_path(metrics_path: Path) -> Path:
+    """The provenance sidecar that sits next to ``metrics_path``."""
+    return metrics_path.with_name(metrics_path.name + _METADATA_SUFFIX)
+
+
+def _trial_fingerprint(params: Mapping[str, Any], steps: int) -> str:
+    """sha256 over canonical JSON of the trial's params and budget.
+
+    ``sort_keys`` + compact separators make the digest independent of dict
+    insertion order. ``default=repr`` keeps data-driven choice values that
+    JSON cannot encode (arbitrary YAML scalars) fingerprintable instead of
+    crashing the search.
+    """
+    canonical = json.dumps(
+        {"params": dict(params), "steps": int(steps)},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=repr,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _metadata_payload(record: TrialRecord) -> dict[str, Any]:
+    """The sidecar body: what the metrics file is valid for."""
+    return {
+        "schema_version": _METADATA_SCHEMA_VERSION,
+        "params": dict(record.params),
+        "steps": int(record.steps),
+        "fingerprint": _trial_fingerprint(record.params, record.steps),
+        "trial_index": int(record.index),
+        "rung": int(record.rung),
+        "run_dir": record.run_dir,
+    }
+
+
+def _write_metadata_atomic(meta_path: Path, payload: Mapping[str, Any]) -> None:
+    """Write ``payload`` through a sibling temp file + ``os.replace``.
+
+    A crash mid-write leaves at most a dot-prefixed temp file, never a
+    partial sidecar that could pass as valid.
+    """
+    tmp_path = meta_path.with_name(
+        f".{meta_path.name}.{os.getpid()}.{time.monotonic_ns()}.tmp"
+    )
+    try:
+        tmp_path.write_text(
+            json.dumps(dict(payload), indent=2, sort_keys=True, default=repr),
+            encoding="utf-8",
+        )
+        os.replace(tmp_path, meta_path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def _reusable_metrics(metrics_path: Path, record: TrialRecord) -> dict[str, float] | None:
+    """Cached metrics for ``record``, or None when provenance does not match.
+
+    Reuse requires BOTH the metrics file and a parseable sidecar whose
+    fingerprint equals this trial's params + budget. A missing sidecar means
+    a legacy directory (predating provenance tracking) or a trial that
+    failed after writing metrics; neither is trusted.
+    """
+    meta_path = _metadata_path(metrics_path)
+    if not meta_path.exists():
+        logger.warning(
+            "Not reusing '%s': provenance sidecar '%s' is missing (legacy or "
+            "unfinished trial); re-running trial #%d.",
+            metrics_path, meta_path.name, record.index,
+        )
+        return None
+    try:
+        metadata = json.loads(meta_path.read_text())
+        if not isinstance(metadata, dict):
+            raise TypeError(
+                f"metadata payload is {type(metadata).__name__}, not a mapping"
+            )
+        schema = metadata.get("schema_version")
+        if schema != _METADATA_SCHEMA_VERSION:
+            raise ValueError(
+                f"unsupported metadata schema {schema!r} "
+                f"(expected {_METADATA_SCHEMA_VERSION})"
+            )
+        expected = _trial_fingerprint(record.params, record.steps)
+        if metadata.get("fingerprint") != expected:
+            raise ValueError(
+                "fingerprint mismatch: recorded params/budget differ from the "
+                "current trial"
+            )
+        payload = json.loads(metrics_path.read_text())
+        if not isinstance(payload, dict):
+            raise TypeError(
+                f"metrics payload is {type(payload).__name__}, not a mapping"
+            )
+        return {key: float(value) for key, value in payload.items()}
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        logger.warning(
+            "Not reusing '%s' (%s: %s); re-running trial #%d.",
+            metrics_path, type(exc).__name__, exc, record.index,
+        )
+        return None
 
 
 def run_trial(
@@ -221,39 +335,39 @@ def run_trial(
     """Run (or reuse) one trial; a failure is recorded, never raised.
 
     ``metrics_name`` keys the reuse check (ASHA uses per-rung files so a
-    promoted rung is not mistaken for a finished one).
+    promoted rung is not mistaken for a finished one). Reuse additionally
+    requires a matching provenance sidecar (``<metrics_name>.meta.json``)
+    carrying the params/budget fingerprint; without it the trial runs again
+    and overwrites the metrics on success.
     """
     run_dir = out_dir / f"trial_{record.index:03d}"
     run_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = run_dir / metrics_name
+    meta_path = _metadata_path(metrics_path)
     record.run_dir = str(run_dir)
     if metrics_path.exists() and not force:
-        try:
-            payload = json.loads(metrics_path.read_text())
-            if not isinstance(payload, dict):
-                raise TypeError(f"metrics payload is {type(payload).__name__}, not a mapping")
-            metrics = {key: float(value) for key, value in payload.items()}
-        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
-            # A truncated/foreign metrics file must not kill the search: log
-            # and re-run the trial instead (the run dir resumes if it can).
-            logger.warning(
-                "Ignoring unreadable metrics file '%s' (%s: %s); re-running "
-                "the trial.", metrics_path, type(exc).__name__, exc,
-            )
-        else:
-            record.metrics = metrics
+        cached = _reusable_metrics(metrics_path, record)
+        if cached is not None:
+            record.metrics = cached
             record.status = "reused"
             record.seconds = 0.0
             return record
+    # Invalidate provenance BEFORE the re-run: should the trial fail below,
+    # no sidecar may survive that would let a later run reuse the stale
+    # metrics file. The metrics themselves are kept (not deleted) and are
+    # overwritten only after a successful run.
+    meta_path.unlink(missing_ok=True)
     started = time.monotonic()
     try:
         metrics = dict(trial_fn(dict(record.params), record.steps, run_dir))
         record.metrics = {key: float(value) for key, value in metrics.items()}
         record.status = "ok"
         metrics_path.write_text(json.dumps(record.metrics, indent=2))
+        _write_metadata_atomic(meta_path, _metadata_payload(record))
     except Exception as exc:  # noqa: BLE001 - a failed trial must not kill the search
         record.status = "failed"
         record.error = f"{type(exc).__name__}: {exc}"
+        meta_path.unlink(missing_ok=True)
     finally:
         record.seconds = time.monotonic() - started
     return record

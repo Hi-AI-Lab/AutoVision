@@ -3,9 +3,9 @@ name: ci
 on:
   push:
     branches: [main]
-    # Release tags: the test job's release-tag check asserts the tag matches
-    # the package version (tests/test_infrastructure.py::TestRelease).
-    tags: ["v*"]
+    # Release tags only (vX.Y.Z). The legacy v0.2-clean tag is not a release
+    # and must not trigger the publish job.
+    tags: ["v*.*.*"]
   pull_request:
 
 jobs:
@@ -16,9 +16,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install ruff
+      - run: pip install ruff bandit mypy
       # scripts/ is linted too: the release gates live there.
       - run: ruff check src tests scripts
+      # SAST: medium/high findings fail the job (inline # nosec justifications
+      # live next to the six reviewed exemptions).
+      - run: bandit -r src/autovision -ll -ii -q
+      # Incremental type gate for dependency-light core modules. A full-tree
+      # gate is tracked separately; these files are annotation-clean today.
+      - run: mypy src/autovision/errors.py src/autovision/runtime/env.py src/autovision/runtime/checkpoint.py src/autovision/runtime/fsdp.py src/autovision/config
 
   provenance:
     runs-on: ubuntu-latest
@@ -42,7 +48,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install the docs toolchain
-        run: pip install "mkdocs-material>=9.5"
+        run: pip install "mkdocs-material>=9.5,<10" "mkdocs<2"
       # Public-tree references (relative links + backticked repo paths).
       - run: python scripts/check_docs_links.py
       # Zero-warning site build (navigation, in-site links, orphans).
@@ -50,6 +56,12 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # requires-python is >=3.10; both ends of the supported range run the
+        # full suite (the local release environment is 3.10).
+        python-version: ["3.10", "3.11"]
     env:
       # Compliance: telemetry stays off in CI.
       AUTOVISION_TELEMETRY: "0"
@@ -64,13 +76,51 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
       - name: Install CPU torch
         run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-      - name: Install package with dev and export extras
-        run: pip install -e ".[dev,export]"
+      - name: Install package with test extras
+        # Tests import transformers at module level (DETR/EoMT) and the
+        # serving/video suites need their runtime packages; installing only
+        # [dev,export] made pytest fail during collection.
+        run: pip install -e ".[dev,export,serving,video,transformers]"
       - name: Run test suite
         run: pytest tests -q
+      - name: Enterprise smoke
+        run: python scripts/smoke_enterprise.py --json smoke-report.json
+      - name: Upload smoke report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-report
+          path: smoke-report.json
+          if-no-files-found: warn
+      - name: Core coverage gate
+        # Full-suite coverage is dominated by multi-minute training E2E tests;
+        # this fast core subset is the hard PR floor (raised incrementally).
+        # The nightly suite still runs the full training matrix.
+        run: >
+          pytest
+          tests/test_engine_train_mode.py
+          tests/test_early_stopping_callbacks.py
+          tests/test_criterion_ddp_grad.py
+          tests/test_gradient_checkpointing.py
+          tests/test_configs.py
+          tests/test_distributed.py
+          tests/test_checkpoint.py
+          tests/test_env.py
+          tests/test_run_manifest.py
+          tests/test_compliance.py
+          tests/test_model_registry.py
+          tests/test_mlflow_registry.py
+          tests/test_mmap.py
+          tests/test_serving.py
+          tests/test_serving_server.py
+          tests/test_serving_variants.py
+          tests/test_serving_drift.py
+          tests/test_serving_ratelimit.py
+          tests/test_common_helpers.py
+          -q --cov=autovision --cov-report=term-missing --cov-fail-under=30
 
   publish:
     # Trusted publishing (no long-lived token). Configure the PyPI pending

@@ -6,6 +6,21 @@ ByteTrack association over per-frame detections:
 reference inference runtime via ``run_stream(..., track=True)``.
 """
 
+from autovision.tracking.analytics import (
+    LineZone,
+    LineZoneCounts,
+    PolygonZone,
+    TrackSmoother,
+    ZoneCounts,
+)
 from autovision.tracking.byte_track import BYTETracker, Track
 
-__all__ = ["BYTETracker", "Track"]
+__all__ = [
+    "BYTETracker",
+    "LineZone",
+    "LineZoneCounts",
+    "PolygonZone",
+    "Track",
+    "TrackSmoother",
+    "ZoneCounts",
+]

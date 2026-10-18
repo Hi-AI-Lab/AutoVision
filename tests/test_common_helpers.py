@@ -82,3 +82,21 @@ class TestGetNumWorkers:
         monkeypatch.setenv("SLURM_JOB_ID", "12345")
         monkeypatch.setenv("SLURM_CPUS_PER_TASK", "64")
         assert get_num_workers("auto", 1) == 8  # capped by MAX_NUM_WORKERS_AUTO
+
+
+def test_resolve_gradient_checkpointing():
+    from autovision.cli.common_helpers import resolve_gradient_checkpointing
+
+    assert resolve_gradient_checkpointing(None) is False
+    assert resolve_gradient_checkpointing({"gradient_checkpointing": True}) is True
+    with pytest.raises(ValueError, match="must be a bool"):
+        resolve_gradient_checkpointing({"gradient_checkpointing": "yes"})
+
+
+def test_resolve_parallel():
+    from autovision.cli.common_helpers import resolve_parallel
+
+    assert resolve_parallel(None) == "ddp"
+    assert resolve_parallel({"parallel": "FSDP"}) == "fsdp"
+    with pytest.raises(ValueError, match="must be 'ddp' or 'fsdp'"):
+        resolve_parallel({"parallel": "deepspeed"})

@@ -96,6 +96,10 @@ class Dinov2EomtSemanticSegmentation(ONNXExportMixin, TaskNetwork):
         """Full HF forward (used by training; labels are applied there)."""
         return self.model(pixel_values=x)
 
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Export/inference entry point (ONNX traces this single-input call)."""
+        return self.forward_backend(x)
+
     def forward_backend(
         self, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:

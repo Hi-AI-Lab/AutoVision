@@ -176,12 +176,14 @@ def train_oriented_object_detection(
         out_dir=out_dir,
         resume_interrupted=resume_interrupted,
         overwrite=overwrite,
+        fingerprint_extra=repr(sorted(getattr(data_args, "ignore_classes", None) or [])),
     ) as train_rows, dataset_mmap_context(
         lambda: data_args.list_image_info("val"),
         data=str(data_args.val),
         out_dir=out_dir,
         resume_interrupted=resume_interrupted,
         overwrite=overwrite,
+        fingerprint_extra=repr(sorted(getattr(data_args, "ignore_classes", None) or [])),
     ) as val_rows:
         train_dataset = OrientedObjectDetectionDataset(data_args, train_rows)
         val_dataset = OrientedObjectDetectionDataset(data_args, val_rows)
@@ -262,6 +264,12 @@ def train_oriented_object_detection(
             gradient_accumulation_steps=gradient_accumulation_steps,
             step_hooks=[train_transform, train_collate],
             val_every_num_steps=(trainer_args or {}).get("val_every_num_steps"),
+            early_stopping_patience=(trainer_args or {}).get("early_stopping_patience"),
+        gradient_checkpointing=common_helpers.resolve_gradient_checkpointing(trainer_args),
+        parallel=common_helpers.resolve_parallel(trainer_args),
+            early_stopping_min_delta=float(
+                (trainer_args or {}).get("early_stopping_min_delta", 0.0)
+            ),
             save_every_num_steps=save_args.save_every_num_steps,
             save_last=save_args.save_last,
             save_best=save_args.save_best,
@@ -296,5 +304,7 @@ def train_oriented_object_detection(
         exported_model_path=fit_result.exported_model_path,
         best_exported_model_path=fit_result.best_exported_model_path,
         best_metrics=fit_result.best_metrics,
+        stopped_early=fit_result.stopped_early,
+        stop_step=fit_result.stop_step,
         classes=classes,
     )

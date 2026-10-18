@@ -1,9 +1,12 @@
 # Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Reference serving (roadmap F2): /predict batching, /healthz, /metrics."""
 
+import asyncio
 import base64
 import io
+import time
 
+import httpx
 import numpy as np
 import pytest
 from tests.test_tracking import tiny_model  # noqa: F401 - local fixture reuse
@@ -138,3 +141,238 @@ class TestAppValidation:
     def test_bad_max_batch_fails_loud(self, tiny_model):  # noqa: F811 - fixture param
         with pytest.raises(AutoVisionError, match="max_batch"):
             create_app(tiny_model, max_batch=0)
+
+    def test_bad_guards_fail_loud(self, tiny_model):  # noqa: F811 - fixture param
+        with pytest.raises(AutoVisionError, match="api_key"):
+            create_app(tiny_model, api_key="")
+        with pytest.raises(AutoVisionError, match="api_key"):
+            create_app(tiny_model, api_key=123)  # type: ignore[arg-type]
+        with pytest.raises(AutoVisionError, match="max_body_bytes"):
+            create_app(tiny_model, max_body_bytes=0)
+        with pytest.raises(AutoVisionError, match="max_image_pixels"):
+            create_app(tiny_model, max_image_pixels=0)
+        with pytest.raises(AutoVisionError, match="max_concurrency"):
+            create_app(tiny_model, max_concurrency=0)
+
+
+class TestProductionGuards:
+    def test_readyz_reports_ready(self, client):
+        response = client.get("/readyz")
+        assert response.status_code == 200
+        assert response.json()["ready"] is True
+        assert "autovision_model_ready 1" in client.get("/metrics").text
+
+    def test_readyz_is_503_without_a_callable_engine(self):
+        class _NotReady:
+            backend = "torch"
+            artifact = None
+            network = None
+
+        client = TestClient(create_app(engine=_NotReady()))
+        response = client.get("/readyz")
+        assert response.status_code == 503
+        assert response.json()["ready"] is False
+
+    def test_api_key_is_opt_in_and_constant_time_checked(self, tiny_model):  # noqa: F811
+        app = create_app(tiny_model, threshold=0.0, api_key="s3cret")
+        client = TestClient(app)
+        payload = {"image": _b64_image(seed=11)}
+
+        assert client.post("/predict", json=payload).status_code == 401
+        assert (
+            client.post(
+                "/predict", json=payload, headers={"Authorization": "Bearer wrong"}
+            ).status_code
+            == 401
+        )
+        assert (
+            client.post(
+                "/predict", json=payload, headers={"Authorization": "Bearer s3cret"}
+            ).status_code
+            == 200
+        )
+        assert (
+            client.post(
+                "/predict", json=payload, headers={"X-API-Key": "s3cret"}
+            ).status_code
+            == 200
+        )
+        assert 'status="401"' in client.get(
+            "/metrics", headers={"X-API-Key": "s3cret"}
+        ).text
+
+    def test_api_key_can_come_from_env(self, tiny_model, monkeypatch):  # noqa: F811
+        monkeypatch.setenv("AUTOVISION_SERVING_API_KEY", "env-secret")
+        client = TestClient(create_app(tiny_model, threshold=0.0))
+        payload = {"image": _b64_image(seed=17)}
+        assert client.post("/predict", json=payload).status_code == 401
+        assert (
+            client.post(
+                "/predict", json=payload, headers={"X-API-Key": "env-secret"}
+            ).status_code
+            == 200
+        )
+
+    def test_body_limit_is_413(self, tiny_model):  # noqa: F811
+        client = TestClient(
+            create_app(tiny_model, threshold=0.0, max_body_bytes=64)
+        )
+        response = client.post("/predict", json={"image": _b64_image(seed=12)})
+        assert response.status_code == 413
+        assert "max_body_bytes" in response.json()["error"]
+        assert 'status="413"' in client.get("/metrics").text
+
+    def test_image_pixel_limit_is_413(self, tiny_model):  # noqa: F811
+        client = TestClient(
+            create_app(tiny_model, threshold=0.0, max_image_pixels=100)
+        )
+        response = client.post("/predict", json={"image": _b64_image(seed=13)})
+        assert response.status_code == 413
+        assert "max_image_pixels" in response.json()["error"]
+
+    def test_request_id_is_echoed(self, client):
+        response = client.post(
+            "/predict",
+            json={"image": _b64_image(seed=14)},
+            headers={"X-Request-ID": "req-abc"},
+        )
+        assert response.status_code == 200
+        assert response.headers["X-Request-ID"] == "req-abc"
+        assert response.json()["request_id"] == "req-abc"
+
+    def test_inference_runs_off_the_event_loop_and_is_serialized(self):
+        class _SlowEngine:
+            backend = "torch"
+            artifact = None
+            network = None
+
+            def __init__(self):
+                self.active = 0
+                self.max_active = 0
+
+            def run_batch(self, images, *, threshold=0.5):
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+                time.sleep(0.5)
+                self.active -= 1
+                return [{"score": 1.0} for _ in images]
+
+        engine = _SlowEngine()
+        app = create_app(engine=engine, threshold=0.0)
+
+        async def scenario():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as async_client:
+                first = asyncio.create_task(
+                    async_client.post("/predict", json={"image": _b64_image(seed=15)})
+                )
+                second = asyncio.create_task(
+                    async_client.post("/predict", json={"image": _b64_image(seed=16)})
+                )
+                await asyncio.sleep(0.05)
+                started = time.perf_counter()
+                health = await async_client.get("/healthz")
+                health_elapsed = time.perf_counter() - started
+                responses = await asyncio.gather(first, second)
+                return health, health_elapsed, responses
+
+        health, health_elapsed, responses = asyncio.run(scenario())
+        # The blocking forward must not stall the event loop: /healthz answers
+        # while both predictions are in flight.
+        assert health.status_code == 200
+        assert health_elapsed < 0.35, (
+            f"/healthz took {health_elapsed:.3f}s while /predict was blocked"
+        )
+        assert [response.status_code for response in responses] == [200, 200]
+        # Default max_concurrency=1 serializes engine calls (TRT/OVN runners
+        # are not thread-safe).
+        assert engine.max_active == 1
+
+
+class TestServingHardening:
+    def test_docs_endpoints_are_disabled_by_default(self, client):
+        assert client.get("/docs").status_code == 404
+        assert client.get("/openapi.json").status_code == 404
+
+    def test_docs_can_be_enabled_explicitly(self, tiny_model):  # noqa: F811
+        client = TestClient(create_app(tiny_model, threshold=0.0, docs_enabled=True))
+        assert client.get("/openapi.json").status_code == 200
+
+    def test_non_ascii_credentials_are_rejected_not_raised(self):
+        # httpx refuses non-ASCII header values, but a raw HTTP client can
+        # send them (latin-1 bytes). compare_digest would raise TypeError on
+        # str inputs; the app must treat them as a normal 401 credential.
+        from autovision.serving.app import _authorized
+
+        class _Request:
+            headers = {"authorization": "Bearer caf\u00e9"}
+
+        assert _authorized(_Request(), "s3cret") is False
+        assert _authorized(_Request(), "other-caf\u00e9") is False
+
+
+class TestQueueBackpressure:
+    def test_saturated_queue_returns_503(self, tiny_model, monkeypatch):  # noqa: F811
+        import autovision.serving.app as app_module
+
+        async def scenario():
+            started = asyncio.Event()
+            release = asyncio.Event()
+
+            async def slow_threadpool(*args, **kwargs):
+                started.set()
+                await release.wait()
+                return [{}]
+
+            monkeypatch.setattr(app_module, "run_in_threadpool", slow_threadpool)
+            app = create_app(
+                tiny_model,
+                threshold=0.0,
+                max_concurrency=1,
+                queue_timeout_s=0.05,
+            )
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
+                first = asyncio.create_task(
+                    client.post("/predict", json={"image": _b64_image(seed=31)})
+                )
+                await asyncio.wait_for(started.wait(), timeout=2.0)
+                second = await client.post(
+                    "/predict", json={"image": _b64_image(seed=32)}
+                )
+                release.set()
+                first_response = await first
+            return first_response, second
+
+        first_response, second = asyncio.run(scenario())
+        assert first_response.status_code == 200
+        assert second.status_code == 503
+        assert second.headers["Retry-After"] == "1"
+        assert "saturated" in second.json()["error"]
+
+
+class TestObservabilityAuth:
+    def test_metrics_and_drift_follow_the_api_key(self, tiny_model):  # noqa: F811
+        app = create_app(tiny_model, threshold=0.0, api_key="s3cret")
+        client = TestClient(app)
+        assert client.get("/metrics").status_code == 401
+        assert client.get("/drift").status_code == 401
+        headers = {"X-API-Key": "s3cret"}
+        assert client.get("/metrics", headers=headers).status_code == 200
+        assert client.get("/drift", headers=headers).status_code == 200
+        # Kubernetes probes remain unauthenticated.
+        assert client.get("/healthz").status_code == 200
+        assert client.get("/readyz").status_code == 200
+
+    def test_observability_auth_can_be_disabled_explicitly(self, tiny_model):  # noqa: F811
+        app = create_app(
+            tiny_model,
+            threshold=0.0,
+            api_key="s3cret",
+            protect_observability_endpoints=False,
+        )
+        assert TestClient(app).get("/metrics").status_code == 200

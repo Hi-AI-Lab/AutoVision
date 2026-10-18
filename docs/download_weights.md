@@ -43,7 +43,11 @@ pip install -e ".[gtr]"                # GTR 前向（Triton/CUDA）
 | `AUTOVISION_USER_HELD_ROOT` | 用户自持权重目录 | `~/Research/Model/AutoVision` |
 | `AUTOVISION_MIRROR_URL` | HF 权重镜像；进程启动前设置 | — |
 | `HF_ENDPOINT` | 直接指定 HuggingFace 端点 | 官方 Hub |
-| `AUTOVISION_OFFLINE=1` | HF 权重与 GTR 脚本只读本地缓存 | — |
+| `AUTOVISION_OFFLINE=1` | HF 权重、可下载模型与数据集下载只读本地缓存/拒绝联网 | — |
+| `AUTOVISION_REQUIRE_DATASET_HASHES=1` | 数据集条目没有钉 sha256 时拒绝下载（数据集完整性门禁） | — |
+| `AUTOVISION_DINOV2_WEIGHTS=1` | 接受 DINOv2 CC-BY-NC-4.0 后允许加载其权重 | — |
+| `AUTOVISION_DINOV3_WEIGHTS=1` | 接受 Meta DINOv3 License 后允许加载其权重 | — |
+| `AUTOVISION_ALLOW_UNPINNED_WEIGHTS=1` | 允许加载未在 manifest 钉 sha256 的 EoMT hub 权重（可信镜像/离线副本；有风险） | — |
 | `AUTOVISION_WEIGHT_SOURCE` | HF 骨干 / RF-DETR 下载源：`auto` / `modelscope` / `huggingface` | `auto` |
 
 镜像变量必须在 Python 进程启动前设置（`huggingface_hub` 在导入时固定 endpoint）：

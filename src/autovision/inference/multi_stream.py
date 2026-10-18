@@ -32,6 +32,7 @@ import numpy as np
 from autovision.errors import AutoVisionError
 from autovision.inference.engine import InferenceEngine
 from autovision.inference.video import AnnotatedVideoWriter, VideoFrameStream, VideoInfo
+from autovision.results import InferenceResult
 from autovision.types import PathLike
 from autovision.visualize.detection import draw_prediction
 
@@ -43,7 +44,6 @@ __all__ = [
     "run_multi_stream",
 ]
 
-_JSON_MAX_ELEMENTS = 10_000
 _LIVE_SCHEMES = {"rtsp", "rtmp", "http", "https"}
 
 
@@ -155,31 +155,6 @@ class _OpenCVReader(_ReaderProtocol):
         return None
 
 
-def _jsonable(value: Any) -> Any:
-    if isinstance(value, np.ndarray):
-        if value.dtype.kind in "biufc":
-            return value.tolist()
-        return value.tolist()
-    if isinstance(value, np.generic):
-        return value.item()
-    if hasattr(value, "detach"):
-        value = value.detach().cpu()
-        if value.numel() > _JSON_MAX_ELEMENTS:
-            return {
-                "shape": list(value.shape),
-                "summarized": True,
-                "mean": float(value.float().mean()),
-                "min": float(value.float().min()),
-                "max": float(value.float().max()),
-            }
-        return value.tolist()
-    if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(item) for item in value]
-    return value
-
-
 class MultiStreamRunner:
     """Run one engine over N sources with per-source artifacts and metrics."""
 
@@ -195,6 +170,8 @@ class MultiStreamRunner:
         threshold: float = 0.5,
         render: bool = True,
         class_names: dict[int, str] | None = None,
+        mask_format: str = "rle",
+        max_json_elements: int = 10_000,
         max_frames_per_source: int | None = None,
         reader_factory: Callable[[str], _ReaderProtocol] | None = None,
     ) -> None:
@@ -204,6 +181,15 @@ class MultiStreamRunner:
             raise AutoVisionError(f"batch_size must be >= 1, got {batch_size}.")
         if queue_size < 1:
             raise AutoVisionError(f"queue_size must be >= 1, got {queue_size}.")
+        if mask_format not in {"rle", "dense", "none"}:
+            raise AutoVisionError(
+                "mask_format must be 'rle', 'dense', or 'none', "
+                f"got {mask_format!r}."
+            )
+        if max_json_elements < 1:
+            raise AutoVisionError(
+                f"max_json_elements must be >= 1, got {max_json_elements}."
+            )
         if drop_policy not in {"drop_oldest", "block"}:
             raise AutoVisionError(
                 f"drop_policy must be 'drop_oldest' or 'block', got {drop_policy!r}."
@@ -238,6 +224,8 @@ class MultiStreamRunner:
         self.threshold = threshold
         self.render = render
         self.class_names = dict(class_names or {})
+        self.mask_format = mask_format
+        self.max_json_elements = max_json_elements
         self.max_frames_per_source = max_frames_per_source
         self.reader_factory = reader_factory or _OpenCVReader
 
@@ -246,7 +234,9 @@ class MultiStreamRunner:
             raise AutoVisionError("max_seconds must be > 0.")
         started = time.perf_counter()
         self.out_dir.mkdir(parents=True, exist_ok=True)
-        queues = [queue.Queue(maxsize=self.queue_size) for _ in self.sources]
+        queues: list[queue.Queue[Any]] = [
+            queue.Queue(maxsize=self.queue_size) for _ in self.sources
+        ]
         done = [False for _ in self.sources]
         stop = threading.Event()
         lock = threading.Lock()
@@ -263,6 +253,8 @@ class MultiStreamRunner:
         def _record_error(stat: StreamStats, message: str) -> None:
             with lock:
                 stat.errors.append(message)
+                # A persistent failure must not grow the list without bound.
+                del stat.errors[:-100]
 
         def _put(packet: _FramePacket, stat: StreamStats, source_index: int) -> None:
             target = queues[source_index]
@@ -356,9 +348,10 @@ class MultiStreamRunner:
             for index, source in enumerate(self.sources):
                 source_dir = self.out_dir / source.name
                 source_dir.mkdir(parents=True, exist_ok=True)
-                stats_list[index].jsonl = source_dir / "predictions.jsonl"
+                jsonl_path = source_dir / "predictions.jsonl"
+                stats_list[index].jsonl = jsonl_path
                 jsonl_handles[index] = open(
-                    stats_list[index].jsonl, "w", encoding="utf-8"
+                    jsonl_path, "w", encoding="utf-8"
                 )
             while not stop.is_set():
                 if max_seconds is not None and time.perf_counter() - started >= max_seconds:
@@ -383,6 +376,15 @@ class MultiStreamRunner:
                         stat = stats_list[packet.source_index]
                         _record_error(stat, f"inference failed: {error}")
                     continue
+                if len(records) != len(batch):
+                    for packet in batch:
+                        stat = stats_list[packet.source_index]
+                        _record_error(
+                            stat,
+                            "engine returned "
+                            f"{len(records)} records for {len(batch)} frames",
+                        )
+                    continue
                 for packet, record in zip(batch, records):
                     index = packet.source_index
                     stat = stats_list[index]
@@ -390,9 +392,12 @@ class MultiStreamRunner:
                         "source": stat.name,
                         "frame_index": packet.frame_index,
                         "timestamp": packet.timestamp,
-                        "predictions": _jsonable(record),
+                        "predictions": InferenceResult.from_record(record).to_json(
+                            masks=self.mask_format,
+                            max_elements=self.max_json_elements,
+                        ),
                     }
-                    jsonl_handles[index].write(json.dumps(payload) + "\n")
+                    jsonl_handles[index].write(json.dumps(payload, allow_nan=False) + "\n")
                     jsonl_handles[index].flush()
                     _inc(stat, "frames_written")
                     if self.render:
@@ -411,11 +416,15 @@ class MultiStreamRunner:
                             stat.video = writer.path
                         from PIL import Image
 
-                        rendered = draw_prediction(
-                            Image.fromarray(packet.frame),
-                            record,
-                            class_names=self.class_names,
-                        )
+                        try:
+                            rendered = draw_prediction(
+                                Image.fromarray(packet.frame),
+                                record,
+                                class_names=self.class_names,
+                            )
+                        except Exception as error:  # noqa: BLE001
+                            _record_error(stat, f"render failed: {error}")
+                            rendered = packet.frame
                         writer.write(np.asarray(rendered))
                 for index in list(active):
                     if done[index] and queues[index].empty():
@@ -441,6 +450,7 @@ class MultiStreamRunner:
 
 
 def _sources(values: Sequence[str | StreamSource] | str) -> list[StreamSource]:
+    parts: list[str | StreamSource]
     if isinstance(values, str):
         parts = [part.strip() for part in values.split(",") if part.strip()]
     else:

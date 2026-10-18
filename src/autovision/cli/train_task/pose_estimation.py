@@ -213,6 +213,12 @@ def train_pose_estimation(
         gradient_accumulation_steps=gradient_accumulation_steps,
         step_hooks=[train_transform],
         val_every_num_steps=(trainer_args or {}).get("val_every_num_steps"),
+        early_stopping_patience=(trainer_args or {}).get("early_stopping_patience"),
+        gradient_checkpointing=common_helpers.resolve_gradient_checkpointing(trainer_args),
+        parallel=common_helpers.resolve_parallel(trainer_args),
+        early_stopping_min_delta=float(
+            (trainer_args or {}).get("early_stopping_min_delta", 0.0)
+        ),
         save_every_num_steps=save_args.save_every_num_steps,
         save_last=save_args.save_last,
         save_best=save_args.save_best,
@@ -247,5 +253,7 @@ def train_pose_estimation(
         exported_model_path=fit_result.exported_model_path,
         best_exported_model_path=fit_result.best_exported_model_path,
         best_metrics=fit_result.best_metrics,
+        stopped_early=fit_result.stopped_early,
+        stop_step=fit_result.stop_step,
         classes=categories,
     )

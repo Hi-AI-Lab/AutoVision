@@ -23,7 +23,9 @@ from autovision.augment.detection.box_aware_eraser import (
     protected_cell_mask,
     sample_erase_mask,
 )
+from autovision.errors import CheckpointError
 from autovision.metrics.map_evaluator import COCOMAPEvaluator
+from autovision.runtime.env import Env
 from autovision.tasks.detection.detr.config import (
     DETRDistillArgs,
     DETRObjectDetectionTrainArgs,
@@ -115,22 +117,32 @@ def _load_teacher_from_export(path) -> torch.nn.Module:
     state dict; the wrapper prefixes (``model.`` for a bare export,
     ``ema_model.model.`` when EMA was on) are stripped so the checkpoint's
     best weights — EMA weights whenever EMA ran — land on a bare task
-    model. Loading tries the safe unpickler first; the export's
-    ``model_init_args`` snapshot carries a ``__class__`` reference (the
-    ``locals()`` cell), which the safe loader rejects — the fallback to
-    the full unpickler is gated on a warning because a teacher checkpoint
-    is the operator's own trusted artifact, not an external download.
+    model. Current exports load through the pickle-free path. Legacy files
+    that embed a ``__class__`` object are rejected unless the operator
+    explicitly opts into the full unpickler for a trusted local artifact
+    (``AUTOVISION_TRUST_TEACHER_CHECKPOINT=1``).
     """
     try:
         payload = torch.load(path, map_location="cpu", weights_only=True)
-    except Exception:
+    except Exception as error:
+        if not Env.TRUST_TEACHER_CHECKPOINT.value:
+            raise CheckpointError(
+                f"Teacher checkpoint '{path}' cannot be read with the "
+                "pickle-free loader (legacy export or unsafe writer). "
+                "Re-export it from the current framework, or — only for a "
+                "trusted local artifact — set "
+                "AUTOVISION_TRUST_TEACHER_CHECKPOINT=1 to use the full "
+                "unpickler."
+            ) from error
         logger.warning(
-            "distill teacher_checkpoint '%s' requires the full unpickler "
-            "(the export snapshot carries a __class__ reference); loading "
-            "a teacher checkpoint is a trusted local-artifact operation.",
+            "distill teacher_checkpoint '%s' requires the full unpickler; "
+            "AUTOVISION_TRUST_TEACHER_CHECKPOINT=1 is set, loading as a "
+            "trusted local artifact.",
             path,
         )
-        payload = torch.load(path, map_location="cpu", weights_only=False)
+        # Reached only behind the explicit trusted-local
+        # AUTOVISION_TRUST_TEACHER_CHECKPOINT opt-in.
+        payload = torch.load(path, map_location="cpu", weights_only=False)  # nosec B614
     for key in ("model_class_path", "model_init_args", "train_model"):
         if key not in payload:
             raise ValueError(

@@ -119,3 +119,13 @@ def test_not_an_exported_model(tmp_path):
     torch.save({"unrelated": torch.zeros(1)}, path)
     with pytest.raises(CheckpointError, match="not an exported"):
         load_task_model(path)
+
+
+def test_task_network_init_args_do_not_capture_class_cell():
+    from autovision.tasks.task_model import TaskNetwork
+
+    class _Capture(TaskNetwork):
+        def __init__(self):
+            super().__init__(init_args=locals(), ignore_args={"self"})
+
+    assert "__class__" not in _Capture().init_args

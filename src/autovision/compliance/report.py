@@ -9,11 +9,13 @@ the evidence auditable and repeatable.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Literal
 
 from autovision.compliance.inventory import (
     dataset_inventory,
@@ -52,6 +54,8 @@ class ComplianceReport:
     generated_at: str | None = None
     report_json: Path | None = None
     report_md: Path | None = None
+    report_sbom: Path | None = None
+    report_manifest: Path | None = None
 
     @property
     def errors(self) -> list[ComplianceIssue]:
@@ -63,6 +67,14 @@ class ComplianceReport:
 
     @property
     def passed(self) -> bool:
+        return not self.errors
+
+    def passes(self, fail_on: Literal["error", "warning", "none"] = "error") -> bool:
+        """CI gate: ``error`` (default), ``warning`` or ``none``."""
+        if fail_on == "none":
+            return True
+        if fail_on == "warning":
+            return not self.errors and not self.warnings
         return not self.errors
 
     def summary_text(self) -> str:
@@ -89,11 +101,85 @@ class ComplianceReport:
         directory.mkdir(parents=True, exist_ok=True)
         self.report_json = directory / "compliance.json"
         self.report_md = directory / "compliance.md"
+        self.report_sbom = directory / "compliance.sbom.json"
+        self.report_manifest = directory / "compliance.manifest.json"
         self.report_json.write_text(
             json.dumps(self.to_dict(), indent=2, sort_keys=True)
         )
         self.report_md.write_text(self._render_markdown())
+        self.report_sbom.write_text(
+            json.dumps(self.to_cyclonedx(), indent=2, sort_keys=True)
+        )
+        # Integrity manifest: reviewers can re-hash the three artifacts and
+        # compare without trusting the report's own "passed" field.
+        self.report_manifest.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "generated_at": self.generated_at,
+                    "sha256": {
+                        path.name: _file_sha256(path)
+                        for path in (
+                            self.report_json,
+                            self.report_md,
+                            self.report_sbom,
+                        )
+                    },
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
         return self
+
+    def to_cyclonedx(self) -> dict[str, Any]:
+        """Minimal CycloneDX 1.5 dependency/model/dataset SBOM."""
+        components: list[dict[str, Any]] = []
+        for entry in self.dependencies:
+            component: dict[str, Any] = {
+                "type": "library",
+                "name": entry.get("name", "unknown"),
+                "version": entry.get("version", ""),
+            }
+            license_id = entry.get("license")
+            if license_id and license_id != "UNKNOWN":
+                component["licenses"] = [{"license": {"id": license_id}}]
+            components.append(component)
+        for model in self.models:
+            component = {
+                "type": "machine-learning-model",
+                "name": Path(str(model.get("path", "model"))).name,
+                "version": str(model.get("version") or ""),
+            }
+            if model.get("sha256"):
+                component["hashes"] = [
+                    {"alg": "SHA-256", "content": str(model["sha256"])}
+                ]
+            components.append(component)
+        for dataset in self.datasets:
+            components.append(
+                {
+                    "type": "data",
+                    "name": Path(str(dataset.get("path", "dataset"))).name,
+                }
+            )
+        return {
+            "bomFormat": "CycloneDX",
+            "specVersion": "1.5",
+            "serialNumber": f"urn:uuid:{uuid.uuid4()}",
+            "version": 1,
+            "metadata": {
+                "timestamp": self.generated_at,
+                "tools": [
+                    {
+                        "vendor": "AutoVision",
+                        "name": "compliance-report",
+                        "version": str(self.framework.get("version", "")),
+                    }
+                ],
+            },
+            "components": components,
+        }
 
     def _render_markdown(self) -> str:
         lines = ["# 合规报告\n"]
@@ -138,6 +224,14 @@ class ComplianceReport:
                 detail = issue.detail.replace("|", "\\|")
                 lines.append(f"| {issue.severity} | {issue.kind} | {detail} |")
         return "\n".join(lines)
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def build_compliance_report(

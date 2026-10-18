@@ -13,6 +13,9 @@ this module without it succeeds, use fails with guidance.
 
 from __future__ import annotations
 
+import time
+from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
@@ -20,7 +23,16 @@ from typing import Any, Iterator
 from autovision.errors import AutoVisionError
 from autovision.types import PathLike
 
-__all__ = ["AnnotatedVideoWriter", "VideoFrameStream", "VideoInfo"]
+__all__ = [
+    "AnnotatedVideoWriter",
+    "FPSMonitor",
+    "ImageSink",
+    "VideoFrameStream",
+    "VideoInfo",
+    "VideoSink",
+    "get_video_frames_generator",
+    "process_video",
+]
 
 
 def _require_cv2() -> Any:
@@ -128,3 +140,204 @@ class AnnotatedVideoWriter:
 
     def close(self) -> None:
         self._writer.release()
+
+
+def get_video_frames_generator(
+    source: PathLike,
+    *,
+    max_frames: int | None = None,
+    open_timeout_ms: int | None = 10_000,
+    read_timeout_ms: int | None = 5_000,
+) -> Iterator[Any]:
+    """Yield RGB frames from a file, camera index or network stream."""
+    for _, frame in VideoFrameStream(
+        source,
+        max_frames=max_frames,
+        open_timeout_ms=open_timeout_ms,
+        read_timeout_ms=read_timeout_ms,
+    ):
+        yield frame
+
+
+class VideoSink:
+    """Context-managed RGB video writer (MP4, ``mp4v`` codec).
+
+    The writer opens eagerly so a bad path or codec fails before the first
+    inference call instead of silently dropping frames at the end.
+    """
+
+    def __init__(
+        self,
+        path: PathLike,
+        *,
+        fps: float = 25.0,
+        frame_size: tuple[int, int],
+    ) -> None:
+        self.frame_size = (int(frame_size[0]), int(frame_size[1]))
+        if self.frame_size[0] <= 0 or self.frame_size[1] <= 0:
+            raise AutoVisionError(
+                f"frame_size must be positive, got {frame_size!r}."
+            )
+        self._writer = AnnotatedVideoWriter(
+            path, fps=fps, frame_size=self.frame_size
+        )
+        self._closed = False
+
+    def write_frame(self, frame: Any) -> None:
+        """Write one RGB frame; a shape mismatch is an error, not a skip."""
+        if self._closed:
+            raise AutoVisionError("Cannot write to a closed VideoSink.")
+        height, width = frame.shape[:2]
+        if (width, height) != self.frame_size:
+            raise AutoVisionError(
+                "Frame size mismatch: VideoSink expects "
+                f"{self.frame_size}, got {(width, height)}."
+            )
+        self._writer.write(frame)
+
+    def close(self) -> None:
+        """Release the underlying writer; safe to call more than once."""
+        if not self._closed:
+            self._writer.close()
+            self._closed = True
+
+    def __enter__(self) -> "VideoSink":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+
+class ImageSink:
+    """Save selected RGB frames as JPEG/PNG files in a directory.
+
+    ``index`` is the source frame number; when omitted the sink keeps its own
+    counter. Only frames where ``index % every_n == 0`` are written.
+    """
+
+    def __init__(
+        self,
+        directory: PathLike,
+        *,
+        every_n: int = 1,
+        image_format: str = "jpg",
+        quality: int = 95,
+        prefix: str = "frame",
+    ) -> None:
+        if every_n < 1:
+            raise AutoVisionError(f"every_n must be >= 1, got {every_n!r}.")
+        normalized = image_format.lower()
+        if normalized not in {"jpg", "jpeg", "png"}:
+            raise AutoVisionError(
+                "image_format must be 'jpg', 'jpeg' or 'png', "
+                f"got {image_format!r}."
+            )
+        self.directory = Path(directory)
+        self.directory.mkdir(parents=True, exist_ok=True)
+        self.every_n = int(every_n)
+        self.extension = "jpg" if normalized in {"jpg", "jpeg"} else "png"
+        self.quality = min(max(int(quality), 1), 100)
+        self.prefix = prefix
+        self._index = 0
+
+    def write_frame(self, frame: Any, *, index: int | None = None) -> Path | None:
+        """Write ``frame`` when it falls on the sampling interval."""
+        from PIL import Image
+
+        current = self._index if index is None else int(index)
+        if index is None:
+            self._index += 1
+        else:
+            self._index = max(self._index, current + 1)
+        if current % self.every_n != 0:
+            return None
+        path = self.directory / f"{self.prefix}_{current:06d}.{self.extension}"
+        image = Image.fromarray(frame)
+        if self.extension == "jpg":
+            image.save(path, quality=self.quality)
+        else:
+            image.save(path)
+        return path
+
+    def __enter__(self) -> "ImageSink":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+
+class FPSMonitor:
+    """Moving-window frames-per-second estimate from ``tick()`` calls."""
+
+    def __init__(self, window: int = 60) -> None:
+        if window < 2:
+            raise AutoVisionError(f"window must be >= 2, got {window!r}.")
+        self.window = int(window)
+        self._timestamps: deque[float] = deque(maxlen=self.window)
+
+    def tick(self) -> float:
+        """Record one frame and return the current FPS estimate."""
+        self._timestamps.append(time.perf_counter())
+        return self.fps
+
+    @property
+    def fps(self) -> float:
+        """FPS over the retained window (0.0 until two ticks exist)."""
+        if len(self._timestamps) < 2:
+            return 0.0
+        elapsed = self._timestamps[-1] - self._timestamps[0]
+        if elapsed <= 0:
+            return 0.0
+        return (len(self._timestamps) - 1) / elapsed
+
+    def reset(self) -> None:
+        """Clear the window."""
+        self._timestamps.clear()
+
+
+def process_video(
+    source: PathLike,
+    callback: Callable[[Any, int], Any],
+    *,
+    output_path: PathLike | None = None,
+    max_frames: int | None = None,
+    fps: float | None = None,
+    frame_size: tuple[int, int] | None = None,
+) -> int:
+    """Decode ``source``, call ``callback(frame, index)`` and optionally encode.
+
+    ``callback`` returns the frame to write; returning ``None`` keeps the
+    decoded frame. The callback runs in decode order on the calling thread,
+    so stateful annotators (trace/heatmap/zones) stay ordered. Returns the
+    number of decoded frames. Encoding uses the source FPS and resolution
+    unless ``fps`` / ``frame_size`` override them.
+    """
+    stream = VideoFrameStream(source, max_frames=max_frames)
+    info = stream.info
+    sink: VideoSink | None = None
+    if output_path is not None and info.width > 0 and info.height > 0:
+        sink = VideoSink(
+            output_path,
+            fps=fps or info.fps or 25.0,
+            frame_size=frame_size or (info.width, info.height),
+        )
+    frames = 0
+    try:
+        for index, frame in stream:
+            processed = callback(frame, index)
+            if processed is None:
+                processed = frame
+            if output_path is not None and sink is None:
+                height, width = processed.shape[:2]
+                sink = VideoSink(
+                    output_path,
+                    fps=fps or info.fps or 25.0,
+                    frame_size=frame_size or (width, height),
+                )
+            if sink is not None:
+                sink.write_frame(processed)
+            frames += 1
+    finally:
+        if sink is not None:
+            sink.close()
+    return frames

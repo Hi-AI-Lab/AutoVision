@@ -182,7 +182,12 @@ curl -s -o /dev/null -w "%{http_code}\n" \
 
 ```bash
 ruff check src tests scripts
+bandit -r src/autovision -ll -ii -q
+mypy src/autovision/errors.py src/autovision/runtime/env.py \
+    src/autovision/runtime/checkpoint.py src/autovision/runtime/fsdp.py \
+    src/autovision/config
 pytest tests -q
+python scripts/smoke_enterprise.py --json smoke-report.json
 
 python scripts/check_provenance.py
 python scripts/check_layering.py
@@ -195,7 +200,7 @@ uv lock --check
 
 说明：
 
-- `pytest tests -q` 约 18 分钟；CI 的 `test` job 会跑同一套。
+- `pytest tests -q` 约 20 分钟（视硬件）；CI 的 `test` job 会跑同一套。
 - `gen_model_zoo.py --check` 防止模型库页面与注册表漂移。
 - `mkdocs build --strict` 会拦截 nav 缺失、孤儿页面和站内坏链。
 - 不要在 dirty tree 上发布；tag 必须指向发布提交。
@@ -403,7 +408,9 @@ PyPI 不允许覆盖已上传版本：
 最小命令序列：
 
 ```bash
-uv lock && uv lock --check
+UV_DEFAULT_INDEX=https://pypi.org/simple uv lock && uv lock --check
+# 必须匹配不到（返回 1 才继续）；若输出内部地址则停止发布：
+! grep -q agentsmirror uv.lock
 rm -rf dist && uv build
 uv tool run --from twine twine check dist/*
 uv publish --publish-url https://test.pypi.org/legacy/ --token "$TEST_PYPI_TOKEN" dist/*
@@ -418,7 +425,8 @@ uv publish --token "$PYPI_TOKEN" dist/*
 - [ ] `README_PYPI.md` 无相对链接
 - [ ] `_version.py` / CHANGELOG / tag 一致
 - [ ] `uv lock --check` 通过
-- [ ] 全量测试与四道 CI 门禁通过
+- [ ] `uv.lock` 使用公共 PyPI（无内部镜像地址）
+- [ ] 全量测试与 CI 全套门禁通过（lint / provenance / docs / test + smoke / coverage）
 - [ ] `uv build` 成功
 - [ ] `twine check` 通过
 - [ ] wheel 不含 csrc，sdist 含 GTR/MSDA 源

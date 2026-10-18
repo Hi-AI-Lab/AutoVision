@@ -33,11 +33,24 @@ from autovision.inference.multi_stream import (
     run_multi_stream,
 )
 from autovision.inference.stream import StreamRunResult, run_stream
-from autovision.inference.video import AnnotatedVideoWriter, VideoFrameStream, VideoInfo
+from autovision.inference.video import (
+    AnnotatedVideoWriter,
+    FPSMonitor,
+    ImageSink,
+    VideoFrameStream,
+    VideoInfo,
+    VideoSink,
+    get_video_frames_generator,
+    process_video,
+)
+from autovision.results import InferenceResult
 
 __all__ = [
     "AnnotatedVideoWriter",
+    "FPSMonitor",
+    "ImageSink",
     "InferenceEngine",
+    "InferenceResult",
     "MultiStreamResult",
     "MultiStreamRunner",
     "StreamRunResult",
@@ -45,6 +58,9 @@ __all__ = [
     "StreamStats",
     "VideoFrameStream",
     "VideoInfo",
+    "VideoSink",
+    "get_video_frames_generator",
+    "process_video",
     "run_multi_stream",
     "run_stream",
 ]

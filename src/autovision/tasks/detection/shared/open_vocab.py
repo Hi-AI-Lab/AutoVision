@@ -440,4 +440,6 @@ def _encode_with_tower(
 def _load_tokenizer(repo_id: str):
     from transformers import AutoTokenizer
 
-    return AutoTokenizer.from_pretrained(repo_id)
+    # Tokenizer only (no weights); the model weights are license-gated
+    # and sha256-pinned elsewhere.
+    return AutoTokenizer.from_pretrained(repo_id)  # nosec B615

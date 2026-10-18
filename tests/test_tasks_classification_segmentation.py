@@ -299,3 +299,31 @@ class TestReviewFixes:
                 backends={"onnx": ONNXBackendArgs()},
                 verify_parity=True,
             )
+
+
+def test_load_task_model_restores_normalize_args(tmp_path: Path):
+    from autovision.tasks.classification.task_model import ImageClassification
+
+    torch.manual_seed(0)
+    net = ImageClassification(
+        num_classes=2, image_size=(32, 32), load_weights=False
+    )
+    path = tmp_path / "exported.pt"
+    torch.save(
+        {
+            "schema_version": 1,
+            "kind": "task_model",
+            "model_class_path": net.class_path,
+            "model_init_args": net.init_args,
+            "train_model": net.state_dict(),
+            "normalize_args": {
+                "mean": [0.1, 0.2, 0.3],
+                "std": [0.4, 0.5, 0.6],
+            },
+            "version": "test",
+        },
+        path,
+    )
+    loaded = load_task_model(path, device="cpu")
+    assert tuple(loaded.normalize.mean) == pytest.approx((0.1, 0.2, 0.3))
+    assert tuple(loaded.normalize.std) == pytest.approx((0.4, 0.5, 0.6))

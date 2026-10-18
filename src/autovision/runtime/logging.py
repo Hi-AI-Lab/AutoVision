@@ -46,15 +46,26 @@ def set_up_file_logging(log_file: Path) -> None:
     Also raises the ``autovision`` logger to DEBUG: left unconfigured it
     inherits the root logger's WARNING level, which would silently drop
     every INFO record before it reaches the handler (an empty train.log).
+
+    Only one framework file handler is kept per process: a second call
+    (HPO runs several trials in one process; tests run many fits) closes
+    and detaches the previous handler before attaching the new one, so
+    earlier runs' ``train.log`` files do not receive later runs' records.
     """
     if not is_global_rank_zero():
         return
+    log_file = Path(log_file)
     log_file.parent.mkdir(parents=True, exist_ok=True)
+    logger = logging.getLogger("autovision")
+    for existing in list(logger.handlers):
+        if getattr(existing, "_autovision_file_handler", False):
+            logger.removeHandler(existing)
+            existing.close()
     handler = RotatingFileHandler(
         log_file, maxBytes=1 << 30, backupCount=4, mode="a"
     )
     handler.setFormatter(logging.Formatter(_FORMAT_FILE))
-    logger = logging.getLogger("autovision")
+    handler._autovision_file_handler = True  # type: ignore[attr-defined]
     if logger.level == logging.NOTSET or logger.level > logging.DEBUG:
         logger.setLevel(logging.DEBUG)
     logger.addHandler(handler)

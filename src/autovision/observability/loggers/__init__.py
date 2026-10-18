@@ -128,6 +128,11 @@ def get_loggers(
     entry was explicitly requested).
     """
     out_dir = Path(out_dir)
+    if not is_global_rank_zero():
+        # Constructing MLflow/W&B/TensorBoard loggers has side effects
+        # (start_run / init / SummaryWriter); DDP must not create one run
+        # per rank. Non-zero ranks train without experiment tracking.
+        return []
     spec = dict(spec or {})
     jsonl_spec = spec.pop("jsonl", None)
     loggers: list[Any] = [JSONLLogger(out_dir, **(jsonl_spec or {}))]
@@ -175,4 +180,10 @@ def finalize_loggers(loggers: list[Any]) -> None:
     for lg in loggers:
         finalize = getattr(lg, "finalize", None)
         if callable(finalize):
-            finalize()
+            try:
+                finalize()
+            except Exception:  # noqa: BLE001 - one backend must not block others
+                logger.warning(
+                    "%s.finalize failed; continuing shutdown.",
+                    type(lg).__name__, exc_info=True,
+                )

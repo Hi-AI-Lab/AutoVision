@@ -34,8 +34,11 @@ from typing import Any
 
 import torch
 
+from autovision.metrics.confusion import ConfusionMatrix
+
 __all__ = [
     "COCO_AREA_RANGES",
+    "ConfusionMatrix",
     "ErrorAnalysisReport",
     "Match",
     "analyze_detection_errors",
@@ -69,6 +72,8 @@ class Match:
     area: float  # box area in pixels²
     iou: float = 0.0
     fp_reason: str | None = None
+    #: GT class behind a ``classification`` FP (``None`` for other reasons).
+    other_class_id: int | None = None
 
 
 @dataclass
@@ -136,6 +141,11 @@ def _area_bucket(area: float, ranges: Mapping[str, tuple[float, float]]) -> str:
     )
 
 
+def _box_tuple(values: Any) -> tuple[float, float, float, float]:
+    """Four-corner box as a fixed-length tuple (mypy-friendly)."""
+    return (float(values[0]), float(values[1]), float(values[2]), float(values[3]))
+
+
 def match_detections(
     predictions: Sequence[Mapping[str, Any]],
     targets: Sequence[Mapping[str, Any]],
@@ -192,7 +202,7 @@ def match_detections(
                 else None
             )
             for position, p in enumerate(order.tolist()):
-                box = tuple(float(v) for v in boxes_p[p])
+                box = _box_tuple(boxes_p[p])
                 best_iou, best_gt = 0.0, None
                 if ious is not None:
                     row = ious[position]
@@ -217,7 +227,7 @@ def match_detections(
                         )
                     )
                 else:
-                    reason = _classify_fp(
+                    reason, other_class_id = _classify_fp(
                         box,
                         boxes_g,
                         labels_g,
@@ -237,12 +247,15 @@ def match_detections(
                             area=_area_of(box),
                             iou=best_iou,
                             fp_reason=None if reason == "ignored" else reason,
+                            other_class_id=(
+                                None if reason == "ignored" else other_class_id
+                            ),
                         )
                     )
             for gt in gt_index.tolist():
                 if gt in matched_gt:
                     continue
-                box = tuple(float(v) for v in boxes_g[gt])
+                box = _box_tuple(boxes_g[gt])
                 matches.append(
                     Match(
                         image_index=image_index,
@@ -265,7 +278,7 @@ def _classify_fp(
     matched_gt: set[int],
     iou_threshold: float,
     class_id: int,
-) -> str:
+) -> tuple[str, int | None]:
     """TIDE-style attribution for one false positive.
 
     A detection overlapping a CROWD gt (``iscrowd == 1``) at IoU >= the
@@ -275,13 +288,14 @@ def _classify_fp(
     Otherwise, in priority order: ``duplicate`` (same-class IoU >= the
     threshold but the GT is taken), ``classification`` (IoU >= threshold
     with another class's GT), ``localization`` (same-class IoU >= 0.1),
-    ``background``.
+    ``background``. The second value is the GT class for a
+    ``classification`` hit, else ``None``.
     """
     from torchvision.ops import box_iou
 
     if boxes_g.shape[0] == 0:
-        return "background"
-    query = torch.tensor([box], dtype=torch.float32)
+        return "background", None
+    query = torch.tensor([box], dtype=torch.float32, device=boxes_g.device)
     ious = box_iou(query, boxes_g)[0]
     # Closest-to-pyocotools rule (``dtIg``): pick the BEST-IoU GT among the
     # crowd boxes and the UNMATCHED regular GT; only when that best match is
@@ -295,7 +309,7 @@ def _classify_fp(
         if value > best_overall:
             best_overall, best_overall_is_crowd = value, int(crowds_g[gt]) != 0
     if best_overall_is_crowd and best_overall >= float(iou_threshold):
-        return "ignored"
+        return "ignored", None
     best_any, best_any_label = 0.0, -1
     best_same, same_matched = 0.0, False
     for gt in range(boxes_g.shape[0]):
@@ -308,12 +322,12 @@ def _classify_fp(
             if value > best_same:
                 best_same, same_matched = value, gt in matched_gt
     if best_same >= float(iou_threshold) and same_matched:
-        return "duplicate"
-    if best_any >= float(iou_threshold) and best_any_label != class_id:
-        return "classification"
+        return "duplicate", None
+    if best_any >= float(iou_threshold) and best_any_label >= 0 and best_any_label != class_id:
+        return "classification", best_any_label
     if best_same >= LOCALIZATION_IOU_FLOOR:
-        return "localization"
-    return "background"
+        return "localization", None
+    return "background", None
 
 
 def summarize_matches(
@@ -327,8 +341,8 @@ def summarize_matches(
     totals = Counter(match.kind for match in matches)
     totals.setdefault("ignored", 0)
     per_class: dict[str, dict[str, Any]] = {}
-    per_area = {
-        name: Counter(tp=0, fp=0, fn=0, ignored=0) for name in ranges
+    per_area: dict[str, dict[str, Any]] = {
+        name: {"tp": 0, "fp": 0, "fn": 0, "ignored": 0} for name in ranges
     }
     for match in matches:
         row = per_class.setdefault(
@@ -494,6 +508,12 @@ def analyze_detection_errors(
     summary["iou_threshold"] = float(iou_threshold)
     summary["score_threshold"] = float(score_threshold)
     summary["images"] = len(targets)
+    confusion = ConfusionMatrix.from_matches(
+        matches,
+        class_names=class_names,
+        class_ids=sorted(class_names),
+    )
+    summary["confusion"] = confusion.to_dict()
 
     out_dir = Path(out_dir)
     gallery_dir = out_dir / "gallery"
@@ -571,6 +591,9 @@ def analyze_detection_errors(
             f"| {_fmt(row['precision'])} | {_fmt(row['recall'])} | {reasons} |"
         )
     md.append("")
+    md.append("## 混淆矩阵\n")
+    md.append(confusion.to_markdown())
+    md.append("")
     md.append("## 按目标尺寸\n")
     md.append("| 分档 | TP | FP | FN | precision | recall |")
     md.append("|---|---|---|---|---|---|")
@@ -623,6 +646,7 @@ def analyze_detection_errors(
         json.dumps(
             {
                 "summary": summary,
+                "confusion": confusion.to_dict(),
                 "matches": [asdict(match) for match in matches],
                 "gallery": [str(path.relative_to(out_dir)) for path in written],
                 "images": [str(path) for path in image_paths],

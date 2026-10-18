@@ -223,6 +223,9 @@ USER_HELD_ASSETS: dict[str, UserHeldAsset] = {
 }
 
 
+_VERIFIED_FILES: dict[tuple[str, int, int, str], bool] = {}
+
+
 def verify_user_held_asset(
     asset: UserHeldAsset,
     files: tuple[str, ...] = ("weights.pt", "warm_start.pt"),
@@ -230,9 +233,9 @@ def verify_user_held_asset(
 ) -> None:
     """Fail unless the pinned container file(s) match their sha256.
 
-    Hashing is opt-in (containers run 40 MB – 920 MB each): call this in
-    audits/tests, not on every resolve. ``files`` selects a subset for
-    cheap spot checks.
+    Results are cached per (path, size, mtime, expected digest), so repeated
+    resolves in one process do not re-hash a 40 MB–920 MB container; any file
+    change invalidates the cache entry.
     """
     pinned = {
         "weights.pt": asset.weights_sha256,
@@ -251,6 +254,12 @@ def verify_user_held_asset(
                 f"(store root {USER_HELD_ROOT}; source: {asset.origin}; "
                 f"license {asset.license_id}, not redistributable)."
             )
+        stat = path.stat()
+        cache_key = (
+            str(path.resolve()), stat.st_size, stat.st_mtime_ns, pinned[fname]
+        )
+        if _VERIFIED_FILES.get(cache_key):
+            continue
         digest = hashlib.sha256()
         with path.open("rb") as handle:
             for chunk in iter(lambda: handle.read(chunk_size), b""):
@@ -261,6 +270,7 @@ def verify_user_held_asset(
                 f"refusing to use unverified weights (pinned "
                 f"{pinned[fname][:12]}…, got {digest.hexdigest()[:12]}…)."
             )
+        _VERIFIED_FILES[cache_key] = True
 
 
 def resolve_user_held_asset(name: str, *, verify: bool = False) -> UserHeldAsset:
@@ -314,4 +324,5 @@ def resolve_avwarm_start_source(source: str | Path) -> Path:
             f"(store root {USER_HELD_ROOT}; AUTOVISION_USER_HELD_ROOT "
             f"overrides)."
         )
+    verify_user_held_asset(asset, files=("warm_start.pt",))
     return asset.warm_start_path

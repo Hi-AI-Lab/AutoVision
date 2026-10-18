@@ -411,7 +411,7 @@ Complete RF-DETR detectors:
 ```python
 from autovision import load_task_model
 model = load_task_model(
-    "/home/hdjs/Research/Model/AutoVision/apache_detection/"
+    "__STORE__/"
     "rfdetr/rf-detr-nano/weights.pt",
     device="cuda",
 )
@@ -429,7 +429,7 @@ import autovision
 autovision.train_object_detection(
     out="runs/detr_s", data="coco.yaml", model="detr/s",
     model_args={
-        "warm_start": "/home/hdjs/Research/Model/AutoVision/apache_detection/"
+        "warm_start": "__STORE__/"
         "warmstart/detr_s_hgnetv2b1_dfine_s.pt",
         # The warm-start carries decoder/encoder tensors only; this loads
         # the Apache-2.0 timm HGNetV2 ImageNet backbone.
@@ -455,6 +455,10 @@ inside AutoVision use the prepared warm-start files.
 Apache-2.0. See `LICENSE` and `NOTICE`. No DINOv2, DINOv3, AGPL, or
 NOASSERTION weights are present.
 """
+    readme = readme.replace(
+        "__STORE__/",
+        f"{store.as_posix().rstrip('/')}/",
+    )
     (store / "README.md").write_text(readme, encoding="utf-8")
     manifest = {
         "store": "apache_detection",

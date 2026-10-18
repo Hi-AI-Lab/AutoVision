@@ -91,6 +91,26 @@ class TestTrainObjectDetection:
         assert result.best_checkpoint_path and result.best_checkpoint_path.exists()
         assert "val_metric/map" in result.best_metrics
 
+    def test_early_stopping_trainer_args_are_accepted(self, tmp_path, coco):
+        train_json, val_json, images_dir = coco
+        result = train_object_detection(
+            out=tmp_path / "det_es",
+            data=data_config(train_json, val_json, images_dir),
+            steps=2,
+            batch_size=4,
+            num_workers=0,
+            model_args=model_args(),
+            transform_args=transform_args(),
+            trainer_args={
+                "val_every_num_steps": 1,
+                "early_stopping_patience": 5,
+                "early_stopping_min_delta": 0.0,
+            },
+        )
+        assert result.steps_run == 2
+        assert result.stopped_early is False
+        assert result.stop_step is None
+
     def test_exported_model_loads_and_predicts(self, tmp_path, coco):
         train_json, val_json, images_dir = coco
         result = train_object_detection(

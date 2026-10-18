@@ -37,7 +37,10 @@ __all__ = [
 
 
 #: COCO 2017 80-class names in category-id order (the order every DETR
-#: checkpoint in this framework was trained against).
+#: checkpoint in this framework was trained against). GTR/DETR task heads use
+#: a contiguous 0..79 label space; RF-DETR keeps the original COCO
+#: category-id head (0=N/A, 1..90 with gaps), see
+#: :data:`COCO_CATEGORY_NAMES` / :data:`COCO_RFDETR_NUM_CLASSES`.
 COCO_CLASSES: tuple[str, ...] = (
     "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train",
     "truck", "boat", "traffic light", "fire hydrant", "stop sign",
@@ -54,15 +57,37 @@ COCO_CLASSES: tuple[str, ...] = (
     "hair drier", "toothbrush",
 )
 
+#: COCO category ids for :data:`COCO_CLASSES` (the official ids skip 12, 26,
+#: 29, 30, 45, 66, 68, 69, 71 and 83).
+COCO_CATEGORY_IDS: tuple[int, ...] = (
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19, 20, 21,
+    22, 23, 24, 25, 27, 28, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
+    43, 44, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
+    62, 63, 64, 65, 67, 70, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 84,
+    85, 86, 87, 88, 89, 90,
+)
+
+#: ``category_id -> name`` for the official COCO id space.
+COCO_CATEGORY_NAMES: dict[int, str] = dict(zip(COCO_CATEGORY_IDS, COCO_CLASSES))
+
+#: RF-DETR's released head keeps ``category_id`` labels plus the N/A slot 0.
+COCO_RFDETR_NUM_CLASSES: int = max(COCO_CATEGORY_IDS) + 1
+
 
 def pretrained_class_names(model_key: str) -> dict[int, str]:
     """Class-id → name map for a released detector.
 
-    All task checkpoints in the catalog are COCO-trained; a custom
-    fine-tune records its own classes in the exported payload and must not
-    use this helper.
+    RF-DETR checkpoints keep COCO category ids (1..90, 0 = N/A); GTR/DETR
+    checkpoints use the contiguous 0..79 order of :data:`COCO_CLASSES`.
+    A custom fine-tune records its own classes in the exported payload and
+    must not use this helper.
     """
-    get_model_entry(model_key)  # validates the key early.
+    entry = get_model_entry(model_key)  # validates the key early.
+    if entry.family == "rfdetr":
+        return {
+            index: COCO_CATEGORY_NAMES.get(index, "N/A")
+            for index in range(COCO_RFDETR_NUM_CLASSES)
+        }
     return dict(enumerate(COCO_CLASSES))
 
 
@@ -99,7 +124,7 @@ def _build_rfdetr(model_key: str, device: str | torch.device) -> torch.nn.Module
     info = resolve_rfdetr_variant(variant)
     resolution = int(info["resolution"])
     network = RFDETRObjectDetection(
-        num_classes=len(COCO_CLASSES),
+        num_classes=COCO_RFDETR_NUM_CLASSES,
         model=variant,
         image_size=(resolution, resolution),
         load_weights=True,

@@ -11,6 +11,8 @@ hook used when the target dataset has a different label/query layout.
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
 from typing import Literal
 
 import torch
@@ -23,6 +25,8 @@ from transformers import (
 )
 
 __all__ = ["build_eomt_model", "adapt_eomt_head", "ROPE_PERIODS_KEY"]
+
+logger = logging.getLogger("autovision")
 
 #: Reserved state-dict key for a checkpoint's RoPE periods. The DINOv3 task
 #: model pops it before the strict HF load and installs ``1 / periods`` on the
@@ -37,6 +41,67 @@ ROPE_PERIODS_KEY = "autovision.rope_periods"
 # tue-mps/coco_panoptic_eomt_large_640_dinov3).
 DEFAULT_DINOV2_WEIGHT_SOURCE = "tue-benchmark/eomt-dinov2-base"
 DEFAULT_DINOV3_WEIGHT_SOURCE = "tue-mps/eomt-dinov3-coco-panoptic-base-640"
+
+
+def _require_eomt_license(variant: str, source: str) -> None:
+    """Refuse to fetch EoMT checkpoints without the backbone license opt-in."""
+    if variant == "dinov3":
+        from autovision.encoders.dinov3.dinov3_source import (
+            DINOV3_WEIGHTS_ENV,
+            dinov3_weights_opt_in,
+        )
+
+        if dinov3_weights_opt_in():
+            return
+        raise PermissionError(
+            f"EoMT-DINOv3 weights '{source}' are user-held under Meta's "
+            "DINOv3 License; the framework does not accept it on your "
+            f"behalf. Set {DINOV3_WEIGHTS_ENV}=1 after accepting the "
+            "license, or build config-only weights."
+        )
+    from autovision.encoders.dinov2.dinov2_source import (
+        DINOV2_WEIGHTS_ENV,
+        dinov2_weights_opt_in,
+    )
+
+    if dinov2_weights_opt_in():
+        return
+    raise PermissionError(
+        f"EoMT-DINOv2 weights '{source}' are CC-BY-NC-4.0; commercial use "
+        f"is not granted. Set {DINOV2_WEIGHTS_ENV}=1 only after accepting "
+        "the non-commercial terms, or build config-only weights."
+    )
+
+
+def _require_pinned_or_trusted(source: str) -> None:
+    """Fail closed on an unpinned hub checkpoint unless explicitly trusted."""
+    candidate = Path(source)
+    if candidate.exists():
+        logger.info(
+            "Loading EoMT weights from local path '%s' (user-supplied; "
+            "pin its sha256 in your deployment manifest).", source,
+        )
+        return
+    from autovision.encoders.weight_verification import get_weight_artifact
+    from autovision.runtime.env import Env
+
+    artifact = get_weight_artifact(source)
+    if artifact is not None and artifact.sha256:
+        return
+    if Env.ALLOW_UNPINNED_WEIGHTS.value:
+        logger.warning(
+            "Loading unpinned EoMT checkpoint '%s' because "
+            "AUTOVISION_ALLOW_UNPINNED_WEIGHTS=1; no sha256 verification.",
+            source,
+        )
+        return
+    raise PermissionError(
+        f"EoMT checkpoint '{source}' has no pinned sha256 in "
+        "WEIGHT_MANIFEST. Refusing an unpinned download. Pin it with "
+        "scripts/update_weight_hashes.py, pass a local weight_source, or "
+        "explicitly set AUTOVISION_ALLOW_UNPINNED_WEIGHTS=1 for a trusted "
+        "mirror."
+    )
 
 
 def build_eomt_model(
@@ -97,12 +162,18 @@ def build_eomt_model(
             layer_norm_eps=layer_norm_eps,
         )
         if load_weights:
-            model = EomtDinov3ForUniversalSegmentation.from_pretrained(
-                weight_source or DEFAULT_DINOV3_WEIGHT_SOURCE, config=config
+            source = weight_source or DEFAULT_DINOV3_WEIGHT_SOURCE
+            _require_eomt_license("dinov3", source)
+            _require_pinned_or_trusted(source)
+            # source is license-gated and must be pinned
+            # (or explicitly marked trusted) before this call.
+            model = EomtDinov3ForUniversalSegmentation.from_pretrained(  # nosec B615
+                source, config=config
             )
         else:
             model = EomtDinov3ForUniversalSegmentation(config)
         _set_layer_norm_eps(model, layer_norm_eps)
+        adapt_eomt_head(model, num_labels, num_queries)
         return model
     config = EomtConfig(
         id2label=id2label,
@@ -120,12 +191,18 @@ def build_eomt_model(
         layer_norm_eps=layer_norm_eps,
     )
     if load_weights:
-        model = EomtForUniversalSegmentation.from_pretrained(
-            weight_source or DEFAULT_DINOV2_WEIGHT_SOURCE, config=config
+        source = weight_source or DEFAULT_DINOV2_WEIGHT_SOURCE
+        _require_eomt_license("dinov2", source)
+        _require_pinned_or_trusted(source)
+        # source is license-gated and must be pinned (or
+        # explicitly marked trusted) before this call.
+        model = EomtForUniversalSegmentation.from_pretrained(  # nosec B615
+            source, config=config
         )
     else:
         model = EomtForUniversalSegmentation(config)
     _set_layer_norm_eps(model, layer_norm_eps)
+    adapt_eomt_head(model, num_labels, num_queries)
     return model
 
 

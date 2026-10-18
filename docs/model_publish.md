@@ -28,6 +28,7 @@
 - 可下载资产缓存 + sha256 复核：`src/autovision/registry/downloadable.py`
 - 资产许可元数据：`src/autovision/registry/assets.py`
 - 模型库生成器：`scripts/gen_model_zoo.py`（`--check` 防漂移）
+- Apache-2.0 检测器权重库准备：`scripts/prepare_apache_detector_weights.py`
 - 训练 / 评测 / 延迟脚本：`scripts/train_spectrum.py`、
   `scripts/eval_spectrum_coco.py`、`scripts/measure_spectrum_benchmarks.py`
 - 发布门禁测试：`tests/test_spectrum_release.py`

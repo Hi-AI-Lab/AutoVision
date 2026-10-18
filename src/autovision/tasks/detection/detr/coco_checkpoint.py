@@ -83,6 +83,7 @@ from autovision.registry.downloadable import (
 from autovision.registry.user_held_assets import (
     USER_HELD_ASSETS,
     USER_HELD_ROOT,
+    verify_user_held_asset,
 )
 
 __all__ = [
@@ -571,6 +572,9 @@ def resolve_detector_checkpoint(source: str | Path) -> Path:
                 f"not present at '{weights}' (store root {USER_HELD_ROOT}; "
                 f"AUTOVISION_USER_HELD_ROOT overrides)."
             )
+        # Identity is pinned in the registry; verify before use. The digest
+        # is cached per (path, size, mtime), so repeated resolves are cheap.
+        verify_user_held_asset(user_held, files=("weights.pt",))
         return weights
     raise DownloadableModelError(
         f"detector_checkpoint '{source}' is neither an existing file nor a "

@@ -300,16 +300,24 @@ def compliance_report_command(arguments: list[str] = typer.Argument(None)) -> No
 
         autovision-cli compliance-report model=best.pt snapshot=qa/data.snap.json out=compliance/
         autovision-cli compliance-report model=best.pt out=compliance/ include_dependencies=false
+        autovision-cli compliance-report model=best.pt out=compliance/ fail_on=warning
     """
     from autovision.cli.compliance_report import compliance_report
 
     kwargs = _parse_kwargs(list(arguments or []))
     strict = bool(kwargs.pop("strict", False))
+    fail_on = str(kwargs.pop("fail_on", "error" if strict else "none"))
+    if fail_on not in ("error", "warning", "none"):
+        raise typer.BadParameter(
+            "fail_on must be one of error | warning | none."
+        )
     report = compliance_report(**kwargs)
     typer.echo(report.summary_text())
     typer.echo(f"json: {report.report_json}")
     typer.echo(f"markdown: {report.report_md}")
-    if strict and report.errors:
+    typer.echo(f"sbom: {report.report_sbom}")
+    typer.echo(f"manifest: {report.report_manifest}")
+    if not report.passes(fail_on):  # type: ignore[arg-type]
         raise typer.Exit(code=1)
 
 
@@ -526,35 +534,75 @@ def _load_names(value: Any, source: str) -> Any:
 
 @app.command("serve")
 def serve_command(arguments: list[str] = typer.Argument(None)) -> None:
-    """Reference inference serving (roadmap F2): FastAPI + batch + metrics.
+    """Reference inference serving: FastAPI + batch + metrics.
 
         autovision-cli serve model=exported_best.pt port=8000 [backend=onnx artifact=m.onnx]
-        autovision-cli serve model=exported_best.pt threshold=0.4 host=0.0.0.0
+        autovision-cli serve model=exported_best.pt port=8443 workers=2 \
+            ssl_keyfile=key.pem ssl_certfile=cert.pem
+        autovision-cli serve model=exported_best.pt rate_limit_per_minute=600 \
+            rate_limit_burst=20
 
     Endpoints: ``POST /predict`` ({"images": ["<base64>", ...]}),
-    ``GET /healthz``, ``GET /metrics`` (Prometheus text). Needs the
-    ``serving`` extra (fastapi/uvicorn). Reference only: no auth, single
-    process, no TLS — harden per deployment.
+    ``GET /healthz``, ``GET /readyz``, ``GET /drift``, ``GET /metrics``.
+    Needs the ``serving`` extra (fastapi/uvicorn). TLS and multi-worker are
+    transport options; canary/A-B variants are available through the Python
+    API (``create_app(variants=...)``).
     """
 
     try:
-        import uvicorn
+        import uvicorn  # noqa: F401 - availability check for a friendly error
     except ImportError:
         raise typer.BadParameter(
             "serve needs the 'serving' extra: pip install 'autovision[serving]'."
         ) from None
 
-    from autovision.serving import create_app
+    from autovision.errors import AutoVisionError
+
+    try:
+        from autovision.serving.server import serve
+    except ImportError:
+        raise typer.BadParameter(
+            "serve needs the 'serving' extra: pip install 'autovision[serving]'."
+        ) from None
 
     kwargs = _parse_kwargs(list(arguments or []))
     host = str(kwargs.pop("host", "127.0.0.1"))
     port = int(kwargs.pop("port", 8000))
+    workers = int(kwargs.pop("workers", 1))
+    ssl_keyfile = kwargs.pop("ssl_keyfile", None)
+    ssl_certfile = kwargs.pop("ssl_certfile", None)
+    ssl_ca_certs = kwargs.pop("ssl_ca_certs", None)
+    ssl_cert_reqs = kwargs.pop("ssl_cert_reqs", None)
+    if ssl_cert_reqs is not None:
+        try:
+            ssl_cert_reqs = int(ssl_cert_reqs)
+        except (TypeError, ValueError):
+            raise typer.BadParameter(
+                "ssl_cert_reqs must be an integer "
+                "(e.g. 2 for ssl.CERT_REQUIRED)."
+            ) from None
     model = kwargs.pop("model", None)
     if model is None:
         raise typer.BadParameter("serve needs model=<exported .pt> (or engine kwargs).")
-    app = create_app(model, **kwargs)
-    typer.echo(f"serving on http://{host}:{port} (endpoints: /predict /healthz /metrics)")
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    scheme = "https" if ssl_keyfile or ssl_certfile else "http"
+    typer.echo(
+        f"serving on {scheme}://{host}:{port} with workers={workers} "
+        "(endpoints: /predict /healthz /readyz /drift /metrics)"
+    )
+    try:
+        serve(
+            model,
+            host=host,
+            port=port,
+            workers=workers,
+            ssl_keyfile=ssl_keyfile,
+            ssl_certfile=ssl_certfile,
+            ssl_ca_certs=ssl_ca_certs,
+            ssl_cert_reqs=ssl_cert_reqs,
+            **kwargs,
+        )
+    except AutoVisionError as error:
+        raise typer.BadParameter(str(error)) from None
 
 
 @app.command("data-snapshot")

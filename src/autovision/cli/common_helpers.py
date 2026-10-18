@@ -13,13 +13,16 @@ import torch
 
 from autovision.runtime.distributed import is_global_rank_zero
 from autovision.runtime.env import Env
+from autovision.runtime.manifest import write_run_manifest
 from autovision.types import PathLike
 
 __all__ = [
     "get_global_batch_size",
     "get_num_workers",
     "get_out_dir",
+    "resolve_gradient_checkpointing",
     "resolve_num_devices",
+    "resolve_parallel",
     "validate_trainer_args",
 ]
 
@@ -40,6 +43,28 @@ def resolve_num_devices(devices: int | str) -> int:
         return devices
     text = str(devices)
     return int(text) if text.isdigit() else 1
+
+
+def resolve_gradient_checkpointing(trainer_args: dict | None) -> bool:
+    """Read the opt-in ``gradient_checkpointing`` trainer flag."""
+    value = (trainer_args or {}).get("gradient_checkpointing", False)
+    if not isinstance(value, bool):
+        raise ValueError(
+            "trainer_args.gradient_checkpointing must be a bool, got "
+            f"{type(value).__name__}."
+        )
+    return value
+
+
+def resolve_parallel(trainer_args: dict | None) -> str:
+    """Read the ``parallel`` strategy (``ddp`` | ``fsdp``)."""
+    value = str((trainer_args or {}).get("parallel", "ddp")).lower()
+    if value not in ("ddp", "fsdp"):
+        raise ValueError(
+            "trainer_args.parallel must be 'ddp' or 'fsdp' (DeepSpeed/ZeRO/"
+            f"elastic need an external launcher); got '{value}'."
+        )
+    return value
 
 
 def validate_trainer_args(trainer_args: dict | None, *, allowed: set[str]) -> None:
@@ -95,6 +120,11 @@ def get_out_dir(
     if overwrite and not resume_interrupted and out_dir.exists():
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    if is_global_rank_zero():
+        try:
+            write_run_manifest(out_dir, resume=resume_interrupted)
+        except Exception as error:  # noqa: BLE001 - audit artifact is best-effort
+            logger.warning("Could not write run manifest to '%s': %s", out_dir, error)
     return out_dir
 
 

@@ -54,19 +54,21 @@ def get_dataset_temp_mmap_path(
     out_dir: Path,
     resume_interrupted: bool = False,
     overwrite: bool = False,
+    fingerprint_extra: str | None = None,
 ) -> Path:
     """Compute the mmap file path for the dataset.
 
     The identifier combines the resolved output directory and the data
-    fingerprint (paths + mtimes), so a run re-using an output directory with
-    different data gets a fresh dataset file. When
-    ``AUTOVISION_MMAP_REUSE_FILE`` is set, only the data fingerprint is used
-    (shared across runs). A pre-existing file *without an active refcount*
-    means a stale file from a crashed run on the same (out, data) pair —
-    an error unless resume/overwrite/reuse.
+    fingerprint (label-file paths + sizes + mtimes, plus ``fingerprint_extra``
+    such as the ignored-class set). Editing an existing YOLO ``.txt`` label
+    therefore invalidates the cache even though the images directory mtime
+    does not change. When ``AUTOVISION_MMAP_REUSE_FILE`` is set, only the data
+    fingerprint is used (shared across runs). A pre-existing file *without an
+    active refcount* means a stale file from a crashed run on the same
+    (out, data) pair — an error unless resume/overwrite/reuse.
     """
     reuse = Env.MMAP_REUSE_FILE.value
-    data_hash = _data_fingerprint(data)
+    data_hash = _data_fingerprint(data, fingerprint_extra)
     if reuse:
         identifier = data_hash
     else:
@@ -85,30 +87,82 @@ def get_dataset_temp_mmap_path(
     return cache_dir / f"{_sha256(identifier)}.mmap"
 
 
-def _data_fingerprint(data: str) -> str:
-    """Fingerprint of the data spec: resolved path + mtime when it exists."""
+_LABEL_SUFFIXES = frozenset({".txt", ".json", ".xml", ".csv", ".yaml", ".yml"})
+
+
+def _label_files(path: Path) -> list[Path]:
+    """Label files that define the mmap rows (never the image payloads)."""
+    roots = [path]
+    if path.name == "images" and (path.parent / "labels").is_dir():
+        roots.append(path.parent / "labels")
+    files: list[Path] = []
+    for root in roots:
+        if root.is_file() and root.suffix.lower() in _LABEL_SUFFIXES:
+            files.append(root)
+        elif root.is_dir():
+            files.extend(
+                child
+                for child in root.rglob("*")
+                if child.is_file() and child.suffix.lower() in _LABEL_SUFFIXES
+            )
+    return sorted(files)
+
+
+def _data_fingerprint(data: str, extra_key: str | None = None) -> str:
+    """Fingerprint of the data spec: label paths, sizes, mtimes + extra key."""
     path = Path(data)
     try:
-        stat = path.stat()
-        raw = f"{path.resolve()}|{stat.st_mtime_ns}"
+        if path.is_file():
+            stat = path.stat()
+            raw = (
+                f"{path.resolve()}|{stat.st_mtime_ns}|{stat.st_size}|"
+                f"{extra_key or ''}"
+            )
+        elif path.is_dir():
+            digest = hashlib.sha256()
+            labels = _label_files(path)
+            for child in labels:
+                stat = child.stat()
+                root = path if child.is_relative_to(path) else path.parent
+                prefix = "" if root == path else f"{root.name}/"
+                digest.update(
+                    f"{prefix}{child.relative_to(root).as_posix()}|"
+                    f"{stat.st_size}|{stat.st_mtime_ns}\n".encode("utf-8")
+                )
+            # No label files at all: still distinguish different roots.
+            raw = (
+                f"{path.resolve()}|{digest.hexdigest()}|"
+                f"{len(labels)}|{extra_key or ''}"
+            )
+        else:
+            raw = f"{data}|{extra_key or ''}"
     except OSError:
-        raw = str(data)
+        raw = f"{data}|{extra_key or ''}"
     return _sha256(raw)
 
 
 def get_dataset_mmap_file(
-    items_fn: Callable[[], Iterable[dict[str, Any]]], mmap_filepath: Path
+    items_fn: Callable[[], Iterable[dict[str, Any]]],
+    mmap_filepath: Path,
+    *,
+    overwrite: bool = False,
 ) -> MemoryMappedSequence:
     """Ensure the mmap file exists and return the sequence for this process.
 
     Local rank zero writes to a temp file and atomically renames; other ranks
     poll until the file appears (or ``AUTOVISION_MMAP_TIMEOUT_SEC`` elapses; the
-    timer resets while rank zero is still writing).
+    timer resets while rank zero is still writing). ``overwrite=True``
+    deletes a stale file (and its refcount) before rebuilding.
     """
     mmap_filepath.parent.mkdir(parents=True, exist_ok=True)
+    if overwrite and mmap_filepath.exists():
+        mmap_filepath.unlink(missing_ok=True)
+        _ref_count_path(mmap_filepath).unlink(missing_ok=True)
     if mmap_filepath.exists():
+        # Open before incrementing: a corrupt file must not leak a refcount.
+        sequence = MemoryMappedSequence.from_file(mmap_filepath)
         _increment_ref_count(mmap_filepath)
-        return MemoryMappedSequence.from_file(mmap_filepath)
+        return sequence
 
     tmp_path = mmap_filepath.with_suffix(
         f".{_sha256(str(mmap_filepath))}-{os.getpid()}.temp"
@@ -131,8 +185,9 @@ def get_dataset_mmap_file(
                     f"'{mmap_filepath}' which never appeared."
                 )
             time.sleep(_POLL_INTERVAL_SEC)
+    sequence = MemoryMappedSequence.from_file(mmap_filepath)
     _increment_ref_count(mmap_filepath)
-    return MemoryMappedSequence.from_file(mmap_filepath)
+    return sequence
 
 
 def _lock_path(mmap_filepath: Path) -> Path:
@@ -170,12 +225,19 @@ def dataset_mmap_context(
     out_dir: Path,
     resume_interrupted: bool = False,
     overwrite: bool = False,
+    fingerprint_extra: str | None = None,
 ) -> Iterator[MemoryMappedSequence]:
     """Context manager: mmap file lifecycle (create, share, refcount, clean)."""
     mmap_filepath = get_dataset_temp_mmap_path(
-        data=data, out_dir=out_dir, resume_interrupted=resume_interrupted, overwrite=overwrite
+        data=data,
+        out_dir=out_dir,
+        resume_interrupted=resume_interrupted,
+        overwrite=overwrite,
+        fingerprint_extra=fingerprint_extra,
     )
-    sequence = get_dataset_mmap_file(items_fn, mmap_filepath)
+    sequence = get_dataset_mmap_file(
+        items_fn, mmap_filepath, overwrite=overwrite
+    )
     try:
         yield sequence
     finally:

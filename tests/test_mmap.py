@@ -116,3 +116,46 @@ class TestMmapContext:
         cache = tmp_path / "cache"
         leftovers = [p for p in cache.iterdir() if p.suffix in (".mmap", ".ref_count")]
         assert leftovers == []
+
+
+class TestMmapFingerprintHardening:
+    def test_editing_a_yolo_label_changes_the_cache_key(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AUTOVISION_DATA_CACHE_DIR", str(tmp_path / "cache"))
+        images = tmp_path / "images"
+        labels = tmp_path / "labels"
+        images.mkdir()
+        labels.mkdir()
+        label = labels / "a.txt"
+        label.write_text("0 0.5 0.5 0.2 0.2\n")
+        out = tmp_path / "run"
+        first = get_dataset_temp_mmap_path(data=str(images), out_dir=out)
+        import os
+
+        os.utime(label, (label.stat().st_atime, label.stat().st_mtime + 5))
+        second = get_dataset_temp_mmap_path(data=str(images), out_dir=out)
+        assert first != second
+
+    def test_ignore_classes_participate_in_the_fingerprint(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AUTOVISION_DATA_CACHE_DIR", str(tmp_path / "cache"))
+        out = tmp_path / "run"
+        first = get_dataset_temp_mmap_path(
+            data="data", out_dir=out, fingerprint_extra="[1]"
+        )
+        second = get_dataset_temp_mmap_path(
+            data="data", out_dir=out, fingerprint_extra="[2]"
+        )
+        assert first != second
+
+    def test_overwrite_rebuilds_existing_mmap(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AUTOVISION_DATA_CACHE_DIR", str(tmp_path / "cache"))
+        out = tmp_path / "run"
+        with dataset_mmap_context(lambda: items(1), data="d", out_dir=out) as seq:
+            path = seq.path
+            assert len(seq) == 1
+        # Recreate the file as a stale leftover (no active refcount).
+        write_items_to_file(items(1), path)
+        with dataset_mmap_context(
+            lambda: items(3), data="d", out_dir=out, overwrite=True
+        ) as seq:
+            assert len(seq) == 3
+        assert not path.exists()

@@ -141,4 +141,5 @@ def load_nan_capture(
                 f"trust_source=True, which deserializes the full pickle — "
                 f"only do this for snapshots you created yourself."
             ) from error
-        return torch.load(path, map_location="cpu", weights_only=False)
+        # Debug snapshots are explicitly trusted local files.
+        return torch.load(path, map_location="cpu", weights_only=False)  # nosec B614

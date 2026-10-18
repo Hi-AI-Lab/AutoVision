@@ -17,12 +17,21 @@ class TestDefaults:
         assert Env.MMAP_REUSE_FILE.value is False
         assert Env.OFFLINE.value is False
         assert Env.TELEMETRY.value is False  # compliance: opt-in only
+        assert Env.TRUST_TEACHER_CHECKPOINT.value is False  # unsafe pickle opt-in
+        assert Env.ALLOW_UNPINNED_WEIGHTS.value is False  # fail-closed weights
+        assert Env.DDP_TIMEOUT_SEC.value == 1800.0
+        assert Env.FSDP_EMA_INTERVAL.value == 1
         assert Env.MIRROR_URL.value is None
 
     def test_values_snapshot_covers_all_vars(self):
         values = Env.values()
         assert values["AUTOVISION_LOG_LEVEL"] == "INFO"
         assert "AUTOVISION_TELEMETRY" in values
+
+    def test_values_redact_secrets(self, monkeypatch):
+        monkeypatch.setenv("AUTOVISION_SERVING_API_KEY", "top-secret")
+        assert Env.SERVING_API_KEY.value == "top-secret"
+        assert Env.values()["AUTOVISION_SERVING_API_KEY"] == "<redacted>"
 
 
 class TestParsing:

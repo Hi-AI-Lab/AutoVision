@@ -257,3 +257,28 @@ class TestInstanceEndToEnd:
         prediction = loaded.predict(torch.rand(3, 64, 64))
         assert prediction["masks"].shape[1:] == (64, 64)
         assert prediction["masks"].dtype == torch.bool
+
+
+class TestInstanceResolutionContract:
+    def test_resize_masks_stays_binary(self):
+        from autovision.metrics.instance_segmentation import resize_masks
+
+        masks = torch.zeros(2, 4, 4, dtype=torch.bool)
+        masks[:, :2, :2] = True
+        resized = resize_masks(masks, 8, 6)
+        assert resized.shape == (2, 8, 6)
+        assert set(resized.unique().tolist()) <= {0.0, 1.0}
+
+    def test_validation_resizes_gt_masks_to_original_size(self):
+        # Regression: GT masks stay on the network canvas while predictions
+        # are decoded to the original frame; COCO RLE then disagrees with the
+        # declared image size.
+        train = make_train_model()
+        train.model.eval()
+        batch = make_batch()
+        batch["original_size"] = [(96, 48)] * 2
+        train.validation_step(batch, step=0)
+        state = train.export_metric_state("val")
+        assert state["targets"][0]["masks"].shape[-2:] == (96, 48)
+        metrics = train.compute_metrics("val")
+        assert set(metrics) == {"val_metric/mask_map", "val_metric/mask_map_50"}

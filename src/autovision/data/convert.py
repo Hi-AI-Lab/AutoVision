@@ -336,7 +336,7 @@ def voc_to_coco(
             + (f" for split '{split_file}'." if split_file is not None else ".")
         )
 
-    import xml.etree.ElementTree as ET
+    from defusedxml import ElementTree as ET
 
     def _local(tag: str) -> str:
         """Element local name (tolerates default/xsi namespaces)."""

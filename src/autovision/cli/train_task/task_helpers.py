@@ -27,6 +27,8 @@ class TaskTrainResult:
     best_exported_model_path: Path | None
     best_metrics: dict[str, float]
     classes: dict[int, str]
+    stopped_early: bool = False
+    stop_step: int | None = None
 
 
 def _dataset_size(data_args, split: str) -> int:

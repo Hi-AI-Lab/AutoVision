@@ -20,16 +20,22 @@ autovision-cli compliance-report \
 - `include_dependencies=false` 跳过依赖扫描（快速检查模型/数据证据）。
 - `no_timestamp=true` 生成可复现报告（不写 `generated_at`）。
 - `strict=true` 在存在 error 时退出码 1（适合 CI/发布门禁）。
+- `fail_on=error|warning|none` 指定门禁级别（优先级高于 `strict`）；
+  `fail_on=warning` 把未知/待复核许可、未验证数据快照等 warning 也作为失败。
+- 报告同时写出 `compliance.sbom.json`（CycloneDX 1.5）与
+  `compliance.manifest.json`（三个报告文件的 sha256），供审计复核。
 
 ## 判定
 
-- `error`：模型无许可、模型卡 sha 与文件不一致、模型卡非法等；
-- `warning`：缺模型卡、依赖许可未知/待复核、无数据快照；
+- `error`：模型无许可、模型卡 sha 与文件不一致、模型卡非法、数据快照与内容
+  不一致等；
+- `warning`：缺模型卡、依赖许可未知/待复核、无数据快照、快照无法重算等；
 - `info`：未提供快照等提示。
 
-报告是**证据汇编**，不是法律意见；许可最终结论由法务确认。默认允许清单为
-常见宽松许可（Apache-2.0 / MIT / BSD / ISC / MPL-2.0）；企业可在代码中
-传入自定义 allowlist。
+数据快照会用 `verify_dataset_snapshot` 重新计算；数据移动导致无法重算记
+warning，内容漂移记 error。报告是**证据汇编**，不是法律意见；许可最终结论
+由法务确认。默认允许清单为常见宽松许可（Apache-2.0 / MIT / BSD / ISC /
+MPL-2.0）；企业可在代码中传入自定义 allowlist。
 
 ## 边界
 

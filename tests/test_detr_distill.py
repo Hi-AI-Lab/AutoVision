@@ -399,3 +399,27 @@ class TestDistillWrapper:
         )
         with pytest.raises(NotImplementedError, match="teacher_model"):
             DETRObjectDetectionTrain(args)
+
+
+class TestLegacyTeacherCheckpointGate:
+    def test_legacy_export_requires_explicit_trust(self, baseline_train_model, tmp_path, monkeypatch):
+        import pathlib
+
+        from autovision.errors import CheckpointError
+        from autovision.tasks.detection.detr.train_model import (
+            _load_teacher_from_export,
+        )
+
+        payload = _export_payload(baseline_train_model)
+        # Simulate a legacy export: a non-safe-global object makes
+        # weights_only=True fail, exactly like the old __class__ cell.
+        payload["legacy_marker"] = pathlib.Path(".")
+        checkpoint = tmp_path / "legacy_teacher.pt"
+        torch.save(payload, checkpoint)
+
+        with pytest.raises(CheckpointError, match="TRUST_TEACHER"):
+            _load_teacher_from_export(checkpoint)
+
+        monkeypatch.setenv("AUTOVISION_TRUST_TEACHER_CHECKPOINT", "1")
+        teacher = _load_teacher_from_export(checkpoint)
+        assert isinstance(teacher, torch.nn.Module)

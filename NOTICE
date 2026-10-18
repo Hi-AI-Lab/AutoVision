@@ -113,6 +113,21 @@ THIRD_PARTY_LICENSES.md; policy: CONTRIBUTING.md):
   tasks/shared/sahi.py and tasks/shared/tiling_utils.py; the implementation
   is authored by AutoVision.
 
+* Roboflow supervision 0.30 (MIT License, Copyright (c) 2022 Roboflow)
+  Source: https://github.com/roboflow/supervision
+  Used for: API/algorithm reference for the inference-side annotators
+  (trace/heatmap/blur/pixelate/corner/round-box/halo/edge/background
+  overlay), skeleton registry, NumPy box/mask/polygon utilities, and video
+  sink helpers in src/autovision/visualize/effects.py,
+  visualize/skeletons.py, geometry/boxes.py, geometry/masks.py and
+  inference/video.py. The implementation is authored by AutoVision; no
+  supervision runtime dependency is added. Full MIT text:
+  THIRD_PARTY_LICENSES.md.
+
+* Demo asset `examples/tasks/assets/airport_aerial.jpg` — Wikimedia Commons,
+  Mertbiol, CC0 1.0 (public domain dedication). Used only by the runnable
+  examples; not part of the installed package.
+
 Algorithm references (ideas/papers, no code vendored): DINO (Apache-2.0,
 facebookresearch/dino), DetCon (Apache-2.0, google-deepmind/detcon),
 PaKA (arXiv 2509.05606), SimCLR, DINOv2 (Apache-2.0), DEIM schedulers.

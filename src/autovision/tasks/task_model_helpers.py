@@ -262,6 +262,20 @@ def load_task_model(
     if isinstance(init_args.get("model_name"), str):
         init_args["model_name"] = _migrate_family_key(init_args["model_name"])
     model = model_class(**init_args)
+    normalize_args = checkpoint.get("normalize_args")
+    if normalize_args:
+        # The exported checkpoint records the training-time mean/std; the
+        # constructor only installs ImageNet defaults. Restoring them is
+        # required for the exported model to reproduce training predictions
+        # (and the ONNX sidecar's normalize contract).
+        from autovision.augment.transform_args import NormalizeArgs
+
+        try:
+            model.normalize = NormalizeArgs.from_dict(normalize_args)
+        except (KeyError, TypeError, ValueError) as error:
+            raise CheckpointError(
+                f"Exported model '{path}' has invalid normalize_args: {error}"
+            ) from error
     state_dict = checkpoint["train_model"]
     if hasattr(model, "load_train_state_dict"):
         model.load_train_state_dict(state_dict)
