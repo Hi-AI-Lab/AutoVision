@@ -32,9 +32,32 @@ autovision.train_object_detection(
 ```
 
 ConvNeXt 四档均需 `dec_layers=6` + `decoder_hidden_dim=256`，
-`user_held_model_args` 已包含。`dinov3-vitt16` / `dinov3-vitt16plus` /
-`dinov3-vits16` 含 `backbone.sta.*`：DEIMv2 派生 spatial prior 已删除，加载器
-会抛出 `UserHeldAssetError`，需重新训练/导出 no-STA 检查点后才能使用。
+`user_held_model_args` 已包含。
+
+### STA-era ViT 资产（仅审计，不可加载）
+
+| 资产 | 状态 |
+|---|---|
+| `dinov3-vitt16` | 含 `backbone.sta.*`；拒绝加载 |
+| `dinov3-vitt16plus` | 含 `backbone.sta.*`；拒绝加载 |
+| `dinov3-vits16` | 含 `backbone.sta.*`；拒绝加载 |
+
+DEIMv2 派生的 spatial prior 已删除，no-STA ViT adapter 无法忠实复现这些检查点。
+名称解析入口（`user_held_model_args`、`resolve_user_held_asset`、
+`resolve_avwarm_start_source`、`resolve_detector_checkpoint`）会在**读取/哈希
+容器之前**拒绝；直接传入 STA-era `.pt` 时，
+`load_baseline_coco_checkpoint` / `load_warm_start_into_network` 会先读取容器
+识别 `backbone.sta.*` 键，再在构建/迁移模型之前拒绝。错误消息会列出 4 个可加载
+的 ConvNeXt 替代项。
+
+- 可加载资产：`USER_HELD_LOADABLE_ASSETS`（4 个 ConvNeXt）。
+- 仅审计资产：`USER_HELD_UNSUPPORTED_ASSETS`（3 个 ViT）；`USER_HELD_ASSETS`
+  仍保留全部 7 个身份记录。
+- 审计工具需要读取元数据时使用
+  `resolve_user_held_asset(name, allow_unsupported=True)`；
+  `verify_user_held_asset(USER_HELD_ASSETS[name])` 仍可离线核验 sha256，但
+  **核验通过不代表可加载**。
+- 迁移：重新训练/导出 no-STA 检查点，或改用 ConvNeXt 资产。
 
 ## 加载路线 B：AVWarmStart v1
 
@@ -57,5 +80,7 @@ autovision.train_object_detection(
 
 ## 离线核验
 
-`verify_user_held_asset` 只对文件做 sha256 核验，不加载模型；资产名或内容不符即
-抛错。加载 model 键与构建覆盖的对应关系见[模型库](model_zoo.md)。
+`verify_user_held_asset(asset)` 只对文件做 sha256 核验，不加载模型；传入的资产
+对象必须来自注册表（`USER_HELD_ASSETS[name]`，或 `allow_unsupported=True` 的
+解析结果），内容不符即抛错。加载 model 键与构建覆盖的对应关系见
+[模型库](model_zoo.md)。

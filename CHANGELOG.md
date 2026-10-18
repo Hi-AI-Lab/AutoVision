@@ -196,6 +196,11 @@
   sdist 的 GTR / MSDA CUDA-C++ 源清单，以及 tag 触发的 trusted-publishing
   CI job。`super-gradients` 与 `export` / `transformers` / `rfdetr` / `video`
   的 extras 互斥已显式声明。
+- **STA-era 用户自持资产**：`resolve_user_held_asset` 默认在 sha256 校验前
+  拒绝 3 个含 `backbone.sta.*` 的 ViT 资产；新增
+  `USER_HELD_LOADABLE_ASSETS` / `USER_HELD_UNSUPPORTED_ASSETS` 区分可加载与
+  仅审计记录，错误消息列出 4 个可加载 ConvNeXt 替代项。审计场景需显式传
+  `allow_unsupported=True`；`verify_user_held_asset` 仍可离线核验 identity。
 
 ### 修复
 

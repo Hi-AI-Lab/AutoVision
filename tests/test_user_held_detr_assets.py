@@ -18,7 +18,9 @@ import torch
 
 from autovision.registry.user_held_assets import (
     USER_HELD_ASSETS,
+    USER_HELD_LOADABLE_ASSETS,
     USER_HELD_ROOT,
+    USER_HELD_UNSUPPORTED_ASSETS,
     UserHeldAssetError,
     resolve_avwarm_start_source,
     resolve_user_held_asset,
@@ -50,6 +52,9 @@ def _is_sha256(value: str) -> bool:
 class TestRegistryShape:
     def test_seven_assets_with_pinned_identity(self):
         assert sorted(USER_HELD_ASSETS) == sorted(_VIT_NAMES + _CONVNEXT_NAMES)
+        assert sorted(USER_HELD_LOADABLE_ASSETS) == sorted(_CONVNEXT_NAMES)
+        assert sorted(USER_HELD_UNSUPPORTED_ASSETS) == sorted(_VIT_NAMES)
+        assert not set(USER_HELD_LOADABLE_ASSETS) & set(USER_HELD_UNSUPPORTED_ASSETS)
         for name, asset in USER_HELD_ASSETS.items():
             assert asset.name == name
             assert asset.model_name.startswith("detr/")
@@ -122,6 +127,8 @@ class TestStaRemovalGuards:
 
         for name in _VIT_NAMES:
             with pytest.raises(UserHeldAssetError, match="spatial prior"):
+                resolve_user_held_asset(name)
+            with pytest.raises(UserHeldAssetError, match="spatial prior"):
                 user_held_model_args(name)
             with pytest.raises(UserHeldAssetError, match="spatial prior"):
                 resolve_avwarm_start_source(name)
@@ -132,6 +139,51 @@ class TestStaRemovalGuards:
         for name in _CONVNEXT_NAMES:
             assert user_held_model_args(name)["detector_checkpoint"] == name
             assert USER_HELD_ASSETS[name].requires_removed_sta is False
+            assert USER_HELD_ASSETS[name].unsupported_reason is None
+
+    def test_resolve_rejects_sta_before_verification(self, monkeypatch):
+        """Fail-fast: no 40 MB–920 MB hash runs for an unsupported asset."""
+        import autovision.registry.user_held_assets as held
+
+        calls: list[object] = []
+        monkeypatch.setattr(
+            held,
+            "verify_user_held_asset",
+            lambda *args, **kwargs: calls.append((args, kwargs)),
+        )
+        for name in _VIT_NAMES:
+            with pytest.raises(UserHeldAssetError, match="spatial prior"):
+                resolve_user_held_asset(name, verify=True)
+        assert calls == []
+
+    def test_allow_unsupported_is_audit_only(self):
+        for name in _VIT_NAMES:
+            asset = resolve_user_held_asset(name, allow_unsupported=True)
+            assert asset.name == name
+            assert asset.unsupported_reason is not None
+
+    def test_unsupported_reason_names_convnext_alternatives(self):
+        for name in _VIT_NAMES:
+            reason = USER_HELD_ASSETS[name].unsupported_reason
+            assert reason is not None
+            assert "backbone.sta.*" in reason
+            assert "spatial prior" in reason
+            for alternative in _CONVNEXT_NAMES:
+                assert alternative in reason
+
+    def test_detector_checkpoint_unknown_error_separates_unsupported(self):
+        from autovision.registry.downloadable import DownloadableModelError
+        from autovision.tasks.detection.detr.coco_checkpoint import (
+            resolve_detector_checkpoint,
+        )
+
+        with pytest.raises(DownloadableModelError) as excinfo:
+            resolve_detector_checkpoint("dinov3-nope")
+        message = str(excinfo.value)
+        assert "loadable names" in message
+        assert "registered but unsupported" in message
+        for name in _CONVNEXT_NAMES + _VIT_NAMES:
+            assert name in message
 
     def test_baseline_loader_rejects_sta_tensors(self, tmp_path):
         from autovision.tasks.detection.detr.coco_checkpoint import (
@@ -150,6 +202,25 @@ class TestStaRemovalGuards:
             path,
         )
         # Fails before touching the target model, with the licensing reason.
+        with pytest.raises(ValueError, match="spatial prior"):
+            load_baseline_coco_checkpoint(object(), path)
+
+    def test_baseline_loader_sta_guard_precedes_partition(self, tmp_path):
+        from autovision.tasks.detection.detr.coco_checkpoint import (
+            load_baseline_coco_checkpoint,
+        )
+
+        path = tmp_path / "sta_only.pt"
+        torch.save(
+            {
+                "train_model": {
+                    "ema_model.model.backbone.sta.stem.0.weight": torch.zeros(1),
+                }
+            },
+            path,
+        )
+        # A partition-first implementation would report "no recognizable
+        # raw-backbone keys"; the licensing error must win.
         with pytest.raises(ValueError, match="spatial prior"):
             load_baseline_coco_checkpoint(object(), path)
 
@@ -211,7 +282,8 @@ class TestStoreConsistency:
     @_store_present
     def test_vitt16_weights_sha256_spot_check(self):
         verify_user_held_asset(
-            resolve_user_held_asset("dinov3-vitt16"), files=("weights.pt",)
+            resolve_user_held_asset("dinov3-vitt16", allow_unsupported=True),
+            files=("weights.pt",),
         )
 
     @_store_present

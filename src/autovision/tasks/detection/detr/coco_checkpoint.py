@@ -82,7 +82,9 @@ from autovision.registry.downloadable import (
 )
 from autovision.registry.user_held_assets import (
     USER_HELD_ASSETS,
+    USER_HELD_LOADABLE_ASSETS,
     USER_HELD_ROOT,
+    USER_HELD_UNSUPPORTED_ASSETS,
     verify_user_held_asset,
 )
 
@@ -413,22 +415,26 @@ def load_baseline_coco_checkpoint(
             payload["model_class_path"]
         )
     state = _strip_ema(payload)
-    backbone_sd, extras_sd, encoder_sd, decoder_sd, family = (
-        _partition_baseline_state(state)
-    )
 
     # STA-era ViT checkpoints are refused before any model access: the
     # DEIMv2-derived spatial prior was removed for licensing, and the
-    # no-STA adapter cannot reproduce its features.
-    sta_keys = sorted(k for k in extras_sd if k.startswith("sta."))
+    # no-STA adapter cannot reproduce its features. Scan the raw state before
+    # partitioning so the guard does not depend on how the removed tensors
+    # would have been routed.
+    sta_keys = sorted(k for k in state if k.startswith("backbone.sta."))
     if sta_keys:
         raise ValueError(
             f"baseline checkpoint carries {len(sta_keys)} backbone.sta.* "
             "tensor(s) from the DEIMv2-derived spatial prior, which was "
             "removed for licensing. The no-STA ViT adapter cannot load "
             "this checkpoint faithfully; retrain/export a no-STA checkpoint "
-            "or use a ConvNeXt checkpoint."
+            "or use a loadable ConvNeXt asset "
+            f"({', '.join(sorted(USER_HELD_LOADABLE_ASSETS))})."
         )
+
+    backbone_sd, extras_sd, encoder_sd, decoder_sd, family = (
+        _partition_baseline_state(state)
+    )
 
     summary: dict[str, int] = {}
 
@@ -557,14 +563,9 @@ def resolve_detector_checkpoint(source: str | Path) -> Path:
         return resolve_downloadable(name)
     user_held = USER_HELD_ASSETS.get(name)
     if user_held is not None:
-        if user_held.requires_removed_sta:
-            raise DownloadableModelError(
-                f"user-held detector checkpoint '{name}' contains "
-                "backbone.sta.* weights; the DEIMv2-derived spatial prior "
-                "was removed for licensing and the no-STA ViT adapter cannot "
-                "load it faithfully. Use a ConvNeXt asset or retrain/export "
-                "a no-STA checkpoint."
-            )
+        reason = user_held.unsupported_reason
+        if reason is not None:
+            raise DownloadableModelError(reason)
         weights = user_held.weights_path
         if not weights.is_file():
             raise DownloadableModelError(
@@ -578,6 +579,8 @@ def resolve_detector_checkpoint(source: str | Path) -> Path:
         return weights
     raise DownloadableModelError(
         f"detector_checkpoint '{source}' is neither an existing file nor a "
-        f"published checkpoint name; registered names: "
-        f"{sorted(ASSET_MANIFEST) + sorted(USER_HELD_ASSETS)}"
+        f"loadable checkpoint name; loadable names: "
+        f"{sorted(ASSET_MANIFEST) + sorted(USER_HELD_LOADABLE_ASSETS)}; "
+        f"registered but unsupported: "
+        f"{sorted(USER_HELD_UNSUPPORTED_ASSETS)}"
     )

@@ -500,7 +500,7 @@ def _render() -> str:
     add("|---|---|---|---|")
     for name in USER_HELD_ASSETS:
         asset = USER_HELD_ASSETS[name]
-        if asset.requires_removed_sta:
+        if asset.unsupported_reason is not None:
             override = "不可用（STA 已删除；需重训 no-STA 检查点）"
         elif asset.dec_layers is not None:
             override = f"`dec_layers={asset.dec_layers}` + `decoder_hidden_dim={asset.decoder_hidden_dim}`"

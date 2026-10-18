@@ -11,7 +11,9 @@ pins IDENTITY (sha256 of both containers, mirroring
 :mod:`autovision.registry.gtr_assets`), never distribution: the entries are
 deliberately absent from ``ASSET_MANIFEST``, carry
 ``redistributable=False``, and must never ship with the repository or
-exported products.
+exported products. Four ConvNeXt entries are loadable; the three STA-era ViT
+entries are audit-only and are rejected by every load path (the DEIMv2-derived
+spatial prior was removed for licensing).
 
 Both loading routes are resolvable by registered NAME from the training
 arguments:
@@ -42,7 +44,9 @@ from autovision.errors import AutoVisionError
 
 __all__ = [
     "USER_HELD_ASSETS",
+    "USER_HELD_LOADABLE_ASSETS",
     "USER_HELD_ROOT",
+    "USER_HELD_UNSUPPORTED_ASSETS",
     "UserHeldAsset",
     "UserHeldAssetError",
     "resolve_avwarm_start_source",
@@ -121,6 +125,32 @@ class UserHeldAsset:
     def warm_start_path(self) -> Path:
         return self.directory / "warm_start.pt"
 
+    @property
+    def unsupported_reason(self) -> str | None:
+        """Why this asset cannot be loaded, or ``None`` when loadable.
+
+        Every load path (registry args, ``detector_checkpoint``,
+        ``warm_start``) raises this message instead of silently dropping the
+        removed spatial-prior tensors. The message names the four ConvNeXt
+        alternatives so callers have an actionable fallback.
+        """
+        if not self.requires_removed_sta:
+            return None
+        alternatives = ", ".join(sorted(USER_HELD_LOADABLE_ASSETS))
+        return (
+            f"User-held asset '{self.name}' contains backbone.sta.* weights "
+            "from the DEIMv2-derived spatial prior, which was removed for "
+            "licensing. The no-STA ViT adapter cannot load it faithfully; "
+            "retrain/export a no-STA checkpoint, or use a loadable ConvNeXt "
+            f"asset ({alternatives})."
+        )
+
+    def require_loadable(self) -> None:
+        """Raise :class:`UserHeldAssetError` when this entry is audit-only."""
+        reason = self.unsupported_reason
+        if reason is not None:
+            raise UserHeldAssetError(reason)
+
     def required_model_args(self) -> dict[str, Any]:
         """The ``model_args`` the detector-checkpoint load contract needs.
 
@@ -132,14 +162,7 @@ class UserHeldAsset:
         ``decoder_hidden_dim`` for ConvNeXt). STA-era ViT checkpoints are
         rejected because the spatial prior was removed for licensing.
         """
-        if self.requires_removed_sta:
-            raise UserHeldAssetError(
-                f"User-held asset '{self.name}' contains backbone.sta.* "
-                "weights. The DEIMv2-derived spatial prior was removed for "
-                "licensing and the no-STA ViT adapter cannot load this "
-                "checkpoint faithfully. Retrain/export a no-STA checkpoint, "
-                "or use a ConvNeXt asset."
-            )
+        self.require_loadable()
         args: dict[str, Any] = {
             "detector_checkpoint": self.name,
             "backbone_pretrained": False,
@@ -153,8 +176,8 @@ class UserHeldAsset:
 
 
 # ConvNeXt entries: encoder 384 + FIXED decoder 256 at 6 layers (the
-# published checkpoints' shape; see coco_checkpoint's width contract).
-_CONVNEXT_BUILD = {"dec_layers": 6, "decoder_hidden_dim": 256}
+# published checkpoints' shape; see coco_checkpoint's width contract). The
+# overrides are repeated per entry so the dataclass constructor stays typed.
 
 USER_HELD_ASSETS: dict[str, UserHeldAsset] = {
     "dinov3-vitt16": UserHeldAsset(
@@ -191,7 +214,8 @@ USER_HELD_ASSETS: dict[str, UserHeldAsset] = {
         source_sha256="35bbc4fbec3bb9fa113a33f1013abaab1952edf3335f98624b5914812d63d26c",
         weights_sha256="2925ef6afacf2008098893bded94c0a6dd1db33757d03c182d9dc7f13e4f3e48",
         warm_start_sha256="7ab8e536eda01fe709d594dac5757254f902c2bc85bf9bc4f78baa068640aba8",
-        **_CONVNEXT_BUILD,
+        dec_layers=6,
+        decoder_hidden_dim=256,
     ),
     "dinov3-convnext-small": UserHeldAsset(
         name="dinov3-convnext-small",
@@ -200,7 +224,8 @@ USER_HELD_ASSETS: dict[str, UserHeldAsset] = {
         source_sha256="8f7109ab406aa92791e4e4ca6249ab9a863734795676c81b91dbd4cc4b1ef387",
         weights_sha256="72e37da6bdfd1b0c65c9d803fe7dfdd2a5624d897c75c8e0fbd406d3f87c1710",
         warm_start_sha256="d122d32f8496cc832665f7b7ab84e396d27b0b1b03c1daa3afb89f8cf3c30691",
-        **_CONVNEXT_BUILD,
+        dec_layers=6,
+        decoder_hidden_dim=256,
     ),
     "dinov3-convnext-base": UserHeldAsset(
         name="dinov3-convnext-base",
@@ -209,7 +234,8 @@ USER_HELD_ASSETS: dict[str, UserHeldAsset] = {
         source_sha256="836adb6b5122665a24b6da3ee1720b9f3d0fc3c30cee44cfbd98dcb79fe0809a",
         weights_sha256="503eaea85c855b508b187f2a0f24f4f3098d6745b682e340fa8342410b856053",
         warm_start_sha256="303aba38979c813ffe54d43bb742fb58b1a35ab6b6368e678396758be30ea570",
-        **_CONVNEXT_BUILD,
+        dec_layers=6,
+        decoder_hidden_dim=256,
     ),
     "dinov3-convnext-large": UserHeldAsset(
         name="dinov3-convnext-large",
@@ -218,8 +244,24 @@ USER_HELD_ASSETS: dict[str, UserHeldAsset] = {
         source_sha256="03fe6750392daf3ecd32bbab3f144bd5c4d6cdc8bd75635f9e1c5e296e7dd8b0",
         weights_sha256="7e617f3fbf691a3c80c80238ae807c941491c23acb5b59337c5b3b8804c71382",
         warm_start_sha256="dc5c58a72409f5d24fac95dfbba078392e43b38f6a8b34c2d042598efd940baa",
-        **_CONVNEXT_BUILD,
+        dec_layers=6,
+        decoder_hidden_dim=256,
     ),
+}
+
+#: Entries that can be built/loaded today.
+USER_HELD_LOADABLE_ASSETS: dict[str, UserHeldAsset] = {
+    name: asset
+    for name, asset in USER_HELD_ASSETS.items()
+    if not asset.requires_removed_sta
+}
+
+#: Audit-only entries retained for identity/provenance; every load path
+#: rejects them because their spatial-prior tensors were removed.
+USER_HELD_UNSUPPORTED_ASSETS: dict[str, UserHeldAsset] = {
+    name: asset
+    for name, asset in USER_HELD_ASSETS.items()
+    if asset.requires_removed_sta
 }
 
 
@@ -236,6 +278,10 @@ def verify_user_held_asset(
     Results are cached per (path, size, mtime, expected digest), so repeated
     resolves in one process do not re-hash a 40 MB–920 MB container; any file
     change invalidates the cache entry.
+
+    This is an identity check only. Audit-only assets may be verified, but
+    that does not make them loadable; use :func:`resolve_user_held_asset`
+    with ``allow_unsupported=True`` to reach their metadata.
     """
     pinned = {
         "weights.pt": asset.weights_sha256,
@@ -273,27 +319,38 @@ def verify_user_held_asset(
         _VERIFIED_FILES[cache_key] = True
 
 
-def resolve_user_held_asset(name: str, *, verify: bool = False) -> UserHeldAsset:
+def resolve_user_held_asset(
+    name: str, *, verify: bool = False, allow_unsupported: bool = False
+) -> UserHeldAsset:
     """Return the registered asset by name, optionally verifying sha256.
 
-    ``verify=False`` by default (see :func:`verify_user_held_asset`); the
-    entries pin identity for audit and test use.
+    Loadable entries are returned normally. Audit-only entries raise before
+    ``verify`` runs, so a 40 MB–920 MB container is never hashed just to reach
+    a licensing error; pass ``allow_unsupported=True`` for metadata/audit
+    tooling that only needs the pinned identity.
     """
     asset = USER_HELD_ASSETS.get(str(name))
     if asset is None:
-        supported = ", ".join(sorted(USER_HELD_ASSETS))
+        loadable = ", ".join(sorted(USER_HELD_LOADABLE_ASSETS))
+        unsupported = ", ".join(sorted(USER_HELD_UNSUPPORTED_ASSETS))
         raise UserHeldAssetError(
-            f"Unknown user-held asset '{name}'. Registered: {supported} "
+            f"Unknown user-held asset '{name}'. Loadable: {loadable}. "
+            f"Registered but unsupported (STA removed): {unsupported}. "
             f"(store root: {USER_HELD_ROOT}; policy D1-a: user-held, "
             f"not redistributable)."
         )
+    if not allow_unsupported:
+        asset.require_loadable()
     if verify:
         verify_user_held_asset(asset)
     return asset
 
 
 def user_held_model_args(name: str, *, verify: bool = False) -> dict[str, Any]:
-    """``model_args`` that build and load the named asset (see the class)."""
+    """``model_args`` that build and load the named asset (see the class).
+
+    Audit-only STA-era assets raise before ``verify`` hashes their container.
+    """
     return resolve_user_held_asset(name, verify=verify).required_model_args()
 
 
@@ -311,12 +368,7 @@ def resolve_avwarm_start_source(source: str | Path) -> Path:
     asset = USER_HELD_ASSETS.get(str(source))
     if asset is None:
         return path
-    if asset.requires_removed_sta:
-        raise UserHeldAssetError(
-            f"User-held asset '{asset.name}' contains backbone.sta.* weights; "
-            "the DEIMv2-derived spatial prior was removed for licensing. "
-            "Use a ConvNeXt asset or a retrained no-STA checkpoint."
-        )
+    asset.require_loadable()
     if not asset.warm_start_path.is_file():
         raise UserHeldAssetError(
             f"User-held asset '{asset.name}' is registered but its "

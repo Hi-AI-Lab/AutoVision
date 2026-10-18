@@ -76,8 +76,11 @@ A/B 统计显著性与金丝雀自动回滚仍属生产网关职责。
   可按 Apache-2.0 发布。处置记录见[溯源台账](provenance/LEDGER.md)。
 - **旧 STA-era ViT 检查点不受支持**：任何含 `backbone.sta.*` 的基线 `.pt`
   或用户自持 ViT 资产（`dinov3-vitt16` / `dinov3-vitt16plus` /
-  `dinov3-vits16`）会被加载器明确拒绝，需重新训练/导出 no-STA 检查点。
-  DINOv3 ConvNeXt 及用户自持的 4 个 ConvNeXt 资产不受影响。
+  `dinov3-vits16`）会被加载器明确拒绝，解析入口在读取/哈希容器前即失败，
+  需重新训练/导出 no-STA 检查点。DINOv3 ConvNeXt 及用户自持的 4 个
+  ConvNeXt 资产不受影响；`USER_HELD_LOADABLE_ASSETS` 只含这 4 个，
+  3 个 ViT 留在 `USER_HELD_UNSUPPORTED_ASSETS` 仅供审计
+  （`allow_unsupported=True`）。
 - **受限权重仍然存在**：DINOv2 权重 CC-BY-NC 4.0、DINOv3 权重 DINOv3
   License、用户自持检测器禁再分发/商用；这些是权重条款，与已删除的 STA
   代码无关。DEIMv2 外部权重仍为非商用。
