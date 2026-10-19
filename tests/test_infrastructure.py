@@ -178,6 +178,20 @@ class TestDocs:
             "strategy/" in target for target in _nav_paths(config["nav"])
         )
 
+    def test_license_references_avoid_blocked_extensionless_links(self):
+        """Renderers such as PyPI block ``[LICENSE](LICENSE)`` targets.
+
+        Use a code-path reference for the shipped files and a canonical
+        Apache-2.0 URL for the license text.
+        """
+        readme = (ROOT / "README.md").read_text()
+        assert "](LICENSE)" not in readme
+        assert "](NOTICE)" not in readme
+        assert "https://www.apache.org/licenses/LICENSE-2.0" in readme
+        pypi_readme = (ROOT / "README_PYPI.md").read_text()
+        assert "](LICENSE)" not in pypi_readme
+        assert "https://www.apache.org/licenses/LICENSE-2.0" in pypi_readme
+
     def test_site_builds_strictly(self, tmp_path):
         pytest.importorskip("mkdocs")
         result = subprocess.run(

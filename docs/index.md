@@ -110,7 +110,8 @@ CC-BY-NC 4.0 / DINOv3 License 需显式自证接受条款），许可边界见�
 
 ## 许可
 
-Apache-2.0。第三方组件与权重溯源见仓库根 `NOTICE`；交互式命令全表：
+Apache-2.0（全文：<https://www.apache.org/licenses/LICENSE-2.0>；仓库根
+`LICENSE`）。第三方组件与权重溯源见仓库根 `NOTICE`；交互式命令全表：
 
 ```bash
 autovision-cli --help

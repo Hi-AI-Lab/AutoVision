@@ -88,7 +88,7 @@ CUDA / Triton（GTR 前向）、TensorRT（TensorRT 引擎导出）。
 变体离线本地构建。**权重许可**：DINOv2 权重 CC-BY-NC 4.0、DINOv3 权重 DINOv3
 License，默认均不下载——需分别设 `AUTOVISION_DINOV2_WEIGHTS=1` /
 `AUTOVISION_DINOV3_WEIGHTS=1` 自证已接受对应条款；不受限的干净路径是
-`-notpretrained` + 本框架自监督预训练（政策见 [NOTICE](NOTICE)）。完整下载命令、
+`-notpretrained` + 本框架自监督预训练（政策见 `NOTICE`）。完整下载命令、
 缓存位置与镜像配置见[权重下载](docs/download_weights.md)。
 
 ## 快速开始
@@ -783,8 +783,9 @@ python scripts/check_docs_links.py && mkdocs build --strict              # 文�
 
 ## 许可与溯源
 
-核心代码 Apache-2.0，见 [LICENSE](LICENSE)；第三方组件与权重溯源见 [NOTICE](NOTICE)、
-[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) 与
+核心代码 Apache-2.0；许可证全文见仓库根目录 `LICENSE`
+（也可查阅 <https://www.apache.org/licenses/LICENSE-2.0>）。第三方组件与权重
+溯源见仓库根 `NOTICE`、[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) 与
 [溯源台账](docs/provenance/LEDGER.md)。
 
 > **0.3.0 许可状态（2026-10-17）**：DEIMv2 派生的 `SpatialPriorModule`

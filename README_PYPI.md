@@ -75,8 +75,9 @@ autovision-cli predict model=runs/det1/exported_models/exported_best.pt images=d
 
 ## 许可
 
-Apache-2.0（AutoVision 自有代码）。第三方组件与权重溯源见发行包内的 `NOTICE`
-与 `THIRD_PARTY_LICENSES.md`。受限许可权重（DINOv2 CC-BY-NC 4.0 / DINOv3
+Apache-2.0（AutoVision 自有代码；全文：
+<https://www.apache.org/licenses/LICENSE-2.0>）。第三方组件与权重溯源见发行包内的
+`NOTICE` 与 `THIRD_PARTY_LICENSES.md`。受限许可权重（DINOv2 CC-BY-NC 4.0 / DINOv3
 License）默认不下载；用户自持权重不可再分发。
 
 > **0.3.0 许可状态**：DEIMv2 派生的 `SpatialPriorModule` 已删除；DINOv3
