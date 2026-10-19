@@ -7,6 +7,7 @@ match the per-image loops within fp32 tolerance (bitwise on small inputs),
 and both flags must be off by default.
 """
 
+import importlib.util
 import logging
 
 import pytest
@@ -362,6 +363,10 @@ class TestFlatBoxAndVFLLosses:
         )
         torch.testing.assert_close(vfl_flat, vfl, rtol=1e-6, atol=1e-7)
 
+    @pytest.mark.skipif(
+        importlib.util.find_spec("timm") is None,
+        reason="detr/n+s backbone needs the timm extra (pip install -e '.[timm]')",
+    )
     def test_criterion_flat_flag_end_to_end(self, tmp_path):
         """The flag threads through the full criterion and training loop."""
         from autovision import train_object_detection

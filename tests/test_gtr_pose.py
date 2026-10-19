@@ -33,6 +33,11 @@ requires_gla = pytest.mark.skipif(
     reason="GTR GLA forward needs flash-linear-attention + CUDA",
 )
 
+requires_fla = pytest.mark.skipif(
+    not _fla,
+    reason="GTR load tests need flash-linear-attention (pip install -e '.[gtr]')",
+)
+
 
 def _pose_checkpoint() -> Path:
     try:
@@ -68,6 +73,7 @@ class TestGtrPoseLoad:
             ("x", 277, 4, 2048, 256),
         ],
     )
+    @requires_fla
     def test_every_variant_loads_cleanly(
         self, variant, transferred, layers, ffn, hidden
     ):
@@ -93,6 +99,7 @@ class TestGtrPoseLoad:
         assert net.decoder.decoder.layers[0].linear1.weight.shape == (ffn, hidden)
         assert net.encoder.stages[0][0].cv1.conv.weight.shape[0] == hidden
 
+    @requires_fla
     def test_decoder_depth_mismatch_refused(self):
         """A network shallower than the checkpoint (extra layers on the
         checkpoint side) must be refused — coverage counting alone is blind
@@ -112,6 +119,7 @@ class TestGtrPoseLoad:
                 checkpoint="gtrpose_s_coco",
             )
 
+    @requires_fla
     def test_official_checkpoint_loads_completely(self, pose_checkpoint):
         from autovision.tasks.pose_estimation.gtr import GTRPoseEstimation
 

@@ -9,6 +9,7 @@ is absent (fresh checkouts without the weight cache stay green).
 
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 
 import pytest
@@ -42,6 +43,14 @@ TINY_TRANSFORM_ARGS = {
     "random_zoom_out_prob": None,
     "random_iou_crop_prob": None,
 }
+
+#: timm is an optional extra; CI installs a lean extras set, so the timm
+#: backbone variants and the assembly paths that transitively build one
+#: must skip rather than fail (same convention as requires_gla).
+requires_timm = pytest.mark.skipif(
+    importlib.util.find_spec("timm") is None,
+    reason="timm backbone variants need the timm extra (pip install -e '.[timm]')",
+)
 
 
 @pytest.fixture(scope="module")
@@ -120,6 +129,7 @@ class TestSpectrumRegistry:
         assert "dfine_s" in SPECTRUM["s"].note
 
 
+@requires_timm
 class TestTimmCNNBackbone:
     def test_pyramid_shapes_offline(self):
         backbone = TimmCNNBackbone("hgnetv2_b0", pretrained=False)
@@ -137,6 +147,7 @@ class TestTimmCNNBackbone:
 
 
 class TestAssembly:
+    @requires_timm
     def test_real_dfine_s_assembly(self, warm_start_asset):
         from autovision.registry.warm_start import load_warm_start
 
@@ -159,6 +170,7 @@ class TestAssembly:
             )
 
 
+@requires_timm
 class TestWarmStartConsumption:
     def test_load_into_network(self, warm_start_asset):
         from autovision.tasks.detection.detr.task_model import (
@@ -282,6 +294,7 @@ class TestOfflineBridge:
 class TestSpectrumTrainClosure:
     """detr/{n,s} 加载闭环: tiny coco8 train -> artifacts (roadmap J1)."""
 
+    @requires_timm
     def test_train_detr_n(self, coco8, tmp_path):
         from autovision import train_object_detection
 
@@ -304,6 +317,7 @@ class TestSpectrumTrainClosure:
         assert result.steps_run == 3
         assert result.exported_model_path and result.exported_model_path.exists()
 
+    @requires_timm
     def test_train_detr_s_with_warm_start(
         self, coco8, warm_start_asset, tmp_path
     ):
