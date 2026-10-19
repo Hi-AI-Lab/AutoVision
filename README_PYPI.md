@@ -1,61 +1,66 @@
 # AutoVision
 
-企业级视觉模型训练框架：自监督预训练 / 蒸馏 → 微调 → 评测 → 导出一条链走完。
-覆盖检测、旋转框、实例 / 全景 / 语义分割、姿态、深度、分类；Python API 与
-`autovision-cli` 共享同一套 Pydantic 严格校验。
+Enterprise-grade visual model training framework: self-supervised pretrain /
+distill → finetune → evaluate → export in one chain. Covers detection, rotated
+boxes, instance / panoptic / semantic segmentation, pose, depth, and
+classification; the Python API and `autovision-cli` share the same strict
+Pydantic validation.
 
-> **发行名说明**：PyPI 包名是 `autovision-framework`，import 包名仍是
-> `autovision`，命令行仍是 `autovision-cli`。本项目与 PyPI 上无关的
-> `autovision` 0.0.1 包没有关系；请确认安装的是 `autovision-framework`。
+> **Distribution name**: the PyPI package is `autovision-framework`, while the
+> import package stays `autovision` and the CLI stays `autovision-cli`. This
+> project is unrelated to the unrelated `autovision` 0.0.1 package on PyPI;
+> make sure you install `autovision-framework`.
 
-**链接**：[源码仓库](https://github.com/hi-agi-lab/AutoVision) ·
-[文档站](https://hi-agi-lab.github.io/AutoVision/) ·
-[变更日志](https://github.com/hi-agi-lab/AutoVision/blob/main/CHANGELOG.md)
+**Links**: [Source repository](https://github.com/hi-agi-lab/AutoVision) ·
+[Documentation](https://hi-agi-lab.github.io/AutoVision/) ·
+[Changelog](https://github.com/hi-agi-lab/AutoVision/blob/main/CHANGELOG.md)
 
-## 安装
+## Installation
 
-Python ≥ 3.10：
+Python ≥ 3.10:
 
 ```bash
 pip install autovision-framework
 
-# 常用组合：HF 骨干 + timm + ONNX 导出
+# Common extras: HF backbones + timm + ONNX export
 pip install "autovision-framework[transformers,timm,export]"
 
-# 预训练 RF-DETR 直接推理
+# Pretrained RF-DETR direct inference
 pip install "autovision-framework[rfdetr,export]"
 ```
 
-模型包按 extras 惰性加载，缺失时对应清单为空而不是报错。完整 extras 表见
-[仓库 README](https://github.com/hi-agi-lab/AutoVision#安装)。
+Model packages load lazily per extra; a missing extra yields an empty registry
+listing instead of an error. See the
+[repository README](https://github.com/hi-agi-lab/AutoVision#installation)
+for the full extras table.
 
-## 快速开始
+## Quick start
 
-不训练，直接加载发布权重并预测：
+No training — load released weights and predict:
 
 ```python
 import autovision
 
 model = autovision.detection("rfdetr/rf-detr-small", pretrained=True)
 result = model.predict("image.jpg")   # {'bboxes': ..., 'scores': ..., 'labels': ...}
-model.export("model.onnx")            # parity 门禁 + postprocess 规格
+model.export("model.onnx")            # parity gate + postprocess spec
 ```
 
-目标检测，训练 → 验证 → 预测 → 导出：
+Object detection, train → validate → predict → export:
 
 ```python
 import autovision
 
-data = autovision.ensure_coco8()   # 合成冒烟数据集；可换 COCO/YOLO 配置
+data = autovision.ensure_coco8()   # synthetic smoke dataset; swap in COCO/YOLO configs
 model = autovision.detection("rtdetr/resnet18").train(
     out="runs/det1", data=data, steps=2000, batch_size="auto",
 )
 model.val(data=data)          # {'map': ..., 'map_50': ...}
 model.predict("image.jpg")    # {'bboxes': ..., 'scores': ..., 'labels': ...}
-model.export("model.onnx")    # 按 .onnx / .engine / .pt 后缀分发
+model.export("model.onnx")    # dispatches by .onnx / .engine / .pt suffix
 ```
 
-等价命令行（同一套 Pydantic 校验）：
+Equivalent CLI (same Pydantic validation):
 
 ```bash
 autovision-cli train-object-detection out=runs/det1 data=data.yaml steps=2000
@@ -63,31 +68,35 @@ autovision-cli val     model=runs/det1/exported_models/exported_best.pt data=coc
 autovision-cli predict model=runs/det1/exported_models/exported_best.pt images=dir/ out=preds/ threshold=0.5
 ```
 
-## 常用 extras
+## Common extras
 
-| extra | 能力 |
+| extra | capability |
 |---|---|
-| `transformers` | DINOv2 / DINOv3 骨干（HuggingFace 权重） |
-| `timm` | timm 全量骨干（任意输入通道数） |
-| `export` | ONNX 导出 + 数值对拍门禁 |
-| `openvino` | OpenVINO IR 导出与运行时 |
-| `video` | 视频 / RTSP 参考推理运行时 |
-| `serving` | FastAPI 参考 serving（`/predict`、`/metrics`） |
-| `gtr` | GTR GLA 骨干（Triton，需 CUDA） |
-| `download` | GTR 上游权重按需下载（huggingface_hub） |
-| `dev` | pytest / ruff（CI 同款） |
+| `transformers` | DINOv2 / DINOv3 backbones (HuggingFace weights) |
+| `timm` | full timm backbone zoo (arbitrary input channels) |
+| `export` | ONNX export + numerical parity gate |
+| `openvino` | OpenVINO IR export and runtime |
+| `video` | video / RTSP reference inference runtime |
+| `serving` | FastAPI reference serving (`/predict`, `/metrics`) |
+| `gtr` | GTR GLA backbone (Triton, CUDA required) |
+| `download` | on-demand GTR upstream weight download (huggingface_hub) |
+| `dev` | pytest / ruff (same as CI) |
 
-## 许可
+## License
 
-Apache-2.0（AutoVision 自有代码；全文：
-<https://www.apache.org/licenses/LICENSE-2.0>）。第三方组件与权重溯源见发行包内的
-`NOTICE` 与 `THIRD_PARTY_LICENSES.md`。受限许可权重（DINOv2 CC-BY-NC 4.0 / DINOv3
-License）默认不下载；用户自持权重不可再分发。
+Apache-2.0 (AutoVision original code; full text:
+<https://www.apache.org/licenses/LICENSE-2.0>). Third-party component and
+weight provenance ship in `NOTICE` and `THIRD_PARTY_LICENSES.md`.
+Restricted-license weights (DINOv2 CC-BY-NC 4.0 / DINOv3 License) are not
+downloaded by default; user-held weights may not be redistributed.
 
-> **0.3.0 许可状态**：DEIMv2 派生的 `SpatialPriorModule` 已删除；DINOv3
-> ViT 变体保留并使用 no-STA adapter，发行物不再包含 DEIMv2 代码。旧的
-> `backbone.sta.*` ViT 检查点不受支持，需重新训练/导出。详见
-> `docs/provenance/LEDGER.md`。
+> **0.3.0 licensing status**: the DEIMv2-derived `SpatialPriorModule` was
+> removed; DINOv3 ViT variants are kept with the no-STA adapter, and the
+> release no longer contains DEIMv2 code. Legacy `backbone.sta.*` ViT
+> checkpoints are unsupported and must be retrained/re-exported. See
+> `docs/provenance/LEDGER.md` for details.
 
-完整文档（模型库、基准、导出细节、已知限制）见
-[文档站](https://hi-agi-lab.github.io/AutoVision/) 与源码仓库的 `docs/` 目录。
+Full documentation (model zoo, benchmarks, export details, known limits) is
+available on the
+[documentation site](https://hi-agi-lab.github.io/AutoVision/) and in the
+`docs/` directory of the source repository.
