@@ -90,12 +90,6 @@ weight provenance ship in `NOTICE` and `THIRD_PARTY_LICENSES.md`.
 Restricted-license weights (DINOv2 CC-BY-NC 4.0 / DINOv3 License) are not
 downloaded by default; user-held weights may not be redistributed.
 
-> **0.3.0 licensing status**: the DEIMv2-derived `SpatialPriorModule` was
-> removed; DINOv3 ViT variants are kept with the no-STA adapter, and the
-> release no longer contains DEIMv2 code. Legacy `backbone.sta.*` ViT
-> checkpoints are unsupported and must be retrained/re-exported. See
-> `docs/provenance/LEDGER.md` for details.
-
 Full documentation (model zoo, benchmarks, export details, known limits) is
 available on the
 [documentation site](https://hi-agi-lab.github.io/AutoVision/) and in the
