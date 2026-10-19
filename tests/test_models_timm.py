@@ -54,7 +54,7 @@ class TestPackage:
         # Pretrained weights need an explicit opt-in; real downloads are
         # gated behind AUTOVISION_HF_TESTS=1 (see README) so restricted
         # networks don't hang the suite.
-        if not os.environ.get("AUTOVISION_HF_TESTS"):
+        if os.environ.get("AUTOVISION_HF_TESTS", "").strip().lower() not in {"1", "true", "yes", "on"}:
             pytest.skip("set AUTOVISION_HF_TESTS=1 to test real weight downloads")
         model = TIMM_SOURCE.build("resnet18", model_args={"pretrained": True})
         assert model.num_features > 0

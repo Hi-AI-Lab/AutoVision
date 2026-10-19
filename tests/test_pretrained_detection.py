@@ -160,7 +160,7 @@ def test_pretrained_handle_exports_openvino(monkeypatch, tmp_path):
 
 
 @pytest.mark.skipif(
-    not os.environ.get("AUTOVISION_HF_TESTS"),
+    os.environ.get("AUTOVISION_HF_TESTS", "").strip().lower() not in {"1", "true", "yes", "on"},
     reason="real RF-DETR download (set AUTOVISION_HF_TESTS=1)",
 )
 def test_real_rfdetr_nano_pretrained_smoke():

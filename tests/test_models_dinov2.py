@@ -18,7 +18,8 @@ transformers = pytest.importorskip(
 # Real from_pretrained tests download from the HF endpoint (set
 # HF_ENDPOINT=https://hf-mirror.com behind restricted networks) and are
 # gated so the default offline CI run skips them.
-_NETWORK_TESTS = bool(os.environ.get("AUTOVISION_HF_TESTS"))
+# Strict parse: "0"/"false" must disable, not enable (string truthiness bug).
+_NETWORK_TESTS = os.environ.get("AUTOVISION_HF_TESTS", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def make_wrapper(name: str = "vits14-notpretrained", **kwargs) -> TransformersDinov2Wrapper:
