@@ -55,6 +55,15 @@ class TestLineZone:
         counts = zone.update([_track(1, (5, 10, 10, 15))])
         assert counts.in_count == 0
 
+    def test_reappearance_at_max_age_keeps_side_history(self):
+        """A track absent for exactly max_age frames is still the same life."""
+        zone = LineZone((0, 10), (20, 10), max_age=3)
+        zone.update([_track(1, (5, 0, 10, 5))])  # frame 1: above
+        zone.update([])  # frame 2
+        zone.update([])  # frame 3
+        counts = zone.update([_track(1, (5, 10, 10, 15))])  # frame 4: below
+        assert counts.in_count == 1
+
     def test_reset_clears_counts(self):
         zone = LineZone((0, 10), (20, 10))
         zone.update([_track(1, (5, 0, 10, 5))])

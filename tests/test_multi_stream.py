@@ -60,6 +60,11 @@ class FakeEngine:
         ]
 
 
+class FailingEngine:
+    def run_batch(self, images, *, threshold=0.5):
+        raise RuntimeError("inference exploded")
+
+
 def test_two_sources_write_per_source_jsonl(tmp_path):
     readers = {
         "file1.mp4": FakeReader(_frames(4, 10)),
@@ -123,6 +128,43 @@ def test_live_source_reconnects(tmp_path):
     assert stats.reconnects == 1
     assert stats.frames_written == 3
     assert stats.errors
+
+
+def test_inference_failures_are_counted_per_frame(tmp_path):
+    runner = MultiStreamRunner(
+        [StreamSource("cam", "file.mp4", reconnect=False)],
+        tmp_path / "out",
+        engine=FailingEngine(),
+        batch_size=2,
+        render=False,
+        reader_factory=lambda url: FakeReader(_frames(3)),
+    )
+    result = runner.run()
+    stats = result.sources["cam"]
+    assert stats.frames_written == 0
+    assert stats.frames_failed == 3
+    assert stats.errors
+    assert result.to_dict()["sources"]["cam"]["frames_failed"] == 3
+    assert "failed=3" in result.summary()
+
+
+def test_stream_stats_redact_credentials(tmp_path):
+    runner = MultiStreamRunner(
+        [
+            StreamSource(
+                "cam", "rtsp://user:secret@cam.local:554/live", reconnect=False
+            )
+        ],
+        tmp_path / "out",
+        engine=FakeEngine(),
+        batch_size=1,
+        render=False,
+        reader_factory=lambda url: FakeReader(_frames(1)),
+    )
+    result = runner.run()
+    url = result.to_dict()["sources"]["cam"]["url"]
+    assert url == "rtsp://***@cam.local:554/live"
+    assert "secret" not in url
 
 
 def test_file_source_does_not_reconnect(tmp_path):

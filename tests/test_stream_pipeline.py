@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +13,7 @@ import torch
 
 from autovision.errors import AutoVisionError
 from autovision.inference import run_stream
+from autovision.inference.video import redact_source
 from autovision.tracking import LineZone, PolygonZone
 
 cv2 = pytest.importorskip("cv2", reason="opencv not installed")
@@ -24,7 +26,7 @@ def _clip(tmp_path, frames: int = 5) -> str:
     )
     assert writer.isOpened()
     for index in range(frames):
-        frame = np.full((24, 32, 3), index * 30, dtype=np.uint8)
+        frame = np.full((24, 32, 3), (index * 30) % 255, dtype=np.uint8)
         writer.write(frame)
     writer.release()
     return str(path)
@@ -152,10 +154,35 @@ class TestPipeline:
                 pass
 
         monkeypatch.setattr(stream_module, "AnnotatedVideoWriter", _BadWriter)
+        started = time.perf_counter()
         with pytest.raises(RuntimeError, match="encoder exploded"):
             run_stream(
-                _clip(tmp_path), tmp_path / "out", engine=_Engine(), render=True
+                _clip(tmp_path, frames=60),
+                tmp_path / "out",
+                engine=_Engine(),
+                batch_size=1,
+                render=True,
             )
+        # The producer must notice the writer failure instead of processing
+        # all 60 frames first.
+        assert time.perf_counter() - started < 3.0
+
+    def test_tracking_requires_a_detection_result(self, tmp_path):
+        with pytest.raises(AutoVisionError, match="requires a detection model"):
+            run_stream(
+                _clip(tmp_path),
+                tmp_path / "out",
+                engine=_ClassificationEngine(),
+                track=True,
+            )
+
+
+def test_redact_source_hides_url_credentials():
+    assert (
+        redact_source("rtsp://user:pass@cam.local:554/live")
+        == "rtsp://***@cam.local:554/live"
+    )
+    assert redact_source("/data/clip.mp4") == "/data/clip.mp4"
 
     def test_prefetch_and_writer_buffer_validation(self, tmp_path):
         with pytest.raises(AutoVisionError, match="prefetch"):

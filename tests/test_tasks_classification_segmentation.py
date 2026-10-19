@@ -25,6 +25,10 @@ from autovision.data.semantic_segmentation_dataset import (
 )
 from autovision.metrics.classification import ClassificationMetricCollector
 from autovision.metrics.segmentation import SegmentationMetricCollector
+from autovision.tasks.classification.config import ImageClassificationTrainArgs
+from autovision.tasks.semantic_segmentation.linear.config import (
+    LinearSemanticSegmentationTrainArgs,
+)
 
 pytestmark = pytest.mark.filterwarnings("ignore::UserWarning")
 
@@ -52,6 +56,25 @@ def _write_segmentation_tree(
         Image.fromarray(array).save(images / f"seg_{index}.jpg")
         mask = rng.integers(0, 3, size=(size, size), dtype=np.uint8)
         Image.fromarray(mask).save(masks / f"seg_{index}.png")
+
+
+class TestAutoDefaultResolution:
+    def test_classification_auto_defaults_use_task_config(self):
+        """``auto`` must read the task's declared class-level defaults."""
+        assert ImageClassificationTrainArgs.default_batch_size == 128
+        assert ImageClassificationTrainArgs.default_steps == 10_000
+        assert "default_batch_size" not in ImageClassificationTrainArgs.model_fields
+        assert "default_steps" not in ImageClassificationTrainArgs.model_fields
+
+    def test_linear_segmentation_auto_defaults_use_task_config(self):
+        """Linear segmentation overrides must not fall back to the base 16/10k."""
+        assert LinearSemanticSegmentationTrainArgs.default_batch_size == 32
+        assert LinearSemanticSegmentationTrainArgs.default_steps == 20_000
+        assert (
+            "default_batch_size"
+            not in LinearSemanticSegmentationTrainArgs.model_fields
+        )
+        assert "default_steps" not in LinearSemanticSegmentationTrainArgs.model_fields
 
 
 class TestClassificationData:

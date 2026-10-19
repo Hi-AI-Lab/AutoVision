@@ -62,6 +62,16 @@ class TestSnapshot:
         assert payload["deep"] is True
         assert len(payload["splits"]["train"]["content_digest"]) == 64
 
+    def test_partial_missing_split_fails_strictly(self, tmp_path):
+        root = tmp_path / "data"
+        spec = _tree(root)
+        spec["val"] = {"images": str(root / "missing_val")}
+        with pytest.raises(AutoVisionError, match="missing path"):
+            dataset_snapshot(spec, tmp_path / "snap.json")
+        payload = dataset_snapshot(spec, tmp_path / "snap.json", strict=False)
+        assert "val" not in payload["splits"]
+        assert "train" in payload["splits"]
+
 
 class TestVerify:
     def test_unchanged_tree_verifies_clean(self, tmp_path):

@@ -23,6 +23,7 @@ from autovision.data.yolo_object_detection_dataset import (
     YOLOObjectDetectionDataArgs,
     yolo_images_to_labels_path,
 )
+from autovision.errors import AutoVisionError
 
 
 def make_coco(tmp_path, num_images: int = 4, num_classes: int = 2):
@@ -94,6 +95,18 @@ class TestCOCOData:
         all_labels = [json.loads(row["class_labels"]) for row in rows]
         assert all(labels in ([0], []) for labels in all_labels)
         assert sum(len(labels) for labels in all_labels) == 2  # half ignored
+
+    def test_file_name_path_traversal_is_rejected(self, tmp_path):
+        train_json, val_json, images_dir, _ = make_coco(tmp_path)
+        payload = json.loads(train_json.read_text())
+        payload["images"][0]["file_name"] = "../escape.jpg"
+        train_json.write_text(json.dumps(payload))
+        args = COCOObjectDetectionDataArgs(
+            train={"annotations": train_json, "images": images_dir},
+            val={"annotations": val_json, "images": images_dir},
+        )
+        with pytest.raises(AutoVisionError, match="escapes"):
+            list(args.list_image_info("train"))
 
     def test_mmap_hash_changes_with_mtime(self, tmp_path):
         train_json, val_json, images_dir, _ = make_coco(tmp_path)

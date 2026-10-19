@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -46,11 +47,32 @@ def _model(tmp_path: Path, name: str = "model.pt", license_id: str = "Apache-2.0
         weights_sha256={path.name: _sha(path)},
     )
     card.save(path)
+    Path(str(path) + ".parity.json").write_text(json.dumps({"passed": True}))
     return path
 
 
 def _gates():
     return [Sha256Gate(), ModelCardGate(), LicenseGate(), BenchmarkGate(), ParityGate()]
+
+
+def test_parity_gate_requires_the_report_file(tmp_path):
+    plain = tmp_path / "plain.pt"
+    plain.write_bytes(b"plain-model")
+    registry = ModelRegistry(tmp_path / "registry")
+    entry = registry.register(plain, name="plain", version="1.0.0")
+    problems = ParityGate().check(entry)
+    assert problems and "no parity_report" in problems[0]
+
+
+def test_parity_gate_accepts_legacy_flag_only_when_explicitly_allowed(tmp_path):
+    plain = tmp_path / "plain.pt"
+    plain.write_bytes(b"plain-model")
+    registry = ModelRegistry(tmp_path / "registry")
+    entry = registry.register(
+        plain, name="plain", version="1.0.0", metadata={"parity_passed": True}
+    )
+    assert ParityGate(require_report=False).check(entry) == []
+    assert ParityGate().check(entry)
 
 
 def test_promotion_current_and_audit(tmp_path):

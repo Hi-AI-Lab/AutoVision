@@ -49,6 +49,21 @@ class TestRegister:
         with pytest.raises(RegistryError, match="immutable"):
             registry.register(model_file, name="detector", version="1.0.0")
 
+    def test_register_sweeps_stale_current_tmp(self, tmp_path, model_file):
+        """A crashed writer's current.json temp residue is swept on rewrite."""
+        import os
+
+        registry = ModelRegistry(tmp_path / "registry")
+        current_dir = tmp_path / "registry" / "dev" / "detector"
+        current_dir.mkdir(parents=True)
+        stale = current_dir / "current.tmp"
+        stale.write_text("{ broken")
+        stat = stale.stat()
+        os.utime(stale, (stat.st_atime - 7200, stat.st_mtime - 7200))
+        registry.register(model_file, name="detector", version="1.0.0")
+        assert not stale.exists()
+        assert (current_dir / "current.json").is_file()
+
     def test_missing_file_raises(self, tmp_path):
         registry = ModelRegistry(tmp_path / "registry")
         with pytest.raises(RegistryError, match="does not exist"):
@@ -143,6 +158,35 @@ class TestLookup:
         entry.path.unlink()
         with pytest.raises(RegistryError, match="missing"):
             registry.get(name="detector", stage="dev", version="1.0.0")
+
+    def test_get_verifies_artifact_sha(self, tmp_path, model_file):
+        registry = ModelRegistry(tmp_path / "registry")
+        entry = registry.register(model_file, name="detector", version="1.0.0")
+        entry.path.write_bytes(b"tampered")
+        with pytest.raises(RegistryError, match="sha256 mismatch"):
+            registry.get(name="detector", stage="dev", version="1.0.0")
+
+    def test_get_verifies_sidecar_sha(self, tmp_path, model_file):
+        source = tmp_path / "model.pt"
+        source.write_bytes(b"sidecar-model")
+        sidecar = source.with_name(source.name + ".parity.json")
+        sidecar.write_text('{"passed": true}')
+        registry = ModelRegistry(tmp_path / "registry")
+        entry = registry.register(source, name="detector", version="1.0.0")
+        assert entry.sidecars
+        entry.path.with_name(entry.path.name + ".parity.json").write_text(
+            '{"passed": false}'
+        )
+        with pytest.raises(RegistryError, match="sidecar sha256"):
+            registry.get(name="detector", stage="dev", version="1.0.0")
+
+    def test_audit_log_detects_tampering(self, tmp_path, model_file):
+        registry = ModelRegistry(tmp_path / "registry")
+        registry.register(model_file, name="detector", version="1.0.0")
+        audit = registry.root / "audit.jsonl"
+        audit.write_text(audit.read_text().replace('"register"', '"promote"'))
+        with pytest.raises(RegistryError, match="hash mismatch"):
+            registry.audit_log()
 
 
 # ── downloadable models ─────────────────────────────────────────────────

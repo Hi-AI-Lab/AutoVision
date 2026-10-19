@@ -368,6 +368,48 @@ class TestRelease:
         gitlab = (ROOT / ".gitlab-ci.yml").read_text()
         assert "$CI_COMMIT_TAG =~ /^v[0-9]+\\.[0-9]+\\.[0-9]+/" in gitlab
 
+    def test_release_urls_are_configured(self):
+        """The public repo/docs URLs must be set before a public snapshot."""
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "configure_release.py"), "--check"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_no_tracked_ignored_files(self):
+        """Generated cache artifacts must not ship in the public snapshot."""
+        if not (ROOT / ".git").exists():
+            pytest.skip("not a git checkout")
+        result = subprocess.run(
+            ["git", "ls-files", "-ci", "--exclude-standard"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            pytest.skip("git unavailable")
+        assert not result.stdout.strip(), (
+            "tracked files match .gitignore: " + result.stdout
+        )
+
+    def test_publish_snapshot_script_is_wired(self):
+        """The release snapshot must be buildable without pushing private history."""
+        script = ROOT / "scripts" / "publish_clean_cut.sh"
+        assert script.is_file()
+        assert script.stat().st_mode & 0o111
+        hook = (ROOT / "scripts" / "hooks" / "pre-push").read_text()
+        assert "publish_clean_cut.sh" in hook
+        result = subprocess.run(
+            ["bash", str(script), "--help"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "--push" in result.stdout
+
     def test_contributor_entry_points_exist(self):
         contributing = (ROOT / "CONTRIBUTING.md").read_text()
         for gate in (

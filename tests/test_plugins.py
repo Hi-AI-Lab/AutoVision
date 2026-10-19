@@ -63,6 +63,12 @@ def test_invalid_plugin_fields():
         register_plugin(_info(""))
 
 
+def test_mixed_plugin_iterable_is_rejected():
+    """A partially bad entry point must fail instead of silently dropping items."""
+    with pytest.raises(PluginError, match="mixed iterable"):
+        plugins._coerce([_info("mixed-metric"), "not-a-plugin"])
+
+
 def test_model_source_plugin_registers_with_encoder_catalog():
     source = SimpleNamespace(name="unit-source-a")
     register_plugin(

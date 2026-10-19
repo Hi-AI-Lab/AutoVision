@@ -4,6 +4,7 @@
 import asyncio
 import base64
 import io
+import threading
 import time
 
 import httpx
@@ -41,6 +42,20 @@ class TestServing:
         assert response.status_code == 200
         assert response.json()["backend"] == "torch"
         assert response.json()["status"] == "ok"
+
+    def test_probes_do_not_leak_artifact_paths(self):
+        class _PathEngine:
+            backend = "onnx"
+            artifact = "/srv/private/models/model.onnx"
+            network = None
+
+            def run_batch(self, images, *, threshold=0.5):
+                return []
+
+        client = TestClient(create_app(engine=_PathEngine(), threshold=0.0))
+        payload = client.get("/healthz").json()
+        assert payload["artifact"] == "model.onnx"
+        assert "/srv/private" not in str(payload)
 
     def test_predict_single_and_batch_order(self, client):
         first = _b64_image(seed=1)
@@ -128,9 +143,85 @@ class TestFailureVisibility:
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post("/predict", json={"image": _b64_image(seed=8)})
         assert response.status_code == 500
+        assert response.headers["X-Request-ID"]
+        assert response.json()["request_id"] == response.headers["X-Request-ID"]
         text = client.get("/metrics").text
         assert 'autovision_requests_total{endpoint="predict",status="500"}' in text
         assert "autovision_errors_total 1" in text
+
+    def test_inference_timeout_returns_504_then_poisons_the_engine(self):
+        class _HungEngine:
+            backend = "torch"
+            artifact = None
+            network = None
+
+            def __init__(self):
+                self.release = threading.Event()
+
+            def run_batch(self, images, *, threshold=0.5):
+                self.release.wait(timeout=5.0)
+                return [{} for _ in images]
+
+        engine = _HungEngine()
+        app = create_app(
+            engine=engine,
+            threshold=0.0,
+            inference_timeout_s=0.05,
+            queue_timeout_s=0.05,
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+        try:
+            first = client.post("/predict", json={"image": _b64_image(seed=21)})
+            assert first.status_code == 504
+            assert "timed out" in first.json()["error"]
+            assert first.headers["X-Request-ID"]
+            second = client.post("/predict", json={"image": _b64_image(seed=22)})
+            assert second.status_code == 503
+            assert "restart" in second.json()["error"]
+            text = client.get("/metrics").text
+            assert 'status="504"' in text
+            assert "autovision_inference_timeouts_total 1" in text
+        finally:
+            engine.release.set()
+
+    def test_poisoned_engine_reports_unready(self):
+        """After a timeout, /readyz must 503 so orchestrators restart."""
+
+        class _HungEngine:
+            backend = "torch"
+            artifact = None
+            network = None
+
+            def __init__(self):
+                self.release = threading.Event()
+
+            def run_batch(self, images, *, threshold=0.5):
+                self.release.wait(timeout=5.0)
+                return [{} for _ in images]
+
+        engine = _HungEngine()
+        app = create_app(
+            engine=engine,
+            threshold=0.0,
+            inference_timeout_s=0.05,
+            queue_timeout_s=0.05,
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+        try:
+            first = client.post("/predict", json={"image": _b64_image(seed=31)})
+            assert first.status_code == 504
+            ready = client.get("/readyz")
+            assert ready.status_code == 503
+            assert ready.json()["poisoned"] is True
+            assert "restart" in ready.json()["error"]
+            health = client.get("/healthz")
+            assert health.status_code == 200
+            assert health.json()["poisoned"] is True
+            text = client.get("/metrics").text
+            assert "autovision_model_ready 0" in text
+            assert 'autovision_variant_ready{variant="default"} 0' in text
+        finally:
+            engine.release.set()
 
 
 class TestAppValidation:
@@ -376,3 +467,17 @@ class TestObservabilityAuth:
             protect_observability_endpoints=False,
         )
         assert TestClient(app).get("/metrics").status_code == 200
+
+    def test_observability_failures_are_rate_limited(self, tiny_model):  # noqa: F811
+        app = create_app(
+            tiny_model,
+            threshold=0.0,
+            api_key="s3cret",
+            rate_limit_per_minute=1,
+            rate_limit_burst=1,
+        )
+        client = TestClient(app)
+        assert client.get("/metrics").status_code == 401
+        throttled = client.get("/metrics")
+        assert throttled.status_code == 429
+        assert throttled.headers["Retry-After"]

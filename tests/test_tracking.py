@@ -118,6 +118,17 @@ class TestBYTETrackerCore:
             ids.update(track.track_id for track in tracks)
         assert ids == {1}  # a single, stable identity
 
+    def test_degenerate_boxes_are_dropped_not_fatal(self):
+        """Zero-area boxes must not reach the Kalman solve."""
+        tracker = BYTETracker()
+        tracks = tracker.update(
+            np.array([[10.0, 10.0, 10.0, 20.0], [20.0, 20.0, 30.0, 30.0]]),
+            np.array([0.9, 0.9]),
+            np.array([0, 0]),
+        )
+        assert len(tracks) == 1
+        assert tracks[0].bbox == (20.0, 20.0, 30.0, 30.0)
+
     def test_two_parallel_boxes_keep_distinct_ids(self):
         tracker = BYTETracker()
         seen: dict[int, list[float]] = {}

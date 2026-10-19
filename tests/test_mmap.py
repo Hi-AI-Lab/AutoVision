@@ -1,9 +1,12 @@
 # Copyright (c) 2026 AutoVision contributors. Apache-2.0.
+import json
 import pickle
 
 import pytest
 
 from autovision.data.mmap_helpers import (
+    _increment_ref_count,
+    _ref_count_path,
     dataset_mmap_context,
     get_dataset_temp_mmap_path,
 )
@@ -15,6 +18,15 @@ from autovision.data.serialize.memory_mapped_sequence import (
 
 def items(n: int):
     return [{"filenames": f"img_{i:03d}.jpg", "index": i} for i in range(n)]
+
+
+def test_corrupt_refcount_is_reset(tmp_path):
+    mmap = tmp_path / "data.mmap"
+    mmap.write_bytes(b"")
+    ref = _ref_count_path(mmap)
+    ref.write_text("{not valid json")
+    _increment_ref_count(mmap)
+    assert json.loads(ref.read_text()) == 1
 
 
 class TestMemoryMappedSequence:
@@ -59,6 +71,15 @@ class TestMemoryMappedSequence:
         assert seq._pid is not None
         seq._table = None
         assert seq[1]["index"] == 1  # reopened lazily again
+
+    def test_truncated_file_fails_with_rebuild_hint(self, tmp_path):
+        """A truncated IPC file reports corruption, not a raw Arrow error."""
+        path = tmp_path / "truncated.mmap"
+        write_items_to_file(items(10), path)
+        raw = path.read_bytes()
+        path.write_bytes(raw[: len(raw) // 2])
+        with pytest.raises(RuntimeError, match="corrupt or truncated"):
+            MemoryMappedSequence.from_file(path)
 
 
 class TestMmapPath:
