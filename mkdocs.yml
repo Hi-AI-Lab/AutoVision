@@ -39,6 +39,10 @@ markdown_extensions:
       permalink: true
   - pymdownx.details
   - pymdownx.superfences
+  - md_in_html
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
   # 站点页包含仓库根 CONTRIBUTING.md / CHANGELOG.md（单一来源，避免漂移）。
   - pymdownx.snippets:
       base_path: ["."]

@@ -29,16 +29,89 @@
 
 ## 方案总览
 
-| 方案 | 场景 | 核心事件 | 仓库 |
-| --- | --- | --- | --- |
-| ai-traffic | 交通 | 遗撒散落物 · 事故复合评分 · 拥堵监测 | [GitHub](https://github.com/hi-agi-lab/ai-traffic) |
-| ai-wildfire | 林草 | 早期烟柱 · 水位尺读数 · 星空地三源合并 | [GitHub](https://github.com/hi-agi-lab/ai-wildfire) |
-| ai-illop | 工业安全 | SOP 违规操作：注册表驱动逐项验收 | [GitHub](https://github.com/hi-agi-lab/ai-illop) |
-| ai-conflict | 治安 | 打架/斗殴 T3 长尾：疑似告警 + 强制人审 | [GitHub](https://github.com/hi-agi-lab/ai-conflict) |
-| ai-perimeter | 安防 | 越界拌线 · 禁区闯入 · 徘徊 · 离岗 | [GitHub](https://github.com/hi-agi-lab/ai-perimeter) |
-| ai-security | 安防 | 持械/管制器具：卡口告警 + 以图搜械 | [GitHub](https://github.com/hi-agi-lab/ai-security) |
-| ai-life-line | 城市生命线 | 井盖缺失 · 路面积水 · 路灯故障 | [GitHub](https://github.com/hi-agi-lab/ai-life-line) |
-| ai-urban | 城市治理 | 九类市容事件：检出、复核、工单闭环 | [GitHub](https://github.com/hi-agi-lab/ai-urban) |
+<div class="grid cards" markdown>
+
+- :material-traffic-cone: **[ai-traffic](https://github.com/hi-agi-lab/ai-traffic)**
+
+    ---
+
+    交通事件三域分析
+
+    遗撒散落物 · 事故复合评分分级 · 拥堵监测
+
+    [:octicons-arrow-right-24: 方案仓](https://github.com/hi-agi-lab/ai-traffic)
+
+- :material-fire: **[ai-wildfire](https://github.com/hi-agi-lab/ai-wildfire)**
+
+    ---
+
+    林草火险 + 防汛防台
+
+    早期烟柱 · 水位尺读数 · 星空地三源合并
+
+    [:octicons-arrow-right-24: 方案仓](https://github.com/hi-agi-lab/ai-wildfire)
+
+- :material-factory: **[ai-illop](https://github.com/hi-agi-lab/ai-illop)**
+
+    ---
+
+    违规操作视频监管
+
+    SOP 分解为动作清单 · 注册表驱动 · 逐项独立验收
+
+    [:octicons-arrow-right-24: 方案仓](https://github.com/hi-agi-lab/ai-illop)
+
+- :material-alert-octagon: **[ai-conflict](https://github.com/hi-agi-lab/ai-conflict)**
+
+    ---
+
+    治安冲突视频分析
+
+    打架/斗殴 T3 长尾 · 疑似告警 + 强制人审 · 告警预算
+
+    [:octicons-arrow-right-24: 方案仓](https://github.com/hi-agi-lab/ai-conflict)
+
+- :material-fence: **[ai-perimeter](https://github.com/hi-agi-lab/ai-perimeter)**
+
+    ---
+
+    周界防护视频分析
+
+    越界拌线 · 禁区闯入 · 徘徊 · 离岗
+
+    [:octicons-arrow-right-24: 方案仓](https://github.com/hi-agi-lab/ai-perimeter)
+
+- :material-knife: **[ai-security](https://github.com/hi-agi-lab/ai-security)**
+
+    ---
+
+    持械/管制器具监管
+
+    卡口实时告警 · 以图搜械检索 · 定性权在公安
+
+    [:octicons-arrow-right-24: 方案仓](https://github.com/hi-agi-lab/ai-security)
+
+- :material-home-city: **[ai-life-line](https://github.com/hi-agi-lab/ai-life-line)**
+
+    ---
+
+    城市生命线视频分析
+
+    井盖缺失 · 路面积水 · 路灯故障 · 双源融合派单
+
+    [:octicons-arrow-right-24: 方案仓](https://github.com/hi-agi-lab/ai-life-line)
+
+- :material-city: **[ai-urban](https://github.com/hi-agi-lab/ai-urban)**
+
+    ---
+
+    城市治理视频分析
+
+    九类市容事件 · 检出、复核、工单闭环
+
+    [:octicons-arrow-right-24: 方案仓](https://github.com/hi-agi-lab/ai-urban)
+
+</div>
 
 交付平台：[hi-agi-lab/hi-ai-vision](https://github.com/hi-agi-lab/hi-ai-vision)
 （私有）——多点位编排、告警工单、台账治理与复核工作台。
@@ -61,6 +134,10 @@
 - **提示词工程量化**：同一批 130 图，通用提示词检出 0%，领域提示词把
   散落物拉到 79%、事故特征 50%——提示词随代码产线化交付。
 
+### 技术架构
+
+![ai-traffic 技术架构](https://raw.githubusercontent.com/hi-agi-lab/ai-traffic/main/images/architecture_zh.png)
+
 ## ai-wildfire · 林草火险 + 防汛防台
 
 ![ai-wildfire 实景](https://raw.githubusercontent.com/hi-agi-lab/ai-wildfire/main/images/demo_montage.jpg)
@@ -75,6 +152,10 @@
 - **法定报告链**：火情报告制度是人工职责——系统不替代，只提速；夜间/
   浓雾能力边界写入降级声明。
 - **水位尺读数**：防汛水位自动判读与预警联动，星空地三源在分钟桶配对。
+
+### 技术架构
+
+![ai-wildfire 技术架构](https://raw.githubusercontent.com/hi-agi-lab/ai-wildfire/main/images/architecture_zh.png)
 
 ## ai-illop · 违规操作视频监管
 
@@ -92,6 +173,10 @@
 - **KPI 口径**：只有清单级"达标率"（达到各自 SLO 的动作项数/已启用项数），
   永远不存在"违规识别整体准确率"。涉员工监控的制度依据/告知/用途限定
   是上线前置条件。
+
+### 技术架构
+
+![ai-illop 技术架构](https://raw.githubusercontent.com/hi-agi-lab/ai-illop/main/images/architecture_zh.png)
 
 ## ai-conflict · 治安冲突分析
 
@@ -111,6 +196,10 @@
 - **人审即标注**：每条推送必经 10s 短片人审，reject 原因枚举直接成为
   飞轮负样本；星光级相机是点位准入。
 
+### 技术架构
+
+![ai-conflict 技术架构](https://raw.githubusercontent.com/hi-agi-lab/ai-conflict/main/images/architecture_zh.png)
+
 ## ai-perimeter · 周界防护
 
 ![ai-perimeter 实景](https://raw.githubusercontent.com/hi-agi-lab/ai-perimeter/main/images/demo_montage.jpg)
@@ -125,6 +214,10 @@
 - **告警可靠性**：平台抖动不丢告警，网络分区恢复后补投；撤防窗口零
   事件（连规则状态机都不推进），布防按站点时区跨午夜归属。
 - **点位准入**：夜间/红外/远景小人衰减写入点位画像，准入后才承诺指标。
+
+### 技术架构
+
+![ai-perimeter 技术架构](https://raw.githubusercontent.com/hi-agi-lab/ai-perimeter/main/images/architecture_zh.png)
 
 ## ai-security · 持械/管制器具监管
 
@@ -141,6 +234,10 @@
   驱动，双人授权查询 Top-N + 出现时间线——历史视频从死资产变可检索。
 - **定性权在公安**：系统只判"器械状物"，告警措辞不含定性词。
 
+### 技术架构
+
+![ai-security 技术架构](https://raw.githubusercontent.com/hi-agi-lab/ai-security/main/images/architecture_zh.png)
+
 ## ai-life-line · 城市生命线
 
 ![ai-life-line 实景](https://raw.githubusercontent.com/hi-agi-lab/ai-life-line/main/images/demo_montage.jpg)
@@ -155,6 +252,10 @@
 - **双源融合定级**：视频线索与 IoT 传感、市民上报在分钟桶融合总线配对，
   双源命中即高置信直派——单源不可信时不硬判。
 - **气象联动**：暴雨预警主备双源触发，积水点位自动升频，预警解除回落。
+
+### 技术架构
+
+![ai-life-line 技术架构](https://raw.githubusercontent.com/hi-agi-lab/ai-life-line/main/images/architecture_cn.png)
 
 ## ai-urban · 城市治理
 
@@ -171,6 +272,10 @@
   对被标记线索做语义裁决（单张约 1–2s、5GB 显存）。
 - **线索不立案**：AI 仅产出线索，默认进人工复核；疏导点白名单必配；
   证据帧带"AI 生成线索"水印，行政处罚须现场重新取证。
+
+### 技术架构
+
+![ai-urban 技术架构](https://raw.githubusercontent.com/hi-agi-lab/ai-urban/main/images/architecture.png)
 
 ---
 
