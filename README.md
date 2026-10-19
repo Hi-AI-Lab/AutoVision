@@ -467,7 +467,9 @@ autovision-cli serve model=exported_best.pt rate_limit_per_minute=600 \
   variant 请求数 / drift PSI）。
 - 防护：`api_key=` 开启 Bearer / `X-API-Key` 常量时间校验；`max_body_bytes`
   在流式读取时限制请求体；`max_image_pixels` 在解码前拒绝解压炸弹；
-  `max_concurrency` 默认 1（TensorRT/OpenVINO runner 非线程安全）。
+  `max_concurrency` 默认 1（TensorRT/OpenVINO runner 非线程安全）；
+  `inference_timeout_s` 默认 120s，单次引擎调用超时返回 504 并将该实例标记为
+  不可再用（后续请求 503，需重启），避免卡死的后端被继续复用。
   `trust_proxy_headers=true` 只在可信反向代理后面使用（否则客户端可伪造
   `X-Forwarded-For` 绕过按 IP 限流）。
 - 每个响应带 `X-Request-ID`（可用同名请求头透传）与 `variant`（A/B/canary）。

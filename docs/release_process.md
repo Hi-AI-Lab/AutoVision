@@ -44,6 +44,9 @@
    python scripts/check_docs_links.py
    scripts/gen_model_zoo.py --check
    mkdocs build --strict
+   python scripts/configure_release.py --check
+   # 锁文件必须只引用公共 PyPI；显式覆盖本机镜像配置。
+   UV_DEFAULT_INDEX=https://pypi.org/simple uv lock --check
    ```
 
 2. **版本号**：更新 `src/autovision/_version.py`；确认打包与运行时读到的
@@ -60,7 +63,11 @@
 4. **文档**：站点构建通过（`site/` 产物不进版本库）；模型库页面与注册表
    一致（`--check` 已覆盖）。
 5. **发布快照**：对外仓库只承载发布快照——由当前树重建单提交快照分支，
-   推送后打 `vX.Y.Z` tag；开发线历史不进入对外仓库。
+   在快照提交上打 `vX.Y.Z` tag，再推送分支与 tag；开发线历史不进入对外仓库。使用
+   `scripts/publish_clean_cut.sh` 生成并校验快照（tree 与当前提交一致、
+   无 parent），默认只建本地分支/tag；确认后再加
+   `--remote <publish> --push` 推送。**禁止**直接推送 `main` 或
+   `v0.2-clean`（pre-push 钩子会拒绝）。
 6. **发布后**：核对远程 tag 指向的树与本地发布树一致；tag 推送会触发 CI 在
    打 tag 的提交上执行套件（`v*` 触发规则），其中 tag ↔ 版本一致性检查
    （`pytest tests/test_infrastructure.py -k release_tag`）必须通过；下个开发

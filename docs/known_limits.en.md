@@ -9,10 +9,14 @@ A training + reference inference framework. Training, evaluation and export are
 production paths; tracking and serving are reference implementations. Serving
 supports an optional API key (`AUTOVISION_SERVING_API_KEY` or `api_key=`),
 request-body/pixel limits, thread-pool inference, bounded queuing
-(`queue_timeout_s`, returning 503 when saturated), `/readyz`, TLS, multiple
-workers, in-process token-bucket rate limiting, prediction-distribution drift
-(PSI, `/drift`) and A/B/canary routing; `/docs` and `/openapi.json` are disabled
-by default. Global quotas, alerting, cross-process consistent rate limiting,
+(`queue_timeout_s`, returning 503 when saturated), a per-call deadline
+(`inference_timeout_s`, default 120s; a timeout returns 504, marks the instance
+unresponsive, and from then on `/readyz` returns 503 with `poisoned=true` while
+`/healthz` carries a `poisoned` field — orchestrators should drain traffic and
+restart the process), `/readyz`, TLS, multiple workers,
+in-process token-bucket rate limiting, prediction-distribution drift (PSI,
+`/drift`) and A/B/canary routing; `/docs` and `/openapi.json` are disabled by
+default. Global quotas, alerting, cross-process consistent rate limiting,
 A/B statistical significance and automatic canary rollback remain the
 responsibility of a production gateway.
 
@@ -22,7 +26,20 @@ responsibility of a production gateway.
   operators and cuDNN deterministic mode (some operators have no deterministic
   implementation and will error; it is usually slower). Disabled by default.
 - **fp16**: `precision="16-mixed"` uses `GradScaler` on CUDA/NPU and saves/restores
-  its state with the checkpoint; bf16/fp32 do not need it.
+  its state with the checkpoint; bf16/fp32 do not need it. AMP overflow is skipped
+  by the scaler (with scale backoff), not aborted by the finite-gradient check.
+- **Resume**: checkpoints restore Python/NumPy/Torch RNG state, but not the
+  mid-epoch sampler position, and they do not validate changed config/version;
+  optimizer state restores the checkpoint's `lr` and related values. Resume from
+  an epoch boundary when strict trajectory reproduction is required. Loading a
+  checkpoint written by a different AutoVision version logs a warning (not an
+  error). Checkpoint/export/manifest writers first sweep crash-orphaned temp
+  files older than one hour for the same target, then start their own write.
+- **mmap cache integrity**: cache files are validated on open; a corrupt or
+  truncated file fails with a rebuild hint (delete it, or rebuild via
+  `overwrite=True`). External truncation while the file is mapped (an outside
+  writer sharing `AUTOVISION_DATA_CACHE_DIR`) crashes the process with SIGBUS —
+  an OS-level constraint; never let untrusted processes write the cache dir.
 - **Download integrity**: weight downloads verify pinned sha256 digests; dataset
   downloads write a temporary file and atomically replace it, and cached archives
   are re-verified for size/sha256 (when pinned) before extraction. Built-in

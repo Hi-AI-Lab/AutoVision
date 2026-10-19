@@ -6,17 +6,30 @@
 
 训练 + 参考推理框架。训练、评测、导出是生产路径；跟踪与 serving 是参考实现。
 serving 支持可选 API key（`AUTOVISION_SERVING_API_KEY` 或 `api_key=`）、请求体/像素
-上限、线程池推理、有界排队（`queue_timeout_s`，饱和返回 503）、`/readyz`、TLS、
-多 worker、进程内 token-bucket 限流、预测分布漂移（PSI，`/drift`）与 A/B/canary
-分流；`/docs` 与 `/openapi.json` 默认关闭。全局配额、告警、跨进程一致限流、
-A/B 统计显著性与金丝雀自动回滚仍属生产网关职责。
+上限、线程池推理、有界排队（`queue_timeout_s`，饱和返回 503）、单次引擎调用
+超时（`inference_timeout_s`，默认 120s；超时返回 504 并将该实例标记为不可再用，
+此后 `/readyz` 返回 503（`poisoned=true`）、`/healthz` 携带 `poisoned` 字段，
+编排器应摘除流量并重启进程）、`/readyz`、TLS、多 worker、进程内 token-bucket
+限流、预测分布漂移
+（PSI，`/drift`）与 A/B/canary 分流；`/docs` 与 `/openapi.json` 默认关闭。
+全局配额、告警、跨进程一致限流、A/B 统计显著性与金丝雀自动回滚仍属生产网关职责。
 
 ## 运行与完整性
 
 - **确定性**：`AUTOVISION_DETERMINISTIC=1` 开启 torch 确定性算子与 cuDNN
   deterministic（部分算子无确定性实现会报错，且通常更慢）；默认关闭。
 - **fp16**：CUDA/NPU 上 `precision="16-mixed"` 使用 `GradScaler`，其状态随
-  checkpoint 保存/恢复；bf16/fp32 不需要。
+  checkpoint 保存/恢复；bf16/fp32 不需要。AMP 溢出由 scaler 跳过该步并回退
+  scale，不会被非有限梯度检查中止。
+- **断点续训**：checkpoint 保存/恢复 Python/NumPy/Torch RNG 状态，但不恢复
+  mid-epoch sampler 位置，也不校验配置/版本差异；续训时优化器状态会覆盖新的
+  `lr` 等参数。需要严格轨迹复现时请从 epoch 边界续训。加载跨版本 checkpoint
+  会记录 warning（不阻断）。checkpoint/导出/manifest 写入均先清扫同目标
+  超过 1 小时的崩溃残留临时文件，再开始本次写入。
+- **mmap 缓存完整性**：缓存文件打开时校验，损坏/截断会报带重建指引的错误
+  （删除文件或 `overwrite=True` 重建）。运行中文件被外部截断（与他人共享
+  `AUTOVISION_DATA_CACHE_DIR` 时的外部写入者）会导致 SIGBUS 进程崩溃——这是
+  OS 层约束；请勿让不受信进程写缓存目录。
 - **下载完整性**：权重下载校验钉住的 sha256；数据集下载写入临时文件并原子
   替换，缓存压缩包在解压前重新校验 size/sha256（有钉住值时）。内置 COCO/VOC
   数据集条目没有官方摘要，默认只告警。设置

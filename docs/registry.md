@@ -36,20 +36,26 @@ autovision-cli registry action=audit
 | `ModelCardGate` | 模型卡存在、`validate()` 通过、文件 sha 与卡一致 |
 | `LicenseGate` | 权重许可在部署 allowlist（默认宽松许可集） |
 | `BenchmarkGate` | 模型卡有正的 `coco_map` 与至少一条延迟记录 |
-| `ParityGate` | metadata `parity_passed=true` 或 `parity_report` 指向通过报告 |
+| `ParityGate` | `<file>.parity.json`（或 `parity_report` 指向的报告）的 `passed` 为 true；metadata `parity_report_sha256` 可选绑定 |
 | `DataSnapshotGate` | metadata `data_snapshot` 指向存在的数据快照 |
 
-注册时模型卡（`<file>.modelcard.json`）与后处理规格
-（`<file>.postprocess.json`）会随产物复制，门禁读取注册表内的副本。
+注册时模型卡（`<file>.modelcard.json`）、后处理规格
+（`<file>.postprocess.json`）与对拍报告（`<file>.parity.json`）会随产物复制并记录
+sha256，门禁读取注册表内的副本。`parity_passed=true` 只在显式使用
+`ParityGate(require_report=False)` 时兼容，默认不再接受自报标志。
 
 ## Python
 
 ```python
+from pathlib import Path
+
 from autovision.registry import ModelRegistry, default_gates
 
+# 对拍报告必须随产物提供（注册时会复制并记录 sha256）。
+Path("best.pt.parity.json").write_text('{"passed": true}')
+
 registry = ModelRegistry("/srv/autovision-registry")
-entry = registry.register("best.pt", name="det", version="1.0.0",
-                          metadata={"parity_passed": True})
+entry = registry.register("best.pt", name="det", version="1.0.0")
 registry.promote(name="det", version="1.0.0", to_stage="staging",
                  gates=default_gates())
 current = registry.current(name="det", stage="staging")

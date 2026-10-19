@@ -204,6 +204,10 @@
 
 ### 修复
 
+- **分类 / 线性语义分割的 `auto` 默认值取错**：`default_batch_size` /
+  `default_steps` 此前声明为 Pydantic 字段，但 CLI 解析 `auto` 时读取类属性，
+  实际回退到父类的 16 / 10000（分类应为 128，线性语义分割应为 32 / 20000）。
+  现改为与其它任务一致的 `ClassVar`，并加回归测试。
 - **HF 骨干（DINOv2/DINOv3 系）的 ONNX 导出在 transformers ≥5 环境下全线失败**：
   首个 eager 前向会先安装 output-capturing hooks（在 `threading.Lock` 下），
   而 dynamo 无法 trace `with <lock>`，严格导出直接失败——现于 trace 前做一次
@@ -441,11 +445,46 @@
   `.github/dependabot.yml`（pip / GitHub Actions 每周更新）。
 - 新增 `py.typed`（PEP 561），包数据随 wheel 发布。
 - GitHub CI 测试矩阵覆盖 Python 3.10 / 3.11。
+- **双语文档站点**：MkDocs Material + `mkdocs-static-i18n`，中文为默认站点、
+  英文构建在 `/en/`；新增 `README.en.md` 与首页 / 任务示例 / 已知限制 /
+  用户自持权重 4 个英文页，未翻译页自动回退中文。
+- **发布元数据**：`pyproject.toml` 补齐 `[project.urls]`，MkDocs 配置写入
+  `site_url` / `repo_url`；新增 `scripts/publish_clean_cut.sh` 生成并校验
+  单提交发布快照。
 - 新增回归测试：serving 鉴权/体积限制/并发/就绪、TLS/多 worker 启动参数、
   限流、漂移 PSI、A/B/canary 分流、fp16 scaler、确定性开关、早停/回调、
   下载门禁、注册表并发与路径校验、运行清单、打包/安全政策。
 - 测试稳定性：panoptic 端到端确定性用例固定 CPU，避免 GPU bf16 归约顺序
   造成的假失败。
+
+### 发布前可靠性加固（2026-10-19）
+
+- **serving / 流**：新增 `inference_timeout_s`（默认 120s；超时返回 504 并标记引擎
+  不可再用，后续请求 503，避免复用卡死的非线程安全后端）；未处理异常统一返回带
+  `request_id` 的结构化 500；探针不再返回绝对路径，RTSP 凭据在错误/统计中脱敏；
+  `/metrics`、`/drift` 与 `/predict` 共用限流；writer 失败即时中止；截断视频
+  解码失败不再被当成 EOF；多路流新增 `frames_failed` 计数；`track=True` 用于
+  非检测结果时显式报错；区域/平滑边界与零面积框不再产生误计数或 Kalman 崩溃。
+- **训练 / 数据**：有限 loss + NaN/Inf 梯度现在会中止训练；checkpoint 使用唯一
+  临时文件 + fsync，并保存/恢复 Python/NumPy/Torch RNG 状态；pretrain 与
+  best-export/sidecar 写失败统一走 rank-0 barrier；空训练/验证 loader 显式报错；
+  mmap refcount 损坏可恢复；数据快照对缺失路径默认严格失败；COCO `file_name`
+  做目录逃逸校验；JPEG EXIF 方向归一化，截断图片不再静默进入训练；DDP 下自定义
+  采样器显式拒绝而不是被静默替换。
+- **导出 / 注册表**：ONNX 与 int8 导出改为临时文件 + 原子替换，失败保留上一版；
+  `ParityGate` 默认要求真实 parity 报告（可绑定 sha256），不再接受自报标志；
+  注册表读取时重新校验模型与 sidecar sha256、拒绝 manifest 路径逃逸；manifest
+  原子写入；审计日志拒绝畸形行、使用 hash chain + fsync；插件拒绝混合迭代返回、
+  严格发现失败时回滚本次已注册插件并加锁。
+- **故障恢复与验收补强（同日第二轮）**：checkpoint / ONNX / int8 / 注册表
+  manifest / run manifest 写入前清扫同目标超过 1 小时的崩溃残留临时文件
+  （`runtime/fs_utils.sweep_stale_temp_files`，年龄保护绝不触碰在写文件）；
+  checkpoint 磁盘满（ENOSPC）统一包装为 `CheckpointError` 且旧文件完好；
+  加载跨版本 checkpoint 记录 warning；mmap 缓存损坏/截断改为带重建指引的
+  明确报错（运行中被外部截断属 OS 层 SIGBUS，已写入 known_limits）；serving
+  引擎毒化后 `/readyz` 返回 503（`poisoned=true`）、`/healthz` 携带
+  `poisoned` 字段，编排器可据此摘流重启；新增 kill -9 中途击杀训练 + 断点
+  续训的故障注入测试（`tests/test_crash_recovery.py`）。
 
 ## [0.2.0] - 2026-10-16
 

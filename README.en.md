@@ -28,13 +28,13 @@ weights are not downloaded by default.
   only published values, requires reproduction scripts for in-house numbers, and
   is append-only with an errata section.
 
-Documentation: [Task examples](docs/task_examples.md) · [Model zoo](docs/model_zoo.md) ·
+Documentation: [Task examples](docs/task_examples.en.md) · [Model zoo](docs/model_zoo.md) ·
 [Weight downloads](docs/download_weights.md) · [Benchmarks](docs/benchmarks.md) ·
 [Architecture](docs/framework_design.md) · [Export & deployment](docs/export.md) ·
 [Plugin protocol](docs/plugins.md) · [Private registry](docs/registry.md) ·
 [Compliance](docs/compliance.md) · [Hardware packs](docs/hardware_packs.md) ·
-[User-held weights](docs/user_held_weights.md) · [LTS policy](docs/lts_policy.md) ·
-[Support policy](docs/support_policy.md) · [Known limits](docs/known_limits.md) ·
+[User-held weights](docs/user_held_weights.en.md) · [LTS policy](docs/lts_policy.md) ·
+[Support policy](docs/support_policy.md) · [Known limits](docs/known_limits.en.md) ·
 [Contributing](CONTRIBUTING.md)
 
 ## Installation

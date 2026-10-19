@@ -8,6 +8,10 @@
 > `autovision`，命令行仍是 `autovision-cli`。本项目与 PyPI 上无关的
 > `autovision` 0.0.1 包没有关系；请确认安装的是 `autovision-framework`。
 
+**链接**：[源码仓库](https://github.com/hi-agi-lab/AutoVision) ·
+[文档站](https://hi-agi-lab.github.io/AutoVision/) ·
+[变更日志](https://github.com/hi-agi-lab/AutoVision/blob/main/CHANGELOG.md)
+
 ## 安装
 
 Python ≥ 3.10：
@@ -22,8 +26,8 @@ pip install "autovision-framework[transformers,timm,export]"
 pip install "autovision-framework[rfdetr,export]"
 ```
 
-模型包按 extras 惰性加载，缺失时对应清单为空而不是报错。完整 extras 表见源码仓库
-`README.md`。
+模型包按 extras 惰性加载，缺失时对应清单为空而不是报错。完整 extras 表见
+[仓库 README](https://github.com/hi-agi-lab/AutoVision#安装)。
 
 ## 快速开始
 
@@ -85,4 +89,5 @@ License）默认不下载；用户自持权重不可再分发。
 > `backbone.sta.*` ViT 检查点不受支持，需重新训练/导出。详见
 > `docs/provenance/LEDGER.md`。
 
-完整文档（模型库、基准、导出细节、已知限制）随源码仓库的 `docs/` 目录发布。
+完整文档（模型库、基准、导出细节、已知限制）见
+[文档站](https://hi-agi-lab.github.io/AutoVision/) 与源码仓库的 `docs/` 目录。
