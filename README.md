@@ -792,12 +792,6 @@ python scripts/check_docs_links.py && mkdocs build --strict              # 文�
 溯源见仓库根 `NOTICE`、[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) 与
 [溯源台账](docs/provenance/LEDGER.md)。
 
-> **0.3.0 许可状态（2026-10-17）**：DEIMv2 派生的 `SpatialPriorModule`
-> 已从代码库删除，DINOv3 ViT 变体保留但使用 no-STA adapter，因此本发行物
-> 不再包含 DEIMv2 代码，可按 Apache-2.0 发布。旧的 STA-era ViT 检查点
-> （`backbone.sta.*`）会被加载器明确拒绝；需重新训练 / 导出，或使用 ConvNeXt
-> 检查点。处置记录见溯源台账。
-
 GTR 权重为 MIT（整族 26 个，sha256 钉住）；`ultralytics` 为 AGPL-3.0，仅作
 extras 隔离加载，不进核心依赖、不在模块级 import。用户自持权重库的 7 个第三方
 COCO 检测器为 `DINOv3-License+NOASSERTION`，禁再分发 / 商用；其中 3 个 STA-era
