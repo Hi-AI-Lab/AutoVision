@@ -14,7 +14,7 @@ body:
     attributes:
       label: AutoVision 版本
       description: '`python -c "import autovision; print(autovision.__version__)"`，或提交哈希'
-      placeholder: 0.2.0
+      placeholder: 0.3.0
     validations:
       required: true
   - type: textarea

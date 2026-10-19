@@ -355,6 +355,10 @@ def _registry_check(smoke: Smoke) -> str:
         weights_sha256={exported.name: compute_file_sha256(exported)},
     )
     card.save(exported)
+    # ParityGate requires the report artifact (a metadata flag is not evidence).
+    exported.with_name(exported.name + ".parity.json").write_text(
+        '{"passed": true, "source": "smoke_enterprise"}'
+    )
 
     registry = ModelRegistry(smoke.tmp / "registry")
     registry.register(
@@ -362,7 +366,6 @@ def _registry_check(smoke: Smoke) -> str:
         name="smoke-det",
         version="1.0.0",
         stage="dev",
-        metadata={"parity_passed": True},
     )
     staged = registry.promote(
         name="smoke-det", version="1.0.0", to_stage="staging"

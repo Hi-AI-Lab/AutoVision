@@ -10,8 +10,8 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     case "$local_ref" in
         refs/heads/main|refs/tags/v0.2-clean)
             echo "REFUSED (pre-push hook): pushing '$local_ref' would disclose " \
-                 "pre-remediation history (AGPL). Publish the orphan branch instead: " \
-                 "scripts/publish_clean_cut.sh publish <remote>" >&2
+                 "pre-remediation history (AGPL). Publish the orphan snapshot instead: " \
+                 "scripts/publish_clean_cut.sh --remote <remote> --push" >&2
             exit 1
             ;;
     esac

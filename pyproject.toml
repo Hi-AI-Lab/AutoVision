@@ -40,9 +40,6 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-# TODO(release): add [project.urls] (Homepage / Documentation / Repository /
-# Issues / Changelog) once the public snapshot repository and docs site URLs
-# are fixed. PyPI README links must be absolute for the same reason.
 dependencies = [
     "defusedxml>=0.7.1",
     "filelock>=3.0",
@@ -57,6 +54,13 @@ dependencies = [
     "tqdm>=4.0",
     "typer>=0.12",
 ]
+
+[project.urls]
+Homepage = "https://github.com/hi-agi-lab/AutoVision"
+Documentation = "https://hi-agi-lab.github.io/AutoVision/"
+Repository = "https://github.com/hi-agi-lab/AutoVision"
+Issues = "https://github.com/hi-agi-lab/AutoVision/issues"
+Changelog = "https://github.com/hi-agi-lab/AutoVision/blob/main/CHANGELOG.md"
 
 [project.scripts]
 autovision-cli = "autovision.cli._app:cli_entrypoint"

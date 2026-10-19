@@ -11,6 +11,7 @@
 | `check_docs_links.py` | 公开树相对链接/反引号路径检查 | CI、CONTRIBUTING、发布手册 |
 | `gen_model_zoo.py` | 从注册表生成 `docs/model_zoo.md`；`--check` 防漂移 | CI、测试、发布手册 |
 | `configure_release.py` | 写入仓库/文档站公开 URL；`--check` 校验 | 发布/PyPI 文档 |
+| `publish_clean_cut.sh` | 生成并校验单提交发布快照（tree 相等、无 parent）；默认只建本地分支/tag，`--push` 才推送 | 发布手册、pre-push 钩子 |
 
 ## 权重、模型与功能
 
