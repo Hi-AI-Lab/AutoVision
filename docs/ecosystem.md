@@ -1,216 +1,224 @@
-# 行业方案接入（Open-Core 生态设计）
+# AutoVision 行业方案
 
-本文定义 hi-agi-lab 组织内 **AutoVision 开源核心**与**行业场景方案仓**的连接
-架构、接缝契约、许可边界与分阶段实施计划。目标读者：框架维护者与方案仓负责人。
+基于 AutoVision 开源底座的行业视频分析方案族：**一套通用范式 + 八个场景
+方案 + 一个交付平台**。每个方案把行业口径、合规红线与误报治理工程化成
+可验收的系统，而不是"一个模型识别一切"。
 
-> 定位一句话：AutoVision 是开源底座（Apache-2.0，PyPI 可装），场景仓是商业
-> 方案（Commercial）；场景引擎通过 `pip install autovision-framework` 消费
-> 框架稳定接缝，场景验证过的通用件反哺框架，形成"底座获客、方案变现、
-> 通用件上浮"的 open-core 闭环。
+![方案族全景](https://raw.githubusercontent.com/hi-agi-lab/ai-traffic/main/images/hero_banner.jpg)
 
-## 1. 背景与现状盘点
+## 通用范式：三模型流水线
 
-### 1.1 组织仓库现状（2026-10）
+所有方案共享同一条判定链——**发现、确认、裁决分离**，每层只回答自己的问题：
 
-| 仓库 | 可见性 | 形态 | 场景定位 |
-| --- | --- | --- | --- |
-| `AutoVision` | Public | 代码仓（唯一） | 训练/推理/导出/服务开源底座，已发 PyPI `autovision-framework` |
-| `ai-traffic` | Public | 展示页（README+图，无代码） | 交通事件三域：遗撒散落物 + 事故复合评分分级 + 拥堵监测 |
-| `ai-wildfire` | Public | 展示页 | 林草火险 + 防汛防台：瞭望塔双光谱烟柱、水位尺读数、星空地三源合并 |
-| `ai-illop` | Public | 展示页 | 违规操作视频监管：SOP 分解为可训练、可验收的动作清单，注册表驱动 |
-| `ai-conflict` | Public | 展示页 | 治安冲突视频分析（打架/斗殴 T3 长尾专项） |
-| `ai-perimeter` | Public | 展示页 | 周界防护视频分析 |
-| `ai-security` | Public | 展示页 | 安防通用 |
-| `ai-life-line` | Public | 展示页 | 生命线工程 |
-| `ai-urban` | Public | 展示页 | 城市治理 |
-| `hi-ai-vision` | **Private** | 平台（代码） | 视频智能分析平台，商业交付收口 |
-
-场景展示仓的共同特征：README 徽标为 `license: Commercial`、`core deps: numpy`、
-`tests: N passed`（代码在私有侧）；无默认语言识别（GitHub 未见代码文件）。
-即：**方案资产已存在，缺的是与开源底座的正式连接**。
-
-### 1.2 为什么必须连接
-
-1. **框架需要场景养料**：框架能力（zones、流状态机、事件契约）只有在真实
-   场景里被高频消费，才会保持接口不腐烂；脱离场景的开源框架会逐渐失去演化
-   方向。
-2. **场景需要底座背书**：展示页只有"方案叙事"，没有可运行底座；接入
-   AutoVision 后，"训练→评测→导出→流式推理"全链有公开可验证的实现，
-   商业可信度显著提升。
-3. **商业需要开源获客**：Apache-2.0 底座建立信任与线索，Commercial 方案
-   引擎与 Private 平台完成变现——这是 open-core 的标准路径。
-
-## 2. 总体架构
-
-```text
-┌───────────────────────── 场景方案层 · Commercial ─────────────────────────┐
-│  ai-traffic   ai-wildfire   ai-illop   ai-conflict … （展示页 + 私有引擎）│
-│  hi-ai-vision（Private 平台：告警工单、台账治理、多点位编排）              │
-└───────────────────────────────┬───────────────────────────────────────────┘
-                                │  pip 依赖（唯一正式接缝）
-┌───────────────────────────────▼───────────────────────────────────────────┐
-│  开源核心层 · Apache-2.0                                                   │
-│  hi-agi-lab/AutoVision ──发布──▶ autovision-framework (PyPI ≥ 0.3.2)      │
-│  稳定接缝：InferenceResult · Zones · run_stream · registry · export ·     │
-│           serving · TaskNetwork                                            │
-└───────────────────────────────────────────────────────────────────────────┘
-```
-
-连接原则：
-
-- **单一接缝**：场景代码只允许通过 PyPI 包消费框架，禁止任何路径 import
-  未发布代码（工作区外源码、git submodule、复制粘贴核心文件均不允许）。
-- **稳定契约**：场景代码只依赖本文第 4 节列出的稳定接缝；框架对这些接缝的
-  变更遵守弃用政策（`docs/lts_policy.md`：先弃用警告跨一个 MINOR）。
-- **上浮单向**：通用件从场景仓流向框架（PR + 提案），框架永不反向依赖场景仓。
-
-## 3. GitHub 层互连（P0，零代码）
-
-### 3.1 场景仓：接入徽章与回链
-
-每个场景展示仓 README 头部徽章区追加（中英双语 README 都要改）：
-
-```markdown
-[![powered by AutoVision](https://img.shields.io/badge/powered%20by-AutoVision-0FDC78)](
-https://github.com/hi-agi-lab/AutoVision)
-[![pypi](https://img.shields.io/pypi/v/autovision-framework)](
-https://pypi.org/project/autovision-framework/)
-```
-
-并在"技术架构"或结尾处固定一句回链：
-
-```markdown
-本方案的检测底座、流式推理运行时与导出链路由开源框架
-[AutoVision](https://github.com/hi-agi-lab/AutoVision) 提供
-（`pip install autovision-framework`）。
-```
-
-同时给仓库添加 topics：`autovision` `video-analytics` `open-vocabulary-detection`
-+ 场景专属 topic（如 `road-traffic` / `wildfire` / `industrial-safety`）。
-
-### 3.2 AutoVision 仓：Ecosystem 章节
-
-1. 仓库根 `README.md` 与 `README.en.md` 增设"行业方案 / Industry Solutions"
-   小节：8 个场景仓 + `hi-ai-vision` 一句话定位表格，全部外链 GitHub。
-2. 文档站新增 `docs/ecosystem.md`（即本页），导航置于"插件协议"之后，
-   作为生态的权威页面；README 小节链接到此页获取细节。
-
-### 3.3 组织层
-
-- org profile README（`hi-agi-lab/.github` 仓库）写明组织使命与两条产品线。
-- Pin 仓库：`AutoVision` 置顶第一，其余按商业优先级排 4 个。
-- 场景展示仓的 CI 徽章（README 中 `ci: pending` 占位）在私有引擎建立 CI 后
-  替换为真实状态；过渡期删除占位徽章避免误导。
-
-## 4. 技术接缝层（P1 试点 / P2 推广）
-
-### 4.1 依赖声明
-
-场景引擎包统一声明：
-
-```toml
-# 场景引擎 pyproject.toml
-dependencies = [
-    "autovision-framework>=0.3.2,<0.5",   # 上界到下一个大版本前的双 MINOR
-]
-```
-
-版本策略：框架发布新 MINOR 时，先跑场景引擎侧的兼容冒烟（场景仓的 40 例
-测试 + 关键路径），确认无 breaking 再放宽上界；场景引擎禁止使用
-`autovision` 内部模块（`_` 前缀、`experimental` 命名空间）。
-
-### 4.2 六大稳定接缝与场景需求映射
-
-| 稳定接缝 | API 形态 | 场景侧需求（以 ai-traffic 为例） | 使用约束 |
-| --- | --- | --- | --- |
-| 事件契约 | `autovision.results.InferenceResult`；`to_json(masks=...)`、`to_record()` | 检出对象 → 平台事件上报的标准载体；跨 API 边界传输 | mask 默认 RLE，禁止 dense `tolist()` 进 JSONL/HTTP |
-| 区域判定 | `autovision.tracking.zones.PolygonZone` / `LineZone` | 车道多边形过滤、白名单区域（公交站/施工区）、禁停区 | zone 状态机按帧有序，只能在流循环内更新 |
-| 流式运行时 | `autovision.inference.stream.run_stream` / `multi_stream` | 点位断流告警（≤30s）、重连退避、多路并发 | tracker/zone 状态不得在主循环外更新 |
-| 权重注册 | `autovision.registry`（模型注册表 + model card） | 检测底座版本固定与交付审计；场景模型包登记 | sha256 钉住；受限许可权重不自动下载 |
-| 导出链 | `autovision.export`（ONNX/TensorRT/OpenVINO + parity 门禁） | 边缘盒子/工控机部署；版本可复现 | 导出保持 `verify=True`，禁止关闭对拍 |
-| 参考服务 | `autovision.serving`（FastAPI + `/predict` `/healthz`） | `hi-ai-vision` 平台接入的原型对齐 | 参考实现不直接承载生产；生产走平台侧 |
-
-### 4.3 ai-traffic 试点改造清单（P1）
-
-以 `ai-traffic` 为试点验证接缝充分性，改造项与验收标准：
-
-| # | 改造项 | 现状 | 目标 | 验收 |
-| --- | --- | --- | --- | --- |
-| T1 | 检出对象契约化 | 引擎内自定义 dict | 统一走 `InferenceResult`，事件字段经 `to_record()` | 事件 JSON Schema 与平台对拍通过 |
-| T2 | 车道过滤 | numpy 手写多边形判断 | `PolygonZone`（注册车道多边形，zone 内过滤） | 与原实现误报/漏报一致（同批回放帧零差异） |
-| T3 | 断流告警 | 自研计时 | `run_stream` 的断流口径 + `frames_failed` | 断流 30s 告警演练通过 |
-| T4 | 底座权重 | 隐式路径 | `registry` 登记 + model card（含 sha256、许可） | 新环境一键加载，无路径硬编码 |
-| T5 | 边缘导出 | 无 | 底座经 `export` 出 ONNX（parity 门禁） | 对拍误差 ≤ 门禁阈值 |
-
-试点产出两份结论回填本文：接缝缺口清单（若有）与实测回放对比数据。
-
-### 4.4 通用件上浮机制（P2）
-
-场景侧被 ≥2 个场景复用且与具体业务无关的组件，按以下流程上浮：
-
-1. **提案**：在 AutoVision 仓开 issue，附场景来源、API 草案、与现有模块的
-   关系（避免重复入口——`docs/release_process.md` 的单一入口原则）。
-2. **归属**：状态机/时间窗类 → `tracking`（如"持续确认窗"）、区域治理/
-   台账类 → `tracking.analytics` 或 `metrics`；纯业务口径（评分权重、
-   SOP 清单）**不上浮**，留在场景引擎。
-3. **实现**：遵守仓库硬约束（类型提示、矢量化、`AGENTS.md` 测试规范）；
-   变更记入 `CHANGELOG.md`。
-4. **下线**：框架发布含该组件的 MINOR 后，场景引擎切换到框架实现并删除
-   私有副本（一个 MINOR 的并存宽限，之后私有副本必须移除）。
-
-首批候选：持续确认窗状态机（ai-traffic FR-AC-04）、白名单台账治理
-（ai-traffic/ai-perimeter 共用）、水位尺读数标定层（ai-wildfire，待第二个
-使用者出现再上浮）。
-
-## 5. 商业边界与许可
-
-### 5.1 开源 / 商业分界
-
-| 资产 | 授权 | 判定标准 |
+| 模型 | 职责 | 回答的问题 |
 | --- | --- | --- |
-| 框架全链（训练/评测/导出/流/参考服务） | Apache-2.0 | 通用能力，无行业口径 |
-| 模型 zoo 与公开权重 | 见 `THIRD_PARTY_LICENSES.md` | 逐资产登记 |
-| 场景评分引擎、领域提示词、SOP 动作清单 | Commercial | 行业口径是商业价值本体 |
-| `hi-ai-vision` 平台 | 商业闭源 | 交付与运维收口 |
-| 场景展示页（README/架构图/演示素材） | Public 仓库（© 保留） | 营销物料，不含引擎代码 |
+| **AI-Detect** | 开放词汇检测，L1 发现 | "画面里有可判定的对象/事件吗？" |
+| **AI-Recognize** | 时序身份追踪 + 区域语义，L2 确认 | "还是之前那个目标吗？相对基线变了吗？出现在哪些点位？" |
+| **AI-Reference** | 多模态 grounding 裁决（Qwen3-VL） | "那真的是目标事件——还是光影、雾霭、道具或规范工况？" |
 
-### 5.2 许可红线（强制）
+判定链之外的四条统一纪律：
 
-1. 场景引擎只依赖 PyPI 公开包；禁止把框架未发布代码带入场景仓。
-2. `ultralytics` 为 AGPL-3.0：仅通过框架 `ultralytics` extra 隔离加载；
-   场景仓不得直接引入，不得让 AGPL 代码与 Commercial 代码同文件/同进程
-   静态链接（进程隔离由框架 extra 机制保证）。
-3. 场景仓引用框架文档时使用链接而非复制粘贴；防止文档漂移与许可混淆。
-4. "AutoVision" 名称与徽标仅按第 3.1 节的 "Powered by" 形式使用；改名或
-   商业用途表述（如认证、背书）需维护者书面同意。
+- **范围先行**：每个方案的开篇都是"范围外声明"——系统只输出"疑似/线索"，
+  认定权在行业主管（交管/公安/防火条例），措辞纪律有单测保证。
+- **人审是主流程**：AI 产出线索，默认进入复核队列；告警预算与台账治理
+  控制"狼来了"效应。
+- **误报治理结构化**：白名单台账、豁免区域、作业窗口、持续确认窗、
+  双源融合——用结构消歧，不靠阈值硬调。
+- **fail-loud 与降敏**：断流告警、相机健康门（冻结/散焦/遮挡/移位）、
+  夜间与恶劣天气按天气分桶降级声明。
 
-## 6. 分阶段实施计划
+## 方案总览
 
-| 阶段 | 内容 | 交付物 | 完成判据（DoD） |
+| 方案 | 场景 | 核心事件 | 仓库 |
 | --- | --- | --- | --- |
-| P0 互链 | 3.1–3.3 全部操作 | 8 仓徽章+回链+topics；README Ecosystem 小节；org pin | `check_docs_links.py` 绿；任一展示页可 2 跳内到达框架 |
-| P1 试点 | 4.3 ai-traffic 改造 | T1–T5 完成 + 缺口清单 | 回放对比零差异；40 例测试全绿 |
-| P2 上浮 | 4.4 首批候选进框架 | 确认窗状态机 + 台账治理合入 | 框架新增模块有测试与文档；≥2 场景切换到框架实现 |
-| P3 推广 | 其余场景仓按 4.2 接入 | 各仓接入 PR | 每仓至少 T1（契约化）完成 |
-| P4 引流 | 文档站行业方案页打磨、SEO 关键词、案例数据回填 | 站点页面 + 埋点口径 | 站点→商业线索路径存在且可统计 |
+| ai-traffic | 交通 | 遗撒散落物 · 事故复合评分 · 拥堵监测 | [GitHub](https://github.com/hi-agi-lab/ai-traffic) |
+| ai-wildfire | 林草 | 早期烟柱 · 水位尺读数 · 星空地三源合并 | [GitHub](https://github.com/hi-agi-lab/ai-wildfire) |
+| ai-illop | 工业安全 | SOP 违规操作：注册表驱动逐项验收 | [GitHub](https://github.com/hi-agi-lab/ai-illop) |
+| ai-conflict | 治安 | 打架/斗殴 T3 长尾：疑似告警 + 强制人审 | [GitHub](https://github.com/hi-agi-lab/ai-conflict) |
+| ai-perimeter | 安防 | 越界拌线 · 禁区闯入 · 徘徊 · 离岗 | [GitHub](https://github.com/hi-agi-lab/ai-perimeter) |
+| ai-security | 安防 | 持械/管制器具：卡口告警 + 以图搜械 | [GitHub](https://github.com/hi-agi-lab/ai-security) |
+| ai-life-line | 城市生命线 | 井盖缺失 · 路面积水 · 路灯故障 | [GitHub](https://github.com/hi-agi-lab/ai-life-line) |
+| ai-urban | 城市治理 | 九类市容事件：检出、复核、工单闭环 | [GitHub](https://github.com/hi-agi-lab/ai-urban) |
 
-节奏建议：P0 立即；P1 两个周内完成试点；P2/P3 随框架 0.4.0 发布窗口；
-P4 持续。
+交付平台：[hi-agi-lab/hi-ai-vision](https://github.com/hi-agi-lab/hi-ai-vision)
+（私有）——多点位编排、告警工单、台账治理与复核工作台。
 
-## 7. 风险与缓解
+---
 
-| 风险 | 影响 | 缓解 |
+## ai-traffic · 交通事件三域分析
+
+![ai-traffic 实景](https://raw.githubusercontent.com/hi-agi-lab/ai-traffic/main/images/demo_montage.jpg)
+
+**遗撒散落物 + 事故复合评分分级 + 拥堵监测。疑似/确认两级口径，认定权在交管。**
+
+- **事故复合评分**：①异常停车 且 ②碎屑 → 疑似（≤60s 抢响应）；加 ③倒地人
+  → 较可能，且③命中即升 risk4 一票否决，不等确认窗；3 分钟持续确认窗
+  自动升级/关闭，事件内幂等合并。
+- **遗撒双路线**：车道内新增 + 静止 ≥10s 承诺达标精度；行驶掉落走 120s
+  观测窗静态确认，以图搜车串联取证。
+- **消歧三层生效**：车道多边形过滤、白名单台账（公交站/施工区/锥桶）、
+  拥堵排队消歧（排队中的静止不计异常停车）。
+- **提示词工程量化**：同一批 130 图，通用提示词检出 0%，领域提示词把
+  散落物拉到 79%、事故特征 50%——提示词随代码产线化交付。
+
+## ai-wildfire · 林草火险 + 防汛防台
+
+![ai-wildfire 实景](https://raw.githubusercontent.com/hi-agi-lab/ai-wildfire/main/images/demo_montage.jpg)
+
+**瞭望塔双光谱早期烟柱 · 水位尺读数 · 星空地三源合并。零漏报纪律与误报
+预算全部工程化。**
+
+- **早期烟窗口**：可见色度 + 热像温升双通道发现；升起/增长/持续三特征
+  齐备才确认，早期烟（<10min）是扑救窗口，漏报的代价是灾损。
+- **误报裁决**：云、雾、晨霭、扬尘、工业白烟是烟柱的光学近亲——
+  AI-Reference 逐条裁决"真的从林冠线升起的烟，还是光学近亲"。
+- **法定报告链**：火情报告制度是人工职责——系统不替代，只提速；夜间/
+  浓雾能力边界写入降级声明。
+- **水位尺读数**：防汛水位自动判读与预警联动，星空地三源在分钟桶配对。
+
+## ai-illop · 违规操作视频监管
+
+![ai-illop 实景](https://raw.githubusercontent.com/hi-agi-lab/ai-illop/main/images/demo_montage.jpg)
+
+**把企业安全规程（SOP）分解成可训练、可验收的动作清单。注册表驱动，
+逐项独立验收，合规红线全部代码化。**
+
+- **第一原则**：引擎不认识"违规操作"，只认识注册表里的 N 个独立任务——
+  违规定义来自每家企业的规程，强训"一个大模型"必然不可验收。
+- **8 种规则件**：ppe_absence（未戴防护）、region_absence（警示牌缺失）、
+  class_in_anchor（人/车锚点关系）等 + 消抖/豁免区域/作业窗口/台账对账。
+- **排除台账同等重要**：对"为什么 AI 做不了这条"给出书面答复，
+  期望管理前置。
+- **KPI 口径**：只有清单级"达标率"（达到各自 SLO 的动作项数/已启用项数），
+  永远不存在"违规识别整体准确率"。涉员工监控的制度依据/告知/用途限定
+  是上线前置条件。
+
+## ai-conflict · 治安冲突分析
+
+![ai-conflict 实景](https://raw.githubusercontent.com/hi-agi-lab/ai-conflict/main/images/demo_montage.jpg)
+
+**打架/斗殴 T3 长尾专项：疑似肢体冲突告警 + 强制人审 + 告警预算 +
+以图搜人取证。**
+
+- **承诺降级**：不承诺"识别打架"（"打"是意图不是像素），承诺"剧烈肢体
+  冲突动作"的疑似告警；全链路措辞"疑似肢体冲突"，确认前不出现定性词
+  （措辞纪律有单测）。
+- **特征三取二**：接触交互（<0.5m ∧ 相对速度 >1.5m/s 持续 ≥2s）+ 动作
+  模式（挥击/踢击/拉拽/缠斗骨架命中）+ 场景激化（聚集/倒地）；单特征
+  不触发推送。
+- **告警预算制**：每点位 ≤8 条/夜，超预算自动降敏（仅紧急级透传），
+  次日恢复；打闹消歧三特征把嬉闹从告警里摘出去。
+- **人审即标注**：每条推送必经 10s 短片人审，reject 原因枚举直接成为
+  飞轮负样本；星光级相机是点位准入。
+
+## ai-perimeter · 周界防护
+
+![ai-perimeter 实景](https://raw.githubusercontent.com/hi-agi-lab/ai-perimeter/main/images/demo_montage.jpg)
+
+**越界/拌线 · 禁区闯入 · 徘徊逗留 · 离岗，四类事件一套底座。地面几何
+判定，fail-safe 不静默，告警零丢失。**
+
+- **地面几何判定**：透视下画面画框不可靠——脚点轨迹投影到地面坐标再做
+  拌线交叉/多边形包含，同一个框近处远处不再代表不同区域。
+- **相机健康门**：冻结、过暗、散焦、遮挡、移位、断流六类问题逐类型
+  记账；检测器连续异常同样降级——不拿"看不见"当"没有"。
+- **告警可靠性**：平台抖动不丢告警，网络分区恢复后补投；撤防窗口零
+  事件（连规则状态机都不推进），布防按站点时区跨午夜归属。
+- **点位准入**：夜间/红外/远景小人衰减写入点位画像，准入后才承诺指标。
+
+## ai-security · 持械/管制器具监管
+
+![ai-security 实景](https://raw.githubusercontent.com/hi-agi-lab/ai-security/main/images/demo_montage.jpg)
+
+**双形态：卡口实时告警 + 以图搜械检索。合规红线全部代码化。**
+
+- **范围声明**：通用点位的实时持械检测不承诺、不建设——远距/遮挡/小
+  目标掉点严重；玩具刀与真刀光学同构（87 crop 实测天花板 74%），
+  纯视觉原理上判不了"真实性"。
+- **形态一 · 卡口告警**：专用安检口近距受控通过，器械 ≥64px 硬准入；
+  开放词汇检测 + 负提示消歧 + 持握累积 + AI-Reference 三态裁决。
+- **形态二 · 以图搜械**：低频轮巡把手持"器械状物"crop 入索引；案件
+  驱动，双人授权查询 Top-N + 出现时间线——历史视频从死资产变可检索。
+- **定性权在公安**：系统只判"器械状物"，告警措辞不含定性词。
+
+## ai-life-line · 城市生命线
+
+![ai-life-line 实景](https://raw.githubusercontent.com/hi-agi-lab/ai-life-line/main/images/demo_montage.jpg)
+
+**复用存量摄像头的城市生命线视频分析：井盖缺失、路面积水、路灯故障的
+自动发现与派单。**
+
+- **存量复用**：不加装传感器，轮巡式分析（复用既有 GA-T1400 视频接入）
+  替代逐帧解码，覆盖巡查盲区。
+- **三场景统一运行时**：井盖变化（登记式基线）、路面积水（物理分割 +
+  干态基线门控）、路灯故障（台账 + 亮度基线）共享同一轮巡/推送/复核链路。
+- **双源融合定级**：视频线索与 IoT 传感、市民上报在分钟桶融合总线配对，
+  双源命中即高置信直派——单源不可信时不硬判。
+- **气象联动**：暴雨预警主备双源触发，积水点位自动升频，预警解除回落。
+
+## ai-urban · 城市治理
+
+![ai-urban 实景](https://raw.githubusercontent.com/hi-agi-lab/ai-urban/main/images/demo_montage.jpg)
+
+**复用存量摄像头的九类市容事件视频分析：检出、复核、工单闭环。**
+
+- **九类事件统一注册**：占道经营、流动摊贩、暴露垃圾、渣土遗撒、道路
+  破损、绿化损毁、违规户外广告、违建、乱倒污水——提示词库、规则参数、
+  验收目标、复核问句、工单默认均在单一注册表声明，新增类目仅需一行。
+- **轮巡规模**：A/B 档点位 1 帧/30s，万路规模约 8–11 张 L4（tile 2×2 口径）；
+  违建快照每日 1 帧另计。
+- **两阶段判定**：AI-Detect + 规则引擎保召回、抑制瞬态；AI-Reference 仅
+  对被标记线索做语义裁决（单张约 1–2s、5GB 显存）。
+- **线索不立案**：AI 仅产出线索，默认进人工复核；疏导点白名单必配；
+  证据帧带"AI 生成线索"水印，行政处罚须现场重新取证。
+
+---
+
+## 底座：AutoVision 开源框架
+
+方案引擎统一通过 `pip install autovision-framework`（Apache-2.0）消费
+底座稳定接缝，不做重复建设：
+
+| 稳定接缝 | 方案侧用途 |
+| --- | --- |
+| `InferenceResult` 事件契约 | 检出对象 → 平台事件的标准载体（mask 默认 RLE） |
+| `PolygonZone` / `LineZone` | 车道多边形、禁区、拌线、岗位区域判定 |
+| `run_stream` / `multi_stream` | 断流告警、重连退避、多点位并发轮巡 |
+| `registry` + model card | 底座权重版本固定与交付审计（sha256 钉住） |
+| `export`（ONNX/TensorRT + parity 门禁） | 边缘盒子部署，数值可对拍 |
+| `serving` 参考 FastAPI | 平台接入原型对齐 |
+
+框架能力细节见[架构总览](framework_design.md)、
+[插件协议](plugins.md)与[导出部署](export.md)。
+
+<details>
+<summary><strong>生态治理（面向维护者）</strong></summary>
+
+### Open-Core 边界
+
+| 资产 | 授权 |
+| --- | --- |
+| 框架全链（训练/评测/导出/流/参考服务） | Apache-2.0，PyPI 发布 |
+| 场景评分引擎、领域提示词、SOP 清单 | Commercial（场景仓展示，代码私有） |
+| `hi-ai-vision` 平台 | 商业闭源 |
+
+### 许可红线
+
+1. 场景引擎只依赖 PyPI 公开包，禁止 import 未发布代码。
+2. `ultralytics`（AGPL-3.0）仅经框架 extra 隔离加载，不进核心依赖。
+3. 场景仓引用框架文档用链接，不复制粘贴。
+4. "AutoVision" 名称按 "Powered by" 形式使用，商业背书需维护者同意。
+
+### 实施阶段
+
+| 阶段 | 内容 | 状态 |
 | --- | --- | --- |
-| 接缝不稳定导致场景仓频繁返工 | 高 | 场景锁 `>=0.3.2,<0.5`；框架弃用政策跨 MINOR；试点先行 |
-| 通用件上浮变成业务口径进框架 | 中 | 4.4 第 2 条归属判定；PR 评审否决权在框架维护者 |
-| AGPL 传染 | 高 | 5.2 红线 + 框架 provenance 门禁（`check_provenance.py`）双保险 |
-| 展示页与引擎实现漂移（承诺了框架没做的） | 中 | 展示页技术叙事以本文第 4 节接缝为边界；商业口径不上文档站 |
-| 双语维护负担 | 低 | 展示页中英同改；框架侧英文页按 fallback 机制可延后 |
+| P0 互链 | 徽章/回链/topics/README 小节 | 已完成（2026-10-19） |
+| P1 试点 | ai-traffic 五项改造（契约化/车道/断流/权重/导出） | 进行中 |
+| P2 上浮 | 确认窗状态机、台账治理进框架（0.4.0） | 待启动 |
+| P3 推广 | 其余场景仓按接缝接入 | 待启动 |
+| P4 引流 | 行业方案页 SEO 与案例数据回填 | 持续 |
 
-## 8. 维护
-
-- 本页随每次阶段完成（P0–P4）更新对应章节与交付物状态。
-- 接缝清单（4.2）为契约性内容：增删接缝必须同步 `docs/lts_policy.md` 与
-  `CHANGELOG.md`。
-- 框架侧接口示例以仓库内 `tests/` 与 `examples/` 为准；本页不复制代码，
-  只锚定模块名。
+详细接缝契约与验收标准由框架维护者按 `docs/lts_policy.md` 与
+`CHANGELOG.md` 同步管理。
+</details>

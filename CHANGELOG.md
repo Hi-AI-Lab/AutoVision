@@ -16,9 +16,10 @@
   小节，链接 8 个行业场景方案仓与生态设计页；8 个场景仓 README 已加
   "Powered by AutoVision" 徽章、PyPI 徽章与框架回链，并统一添加
   `autovision` / `video-analytics` topics。
-- **新增《行业方案接入（Open-Core 生态设计）》**（`docs/ecosystem.md`）：
-  定义 AutoVision 开源核心与 hi-agi-lab 行业场景仓的连接架构、六大稳定
-  接缝契约、许可红线与 P0–P4 分阶段实施计划；文档站导航新增对应条目。
+- **新增《行业方案》页**（`docs/ecosystem.md`）：以解决方案介绍为主——
+  通用三模型流水线范式、八个场景方案的图文介绍（外链各方案仓实景图）、
+  底座稳定接缝一览；生态治理（Open-Core 边界、许可红线、P0–P4 计划）
+  以折叠节保留。文档站导航新增对应条目。
 
 ## [0.3.2] - 2026-10-19
 

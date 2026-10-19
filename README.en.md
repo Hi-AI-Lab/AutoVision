@@ -213,7 +213,7 @@ checkpoints are rejected because the DEIMv2 spatial prior was removed. See
 
 Vertical scenario solutions built on AutoVision (solution engines consume the
 framework's stable seams via `pip install autovision-framework`; see the
-[ecosystem design](https://hi-agi-lab.github.io/AutoVision/en/ecosystem/)):
+[industry solutions page](https://hi-agi-lab.github.io/AutoVision/en/ecosystem/)):
 
 | Repository | Scenario |
 | --- | --- |

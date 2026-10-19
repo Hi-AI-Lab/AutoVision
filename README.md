@@ -788,8 +788,8 @@ python scripts/check_docs_links.py && mkdocs build --strict              # 文�
 ## 行业方案
 
 基于 AutoVision 的行业场景方案（方案引擎经 `pip install autovision-framework`
-消费本框架稳定接缝；接入设计见
-[行业方案接入](https://hi-agi-lab.github.io/AutoVision/ecosystem/)）：
+消费本框架稳定接缝；介绍与接入见
+[行业方案](https://hi-agi-lab.github.io/AutoVision/ecosystem/)）：
 
 | 仓库 | 场景 |
 | --- | --- |

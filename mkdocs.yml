@@ -100,7 +100,7 @@ nav:
   - 导出与部署: export.md
   - 并行训练: parallelism.md
   - 插件协议: plugins.md
-  - 行业方案接入: ecosystem.md
+  - 行业方案: ecosystem.md
   - 私有注册表: registry.md
   - 合规报告: compliance.md
   - 溯源台账: provenance/LEDGER.md
