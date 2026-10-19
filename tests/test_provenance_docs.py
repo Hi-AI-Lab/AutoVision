@@ -3,7 +3,9 @@
 
 The DEIMv2-derived spatial prior was removed for licensing. These tests
 pin the post-removal state so neither the old "DEIMv2 = Apache-2.0" claim
-nor a stale release blocker can return.
+nor a stale release blocker can return. The removal record itself lives in
+the provenance ledger and known limits (see the dedicated tests below);
+README keeps only the upstream lineage acknowledgements.
 """
 
 from __future__ import annotations
@@ -18,7 +20,6 @@ def test_readme_has_acknowledgements_and_links():
     assert "## 致谢（Acknowledgements）" in readme
     assert "THIRD_PARTY_LICENSES.md" in readme
     assert "docs/provenance/LEDGER.md" in readme
-    assert "DEIMv2" in readme
     assert "no-STA" in readme
     assert "不得商用" not in readme
     assert "https://github.com/Peterande/D-FINE" in readme
