@@ -41,6 +41,54 @@ markdown_extensions:
   - pymdownx.snippets:
       base_path: ["."]
 
+# Chinese is the default locale (built at /); English is built at /en/.
+# Missing English pages fall back to the Chinese source automatically.
+plugins:
+  - search
+  - i18n:
+      docs_structure: suffix
+      fallback_to_default: true
+      reconfigure_material: true
+      reconfigure_search: true
+      languages:
+        - locale: zh
+          default: true
+          name: 中文
+          build: true
+        - locale: en
+          default: false
+          name: English
+          build: true
+          site_description: >-
+            Enterprise visual model training framework:
+            pretrain/distill -> finetune -> evaluate -> export
+          nav_translations:
+            首页: Home
+            任务示例: Task examples
+            模型库: Model zoo
+            权重下载: Weight downloads
+            基准: Benchmarks
+            导出与部署: Export & deployment
+            并行训练: Parallel training
+            插件协议: Plugin protocol
+            私有注册表: Private registry
+            合规报告: Compliance report
+            溯源台账: Provenance ledger
+            硬件伙伴包: Hardware partner packs
+            用户自持权重: User-held weights
+            导入 EoMT 权重: Import EoMT weights
+            冒烟测试: Smoke test
+            已知限制: Known limits
+            架构总览: Architecture
+            贡献指南: Contributing
+            发布流程: Release process
+            PyPI 发布: PyPI publishing
+            模型发布: Model publishing
+            LTS 政策: LTS policy
+            支持政策: Support policy
+            安全政策: Security policy
+            变更日志: Changelog
+
 nav:
   - 首页: index.md
   - 任务示例: task_examples.md

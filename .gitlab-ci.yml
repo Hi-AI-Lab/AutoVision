@@ -28,7 +28,7 @@ docs:
   script:
     # Public-tree references (relative links + backticked repo paths).
     - python scripts/check_docs_links.py
-    - pip install "mkdocs-material>=9.5"
+    - pip install "mkdocs-material>=9.5,<10" "mkdocs<2" "mkdocs-static-i18n>=1.2,<2"
     # Zero-warning site build (navigation, in-site links, orphans).
     - mkdocs build --strict
   rules:

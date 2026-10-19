@@ -64,6 +64,11 @@ mkdocs build --strict                    # 文档站点构建（零警告）
   修正进勘误节。
 - 模型库页面（`docs/model_zoo.md`）由注册表机器生成，勿手改；注册表变更后
   运行 `scripts/gen_model_zoo.py` 重新生成。
+- **国际化**：中文是默认语言（`docs/*.md`）；英文副本使用同名 `*.en.md`
+  （如 `index.en.md`）。未提供英文副本的页面由 `mkdocs-static-i18n`
+  自动回退到中文；新增或修改页面时，若已有对应的 `.en.md`，请同步更新。
+- README 语言切换：`README.md`（中文默认）与 `README.en.md` 顶部互链；
+  英文站构建在 `/en/`，中文站保持在 `/`。
 
 ## 许可与溯源红线
 

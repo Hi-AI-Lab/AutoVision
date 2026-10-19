@@ -144,6 +144,9 @@ class TestDocs:
         pages = {
             path.relative_to(ROOT / "docs").as_posix()
             for path in (ROOT / "docs").rglob("*.md")
+            # Locale alternates (index.en.md, ...) are resolved by the i18n
+            # plugin, not listed as separate nav entries.
+            if not re.search(r"\.[a-z]{2}(?:-[A-Z]{2})?\.md$", path.name)
         }
         # mkdocs exclude_docs takes gitignore-style patterns (docs: "a
         # pattern may match a directory"). `dir/` excludes the whole dir;
@@ -192,8 +195,35 @@ class TestDocs:
         assert "](LICENSE)" not in pypi_readme
         assert "https://www.apache.org/licenses/LICENSE-2.0" in pypi_readme
 
+    def test_docs_i18n_defaults_to_chinese_with_english_alternate(self):
+        """Chinese is the default locale; English is built under /en/."""
+        pytest.importorskip("yaml")
+        import yaml
+
+        config = yaml.safe_load((ROOT / "mkdocs.yml").read_text())
+        plugins = config.get("plugins", [])
+        i18n = next(
+            item["i18n"]
+            for item in plugins
+            if isinstance(item, dict) and "i18n" in item
+        )
+        assert i18n["docs_structure"] == "suffix"
+        assert i18n["fallback_to_default"] is True
+        languages = {item["locale"]: item for item in i18n["languages"]}
+        assert languages["zh"]["default"] is True
+        assert languages["zh"]["build"] is True
+        assert languages["en"]["default"] is False
+        assert languages["en"]["build"] is True
+        assert languages["en"]["nav_translations"]["首页"] == "Home"
+        assert (ROOT / "docs" / "index.en.md").is_file()
+        assert (ROOT / "README.en.md").is_file()
+        readme = (ROOT / "README.md").read_text()
+        assert "README.en.md" in readme
+        assert "](README.md)" in (ROOT / "README.en.md").read_text()
+
     def test_site_builds_strictly(self, tmp_path):
         pytest.importorskip("mkdocs")
+        pytest.importorskip("mkdocs_static_i18n")
         result = subprocess.run(
             [
                 sys.executable,
@@ -209,6 +239,12 @@ class TestDocs:
             text=True,
         )
         assert result.returncode == 0, result.stdout + result.stderr
+        assert (tmp_path / "site" / "index.html").is_file()
+        english_index = tmp_path / "site" / "en" / "index.html"
+        assert english_index.is_file()
+        assert "An enterprise-grade visual model training framework" in (
+            english_index.read_text()
+        )
 
     def test_no_broken_references_in_public_tree(self):
         result = subprocess.run(
@@ -381,6 +417,7 @@ class TestPackaging:
         config = tomllib.loads((ROOT / "pyproject.toml").read_text())
         docs_extra = config["project"]["optional-dependencies"]["docs"]
         assert any(dep.startswith("mkdocs-material") for dep in docs_extra)
+        assert any(dep.startswith("mkdocs-static-i18n") for dep in docs_extra)
 
     def test_public_api_surface(self):
         import autovision

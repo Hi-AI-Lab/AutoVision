@@ -1,5 +1,7 @@
 # AutoVision
 
+**简体中文** | [English](README.en.md)
+
 企业级视觉模型训练框架：自监督预训练 / 蒸馏 → 微调 → 评测 → 导出与部署。
 Python API 与 `autovision-cli`（30 条命令）共享同一套 Pydantic 严格校验，覆盖检测、旋转框、实例 / 全景 / 语义分割、姿态、深度、分类。
 

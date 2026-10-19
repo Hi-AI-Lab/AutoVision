@@ -48,7 +48,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install the docs toolchain
-        run: pip install "mkdocs-material>=9.5,<10" "mkdocs<2"
+        run: pip install "mkdocs-material>=9.5,<10" "mkdocs<2" "mkdocs-static-i18n>=1.2,<2"
       # Public-tree references (relative links + backticked repo paths).
       - run: python scripts/check_docs_links.py
       # Zero-warning site build (navigation, in-site links, orphans).

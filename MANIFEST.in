@@ -2,6 +2,7 @@ include LICENSE
 include NOTICE
 include THIRD_PARTY_LICENSES.md
 include README.md
+include README.en.md
 include README_PYPI.md
 include docs/provenance/LEDGER.md
 
