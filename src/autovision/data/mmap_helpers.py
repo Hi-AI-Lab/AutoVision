@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import time
 from collections.abc import Callable, Iterable
@@ -29,6 +30,8 @@ __all__ = [
 
 _REF_COUNT_TIMEOUT = 300.0
 _POLL_INTERVAL_SEC = 0.2
+
+logger = logging.getLogger("autovision.data.mmap")
 
 
 def _sha256(identifier: str) -> str:
@@ -150,9 +153,9 @@ def get_dataset_mmap_file(
     """Ensure the mmap file exists and return the sequence for this process.
 
     Local rank zero writes to a temp file and atomically renames; other ranks
-    poll until the file appears (or ``AUTOVISION_MMAP_TIMEOUT_SEC`` elapses; the
-    timer resets while rank zero is still writing). ``overwrite=True``
-    deletes a stale file (and its refcount) before rebuilding.
+    poll until the file appears or ``AUTOVISION_MMAP_TIMEOUT_SEC`` elapses (a
+    fixed deadline per waiting rank). ``overwrite=True`` deletes a stale file
+    (and its refcount) before rebuilding.
     """
     mmap_filepath.parent.mkdir(parents=True, exist_ok=True)
     if overwrite and mmap_filepath.exists():
@@ -177,8 +180,6 @@ def get_dataset_mmap_file(
         timeout_sec = Env.MMAP_TIMEOUT_SEC.value
         start_time = time.time()
         while not mmap_filepath.exists():
-            if tmp_path.exists():
-                start_time = time.time()  # rank 0 still writing
             if timeout_sec >= 0 and time.time() - start_time > timeout_sec:
                 raise RuntimeError(
                     f"Rank waited {timeout_sec:.0f}s for mmap file "
@@ -194,21 +195,32 @@ def _lock_path(mmap_filepath: Path) -> Path:
     return mmap_filepath.with_suffix(".lock")
 
 
+def _read_ref_count(ref_path: Path) -> int:
+    """Read the refcount; a corrupt file is treated as zero after a warning."""
+    if not ref_path.exists():
+        return 0
+    try:
+        return max(0, int(json.loads(ref_path.read_text())))
+    except (OSError, ValueError, TypeError) as error:
+        logger.warning(
+            "Corrupt mmap refcount '%s' (%s); resetting to zero.",
+            ref_path,
+            error,
+        )
+        return 0
+
+
 def _increment_ref_count(mmap_filepath: Path) -> None:
     ref_path = _ref_count_path(mmap_filepath)
     with FileLock(_lock_path(mmap_filepath), timeout=_REF_COUNT_TIMEOUT):
-        current = 0
-        if ref_path.exists():
-            current = json.loads(ref_path.read_text())
+        current = _read_ref_count(ref_path)
         ref_path.write_text(json.dumps(current + 1))
 
 
 def _decrement_and_cleanup_if_zero(mmap_filepath: Path, reuse: bool) -> None:
     ref_path = _ref_count_path(mmap_filepath)
     with FileLock(_lock_path(mmap_filepath), timeout=_REF_COUNT_TIMEOUT):
-        current = 0
-        if ref_path.exists():
-            current = json.loads(ref_path.read_text())
+        current = _read_ref_count(ref_path)
         remaining = max(0, current - 1)
         if remaining == 0:
             ref_path.unlink(missing_ok=True)

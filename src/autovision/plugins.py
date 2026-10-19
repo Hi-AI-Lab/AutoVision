@@ -16,6 +16,7 @@ rejected rather than guessed at.
 from __future__ import annotations
 
 import importlib.metadata
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
@@ -76,6 +77,7 @@ class DiscoveryResult:
 
 
 _PLUGINS: dict[tuple[str, str], PluginInfo] = {}
+_PLUGINS_LOCK = threading.RLock()
 
 
 def _validate(info: PluginInfo) -> None:
@@ -97,41 +99,44 @@ def register_plugin(info: PluginInfo) -> PluginInfo:
     """Register one plugin; ``model_source`` factories are loaded eagerly."""
     _validate(info)
     key = (info.kind, info.name)
-    if key in _PLUGINS:
-        raise PluginError(
-            f"Plugin '{info.name}' of kind '{info.kind}' is already registered."
-        )
-    if info.kind == "model_source":
-        from autovision.encoders.package_helpers import register_source
-
-        source = info.factory() if callable(info.factory) else info.factory
-        try:
-            register_source(source)
-        except Exception as error:  # noqa: BLE001 - source contract errors
+    with _PLUGINS_LOCK:
+        if key in _PLUGINS:
             raise PluginError(
-                f"model_source plugin '{info.name}' failed to register: {error}"
-            ) from error
-    _PLUGINS[key] = info
+                f"Plugin '{info.name}' of kind '{info.kind}' is already registered."
+            )
+        if info.kind == "model_source":
+            from autovision.encoders.package_helpers import register_source
+
+            source = info.factory() if callable(info.factory) else info.factory
+            try:
+                register_source(source)
+            except Exception as error:  # noqa: BLE001 - source contract errors
+                raise PluginError(
+                    f"model_source plugin '{info.name}' failed to register: {error}"
+                ) from error
+        _PLUGINS[key] = info
     return info
 
 
 def list_plugins(kind: str | None = None) -> list[PluginInfo]:
     if kind is not None and kind not in PLUGIN_KINDS:
         raise PluginError(f"Unknown plugin kind '{kind}'.")
-    return [
-        info
-        for (entry_kind, _), info in sorted(_PLUGINS.items())
-        if kind is None or entry_kind == kind
-    ]
+    with _PLUGINS_LOCK:
+        return [
+            info
+            for (entry_kind, _), info in sorted(_PLUGINS.items())
+            if kind is None or entry_kind == kind
+        ]
 
 
 def get_plugin(kind: str, name: str) -> PluginInfo:
-    try:
-        return _PLUGINS[(kind, name)]
-    except KeyError as error:
-        raise PluginError(
-            f"No plugin '{name}' of kind '{kind}' is registered."
-        ) from error
+    with _PLUGINS_LOCK:
+        try:
+            return _PLUGINS[(kind, name)]
+        except KeyError as error:
+            raise PluginError(
+                f"No plugin '{name}' of kind '{kind}' is registered."
+            ) from error
 
 
 def _entry_points() -> Iterable[Any]:
@@ -147,7 +152,14 @@ def _coerce(value: Any) -> list[PluginInfo]:
     if isinstance(value, PluginInfo):
         return [value]
     if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
-        return [item for item in value if isinstance(item, PluginInfo)]
+        items = list(value)
+        invalid = [type(item).__name__ for item in items if not isinstance(item, PluginInfo)]
+        if invalid:
+            raise PluginError(
+                "Plugin entry point returned a mixed iterable; every item "
+                f"must be PluginInfo (got {invalid})."
+            )
+        return items
     raise PluginError(
         f"Plugin entry point returned {type(value).__name__}; expected "
         "PluginInfo or an iterable of PluginInfo."
@@ -161,23 +173,32 @@ def discover_plugins(*, strict: bool = False) -> DiscoveryResult:
     returned in ``result.errors`` and successful plugins stay registered.
     """
     result = DiscoveryResult()
+    with _PLUGINS_LOCK:
+        pass_start_keys = set(_PLUGINS)
     for entry_point in _entry_points():
-        before = len(_PLUGINS)
+        with _PLUGINS_LOCK:
+            entry_start_keys = set(_PLUGINS)
         try:
             value = entry_point.load()
             if callable(value) and not isinstance(value, PluginInfo):
                 value = value()
             plugins = _coerce(value)
-            if not plugins and len(_PLUGINS) == before:
-                # The entry point may have registered itself during import.
-                raise PluginError(
-                    f"entry point '{entry_point.name}' registered nothing"
-                )
+            with _PLUGINS_LOCK:
+                if not plugins and set(_PLUGINS) == entry_start_keys:
+                    # The entry point may have registered itself during import.
+                    raise PluginError(
+                        f"entry point '{entry_point.name}' registered nothing"
+                    )
             for plugin in plugins:
                 register_plugin(plugin)
                 result.loaded.append(plugin)
         except Exception as error:  # noqa: BLE001 - plugin boundary
             if strict:
+                # Roll back this discovery pass so a partially loaded plugin
+                # set cannot leak into callers after a strict failure.
+                with _PLUGINS_LOCK:
+                    for key in set(_PLUGINS) - pass_start_keys:
+                        _PLUGINS.pop(key, None)
                 raise PluginError(
                     f"Plugin entry point '{entry_point.name}' failed: {error}"
                 ) from error

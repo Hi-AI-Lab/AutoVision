@@ -112,7 +112,10 @@ def _load_spec(data: Any) -> tuple[dict[str, Any], Path | None]:
 
 
 def _collect_roots(
-    spec: dict[str, Any], *, base_dir: Path | None = None
+    spec: dict[str, Any],
+    *,
+    base_dir: Path | None = None,
+    strict: bool = False,
 ) -> dict[str, list[tuple[str, Path]]]:
     """Split name → [(field label, existing path)] from a data spec.
 
@@ -120,9 +123,11 @@ def _collect_roots(
     relative paths resolve against ``base_dir`` (the spec file's directory).
     Split names come from the top-level mapping entries; top-level path
     values group under ``"(shared)"``. Labels must be unique per split —
-    the manifest key is ``label/relative-path``.
+    the manifest key is ``label/relative-path``. With ``strict=True`` a path
+    that does not exist is an error instead of being silently omitted.
     """
     groups: dict[str, list[tuple[str, Path]]] = {}
+    missing: list[str] = []
 
     def collect(node: Any, split: str, label: str = "") -> None:
         if isinstance(node, str):
@@ -131,6 +136,8 @@ def _collect_roots(
                 candidate = base_dir / candidate
             if candidate.exists():
                 groups.setdefault(split, []).append((label or node, candidate))
+            else:
+                missing.append(f"{split}/{label or node}: '{candidate}'")
             return
         if isinstance(node, dict):
             for key, value in node.items():
@@ -152,6 +159,12 @@ def _collect_roots(
             "The data spec references no existing paths — pass a spec whose "
             "annotations/images entries point at real files or directories "
             "(relative paths resolve against the spec file's directory)."
+        )
+    if strict and missing:
+        raise AutoVisionError(
+            "The data spec references missing path(s): "
+            + "; ".join(missing[:10])
+            + ("; ..." if len(missing) > 10 else "")
         )
     for name, roots in groups.items():
         labels = [label for label, _ in roots]
@@ -219,17 +232,21 @@ def dataset_snapshot(
     deep: bool | str = False,
     note: str | None = None,
     overwrite: bool | str = False,
+    strict: bool | str = True,
 ) -> dict[str, Any]:
     """Write a content-addressed snapshot of the dataset ``data`` refers to.
 
     ``deep=True`` additionally hashes every file's CONTENTS (slower; use it
     for versioning-grade pins of small/medium corpora). An existing
     ``out_json`` is never replaced silently — pass ``overwrite=true``.
+    ``strict=True`` (default) fails on a declared path that does not exist,
+    so a typo cannot produce a snapshot that silently omits a split.
     """
     from autovision import __version__
 
     deep_flag = _coerce_bool(deep, name="deep")
     overwrite_flag = _coerce_bool(overwrite, name="overwrite")
+    strict_flag = _coerce_bool(strict, name="strict")
     spec, base_dir = _load_spec(data)
     out_path = Path(out_json)
     if out_path.exists() and not overwrite_flag:
@@ -237,7 +254,7 @@ def dataset_snapshot(
             f"Snapshot '{out_path}' already exists — pass overwrite=true to "
             "replace it (a snapshot pins the data; replacing it is deliberate)."
         )
-    groups = _collect_roots(spec, base_dir=base_dir)
+    groups = _collect_roots(spec, base_dir=base_dir, strict=strict_flag)
     splits: dict[str, Any] = {}
     for name, roots in sorted(groups.items()):
         if not roots:

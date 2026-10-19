@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import random
 import time
@@ -24,7 +25,7 @@ from typing import Any
 import numpy as np
 import torch
 from torch import nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 
 from autovision.observability.otel import end_span, otel_span, start_span
 from autovision.runtime.accelerator import (
@@ -39,6 +40,91 @@ from autovision.runtime.env import Env
 __all__ = ["Engine", "FitResult"]
 
 logger = logging.getLogger("autovision")
+
+
+def _capture_rng_state() -> dict[str, Any]:
+    """Capture Python/NumPy/Torch RNG states in a ``weights_only``-safe form."""
+    numpy_state = np.random.get_state()
+    state: dict[str, Any] = {
+        "torch": torch.get_rng_state(),
+        "python": list(random.getstate()),
+        "numpy": [
+            numpy_state[0],
+            numpy_state[1].tolist(),
+            int(numpy_state[2]),
+            int(numpy_state[3]),
+            float(numpy_state[4]),
+        ],
+    }
+    if torch.cuda.is_available():
+        state["cuda"] = torch.cuda.get_rng_state_all()
+    return state
+
+
+def _restore_rng_state(state: Any) -> None:
+    """Restore a state captured by :func:`_capture_rng_state` (best effort)."""
+    if not isinstance(state, dict):
+        return
+    try:
+        if "torch" in state:
+            torch.set_rng_state(state["torch"])
+        if "python" in state:
+            python_state = state["python"]
+            random.setstate((python_state[0], tuple(python_state[1]), python_state[2]))
+        if "numpy" in state:
+            numpy_state = state["numpy"]
+            np.random.set_state(
+                (
+                    numpy_state[0],
+                    np.asarray(numpy_state[1], dtype=np.uint32),
+                    numpy_state[2],
+                    numpy_state[3],
+                    numpy_state[4],
+                )
+            )
+        if "cuda" in state and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all(state["cuda"])
+    except (RuntimeError, TypeError, ValueError) as error:
+        # A checkpoint moved across CUDA device counts should not fail the
+        # resume outright; reproducibility is degraded, not training.
+        logger.warning("Could not restore RNG state from checkpoint: %s", error)
+
+
+def _validate_ddp_sampler(dataloader: DataLoader) -> None:
+    """Reject custom samplers that DistributedSampler would silently replace."""
+    sampler = getattr(dataloader, "sampler", None)
+    if isinstance(sampler, (RandomSampler, SequentialSampler)):
+        return
+    raise ValueError(
+        "Custom samplers (hard-example/long-tail/weighted) are not supported "
+        "with WORLD_SIZE > 1: the engine would replace them with "
+        "DistributedSampler and silently drop the weights. Run single-device "
+        f"or sample outside the loader (got {type(sampler).__name__})."
+    )
+
+
+def _assert_finite_gradients(optimizer: Any, clip_norm: float | None) -> None:
+    """Reject non-finite gradients before ``optimizer.step()``.
+
+    A finite loss can still produce Inf/NaN gradients (AMP overflow, a bad
+    normalization layer, or a corrupted batch). When the model clips, the
+    pre-clip norm is already computed; otherwise one extra inf-norm reduction
+    is paid to keep the check unconditional.
+    """
+    norm = clip_norm
+    if norm is None:
+        params = [
+            parameter
+            for group in optimizer.param_groups
+            for parameter in group["params"]
+        ]
+        norm = float(torch.nn.utils.clip_grad_norm_(params, float("inf")))
+    if not math.isfinite(float(norm)):
+        raise RuntimeError(
+            "Non-finite gradient norm "
+            f"({norm}) after a finite loss; check AMP scaling, normalization, "
+            "or the batch. Lower the learning rate or enable gradient clipping."
+        )
 
 
 def _is_rank_zero_internal() -> bool:
@@ -316,6 +402,12 @@ class Engine:
     ) -> FitResult:
         if max_epochs < 1:
             raise ValueError(f"max_epochs must be >= 1, got {max_epochs}")
+        if len(dataloader) == 0:
+            raise ValueError(
+                "Training dataloader is empty; check the dataset root, filters, "
+                "and batch_size (a zero-length loader would silently train for "
+                "zero steps)."
+            )
         seed_everything(seed)
         device = resolve_device(devices)
         _set_accelerator_device(device)
@@ -344,6 +436,7 @@ class Engine:
                 # Opt out (stable step shapes) via AUTOVISION_DDP_FIND_UNUSED=0.
                 find_unused_parameters=Env.DDP_FIND_UNUSED.value,
             )
+            _validate_ddp_sampler(dataloader)
             sampler = torch.utils.data.distributed.DistributedSampler(
                 dataloader.dataset, shuffle=True, drop_last=True
             )
@@ -447,7 +540,13 @@ class Engine:
                             scaler.unscale_(optimizer)
                         else:
                             loss.backward()
-                        method.clip_gradients(optimizer)
+                        clip_norm = method.clip_gradients(optimizer)
+                        # With a GradScaler, inf/NaN gradients are the
+                        # expected overflow signal: scaler.step() skips the
+                        # update and backs off the scale. Raising here would
+                        # defeat AMP's recovery path.
+                        if scaler is None:
+                            _assert_finite_gradients(optimizer, clip_norm)
                         method.on_before_optimizer_step(optimizer)
                         if scaler is not None:
                             scale_before = scaler.get_scale()
@@ -492,19 +591,30 @@ class Engine:
                     run_metrics.update(knn_metrics)
                     _log_metrics_safely(logger_fn, knn_metrics, global_step)
 
-                # Checkpoint at the end of every epoch (rank zero only).
+                # Checkpoint at the end of every epoch (rank zero only). The
+                # barrier makes a disk/permission failure fatal for every
+                # rank instead of leaving peers in the next collective.
+                write_ok = True
+                write_error: Exception | None = None
                 if world_size == 1 or torch.distributed.get_rank() == 0:
-                    with otel_span("engine.checkpoint", {"epoch": epoch}):
-                        self.save_checkpoint(
-                            out_dir / "checkpoints" / "last.ckpt",
-                            method=method,
-                            optimizer=optimizer,
-                            scheduler=scheduler,
-                            epoch=epoch,
-                            global_step=global_step,
-                            normalize_args=normalize_args,
-                            scaler=scaler,
-                        )
+                    try:
+                        with otel_span("engine.checkpoint", {"epoch": epoch}):
+                            self.save_checkpoint(
+                                out_dir / "checkpoints" / "last.ckpt",
+                                method=method,
+                                optimizer=optimizer,
+                                scheduler=scheduler,
+                                epoch=epoch,
+                                global_step=global_step,
+                                normalize_args=normalize_args,
+                                scaler=scaler,
+                            )
+                    except Exception as error:  # noqa: BLE001 - propagated below
+                        write_ok = False
+                        write_error = error
+                _rank_zero_write_barrier(device, world_size, write_ok)
+                if write_error is not None:
+                    raise write_error
         finally:
             end_span(fit_span)
             # Never leave a hung process group behind on error paths.
@@ -553,6 +663,7 @@ class Engine:
             scheduler.load_state_dict(engine_state["scheduler"])
         if scaler is not None and "scaler" in engine_state:
             scaler.load_state_dict(engine_state["scaler"])
+        _restore_rng_state(engine_state.get("rng"))
         logger.info(
             "Resumed from '%s' at epoch %d (step %d).",
             path, ckpt.autovision.epoch + 1, ckpt.autovision.global_step,
@@ -583,6 +694,7 @@ class Engine:
         engine_state = {
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
+            "rng": _capture_rng_state(),
         }
         if scaler is not None:
             engine_state["scaler"] = scaler.state_dict()
@@ -704,6 +816,17 @@ class TaskEngine(Engine):
                 "gradient_accumulation_steps must be >= 1, got "
                 f"{gradient_accumulation_steps}."
             )
+        if len(train_dataloader) == 0:
+            raise ValueError(
+                "Training dataloader is empty; check the dataset root, filters, "
+                "and batch_size (a zero-length loader would silently train for "
+                "zero steps)."
+            )
+        if val_dataloader is not None and len(val_dataloader) == 0:
+            raise ValueError(
+                "Validation dataloader is empty; an empty val set would record "
+                "val_loss=0 and can save a bogus best checkpoint."
+            )
         parallel = str(parallel).lower()
         if parallel not in ("ddp", "fsdp"):
             raise NotImplementedError(
@@ -821,6 +944,7 @@ class TaskEngine(Engine):
                     # Opt out (stable step shapes) via AUTOVISION_DDP_FIND_UNUSED=0.
                     find_unused_parameters=Env.DDP_FIND_UNUSED.value,
                 )
+            _validate_ddp_sampler(train_dataloader)
             train_sampler = torch.utils.data.distributed.DistributedSampler(
                 train_dataloader.dataset, shuffle=True, drop_last=True
             )
@@ -882,6 +1006,7 @@ class TaskEngine(Engine):
                     scheduler.load_state_dict(engine_state["scheduler"])
                 if scaler is not None and "scaler" in engine_state:
                     scaler.load_state_dict(engine_state["scaler"])
+                _restore_rng_state(engine_state.get("rng"))
                 start_step = engine_state.get("step", -1) + 1
                 # Restore the best-metric baseline: without it the first
                 # post-resume validation resets tracking and a WORSE metric
@@ -989,6 +1114,7 @@ class TaskEngine(Engine):
                         engine_state: dict = {
                             "optimizer": optim_state,
                             "scheduler": scheduler.state_dict(),
+                            "rng": _capture_rng_state(),
                             "step": step,
                             # Closure read at call time: the best baseline
                             # rides in every checkpoint so a resume can
@@ -1156,7 +1282,11 @@ class TaskEngine(Engine):
                         scaler.unscale_(optimizer)
                     if nan_monitor is not None:
                         nan_monitor.check_gradients(train_model)
-                    train_model.clip_gradients(optimizer)
+                    clip_norm = train_model.clip_gradients(optimizer)
+                    # AMP overflow is handled by GradScaler (skip + scale
+                    # backoff); only the non-AMP path treats it as fatal.
+                    if scaler is None:
+                        _assert_finite_gradients(optimizer, clip_norm)
                 if scaler is not None:
                     scale_before = scaler.get_scale()
                     scaler.step(optimizer)
@@ -1358,29 +1488,38 @@ class TaskEngine(Engine):
                         best_metric = watch_value
                         best_metrics = dict(val_metrics)
                         no_improve = 0
+                        export_ok = True
+                        export_error: Exception | None = None
                         if save_best:
                             save_checkpoint(step, "best")
-                            if is_rank_zero:
-                                result.best_checkpoint_path = out_dir / "checkpoints" / "best.ckpt"
-                                result.best_exported_model_path = export_weights(
-                                    step, "best", last_full_state
-                                )
                         if is_rank_zero:
-                            logger.info(
-                                "Best %s improved to %.4f (step %d)",
-                                watch_key, watch_value, step + 1,
-                            )
-                            # Sidecar for the resume path: the last.ckpt
-                            # engine_state lags its own validation (the
-                            # final save precedes it), so the freshest
-                            # baseline lives here, written at each improve.
-                            sidecar = out_dir / "checkpoints" / "best_metric.json"
-                            sidecar.parent.mkdir(parents=True, exist_ok=True)
-                            sidecar.write_text(
-                                json.dumps(
-                                    {"best_metric": watch_value, "step": step + 1}
+                            try:
+                                if save_best:
+                                    result.best_checkpoint_path = out_dir / "checkpoints" / "best.ckpt"
+                                    result.best_exported_model_path = export_weights(
+                                        step, "best", last_full_state
+                                    )
+                                logger.info(
+                                    "Best %s improved to %.4f (step %d)",
+                                    watch_key, watch_value, step + 1,
                                 )
-                            )
+                                # Sidecar for the resume path: the last.ckpt
+                                # engine_state lags its own validation (the
+                                # final save precedes it), so the freshest
+                                # baseline lives here, written at each improve.
+                                sidecar = out_dir / "checkpoints" / "best_metric.json"
+                                sidecar.parent.mkdir(parents=True, exist_ok=True)
+                                sidecar.write_text(
+                                    json.dumps(
+                                        {"best_metric": watch_value, "step": step + 1}
+                                    )
+                                )
+                            except Exception as error:  # noqa: BLE001
+                                export_ok = False
+                                export_error = error
+                        _rank_zero_write_barrier(device, world_size, export_ok)
+                        if export_error is not None:
+                            raise export_error
                     else:
                         no_improve += 1
                         if (

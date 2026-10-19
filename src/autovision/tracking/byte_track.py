@@ -42,6 +42,7 @@ Deterministic: given the same inputs and ``frame_rate`` the ids are stable
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import numpy as np
@@ -49,6 +50,8 @@ import numpy as np
 from autovision.errors import AutoVisionError
 
 __all__ = ["BYTETracker", "Track"]
+
+logger = logging.getLogger(__name__)
 
 #: ByteTrack's Kalman std weights (official values).
 _STD_WEIGHT_POSITION = 1.0 / 20.0
@@ -457,4 +460,18 @@ class BYTETracker:
                     "tracker.update: classes must be integer-valued, got dtype "
                     f"{classes_array.dtype}."
                 )
+        # Zero/negative-area boxes make the Kalman innovation covariance
+        # singular. Drop them at the boundary instead of failing mid-stream.
+        widths = boxes_array[:, 2] - boxes_array[:, 0]
+        heights = boxes_array[:, 3] - boxes_array[:, 1]
+        valid = (widths > 0) & (heights > 0)
+        if not valid.all():
+            logger.warning(
+                "tracker.update: dropped %d degenerate boxes (non-positive "
+                "width/height).",
+                int((~valid).sum()),
+            )
+            boxes_array = boxes_array[valid]
+            scores_array = scores_array[valid]
+            classes_array = classes_array[valid]
         return boxes_array, scores_array, classes_array.astype(np.int64)

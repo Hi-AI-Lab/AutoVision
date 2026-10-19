@@ -24,9 +24,12 @@ with verified download + cache.
 from __future__ import annotations
 
 import functools
+import glob
+import hashlib
 import json
 import os
 import shutil
+import tempfile
 import threading
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
@@ -37,6 +40,7 @@ from filelock import FileLock, Timeout
 
 from autovision.encoders.weight_verification import compute_file_sha256
 from autovision.errors import AutoVisionError
+from autovision.runtime.fs_utils import sweep_stale_temp_files
 
 __all__ = [
     "MODEL_STAGES",
@@ -66,6 +70,7 @@ class RegistryEntry:
     sha256: str
     metadata: dict[str, Any] = field(default_factory=dict)
     registered_at: str = ""
+    sidecars: dict[str, str] = field(default_factory=dict)
 
     def to_manifest(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -184,22 +189,21 @@ class ModelRegistry:
         entry_dir.mkdir(parents=True)
         try:
             shutil.copy2(source, target)
-            self._copy_sidecars(source, target)
+            sidecars = self._copy_sidecars(source, target)
+            entry = RegistryEntry(
+                name=name,
+                version=version,
+                stage=stage,
+                path=target,
+                sha256=compute_file_sha256(target),
+                metadata=dict(metadata or {}),
+                registered_at=_utc_now(),
+                sidecars=sidecars,
+            )
+            self._write_manifest(entry_dir, entry)
         except Exception:
             shutil.rmtree(entry_dir, ignore_errors=True)
             raise
-        entry = RegistryEntry(
-            name=name,
-            version=version,
-            stage=stage,
-            path=target,
-            sha256=compute_file_sha256(target),
-            metadata=dict(metadata or {}),
-            registered_at=_utc_now(),
-        )
-        (entry_dir / _MANIFEST_NAME).write_text(
-            json.dumps(entry.to_manifest(), indent=2, sort_keys=True)
-        )
         if self._read_current(name, stage) is None:
             self._write_current(name, stage, version)
         self._append_audit(
@@ -253,12 +257,22 @@ class ModelRegistry:
         target = target_dir / Path(source_entry.path).name
         try:
             shutil.copy2(source_entry.path, target)
-            self._copy_sidecars(source_entry.path, target)
+            sidecars = self._copy_sidecars(source_entry.path, target)
             if compute_file_sha256(target) != source_entry.sha256:
                 raise RegistryError(
                     f"Promoted artifact '{target}' failed sha256 verification; "
                     f"promotion aborted."
                 )
+            for sidecar_name, expected_sha in source_entry.sidecars.items():
+                copied_sidecar = target_dir / sidecar_name
+                if (
+                    not copied_sidecar.is_file()
+                    or compute_file_sha256(copied_sidecar) != expected_sha
+                ):
+                    raise RegistryError(
+                        f"Promoted sidecar '{sidecar_name}' failed sha256 "
+                        "verification; promotion aborted."
+                    )
             entry = RegistryEntry(
                 name=name,
                 version=version,
@@ -267,6 +281,7 @@ class ModelRegistry:
                 sha256=source_entry.sha256,
                 metadata=dict(source_entry.metadata),
                 registered_at=_utc_now(),
+                sidecars=sidecars,
             )
             if gates:
                 failures: list[str] = []
@@ -281,12 +296,10 @@ class ModelRegistry:
                     raise RegistryError(
                         "Deployment gates failed: " + "; ".join(failures)
                     )
+            self._write_manifest(target_dir, entry)
         except Exception:
             shutil.rmtree(target_dir, ignore_errors=True)
             raise
-        (target_dir / _MANIFEST_NAME).write_text(
-            json.dumps(entry.to_manifest(), indent=2, sort_keys=True)
-        )
         self._write_current(name, to_stage, version)
         self._append_audit(
             action="promote", name=name, version=version, stage=to_stage,
@@ -383,19 +396,46 @@ class ModelRegistry:
 
     @_locked
     def audit_log(self) -> list[dict[str, Any]]:
-        """Read the append-only audit log (empty when absent)."""
+        """Read and verify the append-only audit log (empty when absent)."""
         path = self.root / "audit.jsonl"
         if not path.is_file():
             return []
         entries: list[dict[str, Any]] = []
-        for line in path.read_text().splitlines():
+        previous_hash = ""
+        hashed = False
+        for line_number, line in enumerate(path.read_text().splitlines(), start=1):
             line = line.strip()
             if not line:
                 continue
             try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
+                entry = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise RegistryError(
+                    f"Malformed audit log line {line_number}: {error}."
+                ) from error
+            if "entry_hash" not in entry:
+                if hashed:
+                    raise RegistryError(
+                        f"Audit log line {line_number} is unhashed after "
+                        "hashed entries."
+                    )
+                entries.append(entry)
                 continue
+            hashed = True
+            payload = {key: value for key, value in entry.items() if key != "entry_hash"}
+            expected = hashlib.sha256(
+                json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            if entry["entry_hash"] != expected:
+                raise RegistryError(
+                    f"Audit log line {line_number} hash mismatch (tampered)."
+                )
+            if entry.get("prev_hash", "") != previous_hash:
+                raise RegistryError(
+                    f"Audit log line {line_number} breaks the hash chain."
+                )
+            previous_hash = expected
+            entries.append(entry)
         return entries
 
     # ── internals ───────────────────────────────────────────────────────
@@ -407,13 +447,43 @@ class ModelRegistry:
         manifest = entry_dir / _MANIFEST_NAME
         if not manifest.is_file():
             raise RegistryError(f"Corrupt registry entry: '{entry_dir}'.")
-        entry = RegistryEntry.from_manifest(
-            json.loads(manifest.read_text()), entry_dir
-        )
-        if not entry.path.is_file():
+        try:
+            entry = RegistryEntry.from_manifest(
+                json.loads(manifest.read_text()), entry_dir
+            )
+        except (OSError, ValueError, TypeError) as error:
+            raise RegistryError(
+                f"Corrupt registry manifest '{manifest}': {error}."
+            ) from error
+        root = entry_dir.resolve()
+        resolved = entry.path.resolve()
+        if not resolved.is_relative_to(root):
+            raise RegistryError(
+                f"Registry manifest path escapes its entry directory: "
+                f"'{entry.path}'."
+            )
+        if not resolved.is_file():
             raise RegistryError(
                 f"Registered model file missing: '{entry.path}'."
             )
+        actual = compute_file_sha256(resolved)
+        if actual != entry.sha256:
+            raise RegistryError(
+                f"Registry artifact sha256 mismatch for '{resolved}': "
+                f"{actual} != {entry.sha256}."
+            )
+        for sidecar_name, expected_sha in entry.sidecars.items():
+            sidecar = (root / sidecar_name).resolve()
+            if not sidecar.is_relative_to(root) or not sidecar.is_file():
+                raise RegistryError(
+                    f"Registered sidecar missing or outside the entry: "
+                    f"'{sidecar_name}'."
+                )
+            if compute_file_sha256(sidecar) != expected_sha:
+                raise RegistryError(
+                    f"Registry sidecar sha256 mismatch for '{sidecar_name}'."
+                )
+        entry.path = resolved
         return entry
 
     @staticmethod
@@ -434,11 +504,34 @@ class ModelRegistry:
         ]
 
     @staticmethod
-    def _copy_sidecars(source: Path, target: Path) -> None:
-        for suffix in (".modelcard.json", ".postprocess.json"):
+    def _copy_sidecars(source: Path, target: Path) -> dict[str, str]:
+        """Copy sidecars and return ``{filename: sha256}`` for the manifest."""
+        hashes: dict[str, str] = {}
+        for suffix in (".modelcard.json", ".postprocess.json", ".parity.json"):
             sidecar = Path(str(source) + suffix)
             if sidecar.is_file():
-                shutil.copy2(sidecar, Path(str(target) + suffix))
+                copied = Path(str(target) + suffix)
+                shutil.copy2(sidecar, copied)
+                hashes[copied.name] = compute_file_sha256(copied)
+        return hashes
+
+    @staticmethod
+    def _write_manifest(entry_dir: Path, entry: RegistryEntry) -> None:
+        """Write the manifest atomically; a crash never leaves a partial one."""
+        target = entry_dir / _MANIFEST_NAME
+        sweep_stale_temp_files(entry_dir, f".{glob.escape(_MANIFEST_NAME)}.*.tmp")
+        descriptor, temp_name = tempfile.mkstemp(
+            prefix=f".{_MANIFEST_NAME}.", suffix=".tmp", dir=entry_dir
+        )
+        os.close(descriptor)
+        temp_path = Path(temp_name)
+        try:
+            temp_path.write_text(
+                json.dumps(entry.to_manifest(), indent=2, sort_keys=True)
+            )
+            os.replace(temp_path, target)
+        finally:
+            temp_path.unlink(missing_ok=True)
 
     def _current_path(self, name: str, stage: str) -> Path:
         _validate_key_part("name", name)
@@ -459,6 +552,9 @@ class ModelRegistry:
     def _write_current(self, name: str, stage: str, version: str) -> None:
         path = self._current_path(name, stage)
         path.parent.mkdir(parents=True, exist_ok=True)
+        # The temp file below is ``path.with_suffix(".tmp")`` — i.e.
+        # "{stem}.tmp", NOT "{name}.tmp".
+        sweep_stale_temp_files(path.parent, f"{glob.escape(path.stem)}.tmp")
         payload = {"version": version, "updated_at": _utc_now()}
         temporary = path.with_suffix(".tmp")
         temporary.write_text(json.dumps(payload, indent=2, sort_keys=True))
@@ -476,7 +572,19 @@ class ModelRegistry:
         reason: str | None = None,
         details: dict[str, Any] | None = None,
     ) -> None:
-        entry = {
+        path = self.root / "audit.jsonl"
+        previous_hash = ""
+        if path.is_file():
+            lines = [line for line in path.read_text().splitlines() if line.strip()]
+            if lines:
+                try:
+                    previous_hash = str(json.loads(lines[-1]).get("entry_hash", ""))
+                except json.JSONDecodeError as error:
+                    raise RegistryError(
+                        "Refusing to append to a malformed audit log: "
+                        f"{error}."
+                    ) from error
+        entry: dict[str, Any] = {
             "timestamp": _utc_now(),
             "action": action,
             "name": name,
@@ -485,9 +593,14 @@ class ModelRegistry:
             "actor": actor or os.environ.get("AUTOVISION_ACTOR", "local"),
             "reason": reason,
             "details": dict(details or {}),
+            "prev_hash": previous_hash,
         }
-        with (self.root / "audit.jsonl").open("a", encoding="utf-8") as handle:
+        payload = json.dumps(entry, sort_keys=True, separators=(",", ":"))
+        entry["entry_hash"] = hashlib.sha256(payload.encode()).hexdigest()
+        with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
 
 
 def _utc_now() -> str:

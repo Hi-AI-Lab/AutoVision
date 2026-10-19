@@ -396,6 +396,8 @@ def run_stream(
         nonlocal frames_done
         if not buffer:
             return
+        if writer_error:
+            raise writer_error[0]
         tensors = [torch.from_numpy(frame).permute(2, 0, 1) for _, frame in buffer]
         infer_started = time.perf_counter()
         records = engine.run_batch(tensors, threshold=threshold)
@@ -404,6 +406,14 @@ def run_stream(
             raise AutoVisionError(
                 f"engine returned {len(records)} records for {len(buffer)} frames."
             )
+        if tracker is not None:
+            for record in records:
+                if "bboxes" not in record:
+                    raise AutoVisionError(
+                        "track=True requires a detection model that returns "
+                        "'bboxes'; this result has no boxes. Disable tracking "
+                        "or use a detection/segmentation model."
+                    )
         for (index, frame), record in zip(buffer, records):
             entry: dict[str, Any] = {"frame": index}
             if stream.info.fps and stream.info.fps > 0:
@@ -464,6 +474,8 @@ def run_stream(
                         )
                 stats["render_s"] += time.perf_counter() - render_started
                 write_queue.put(rendered)
+                if writer_error:
+                    raise writer_error[0]
             frames_done += 1
         buffer.clear()
 
@@ -485,13 +497,20 @@ def run_stream(
             writer_thread.start()
         try:
             while True:
-                item = read_queue.get()
+                if writer_error:
+                    raise writer_error[0]
+                try:
+                    item = read_queue.get(timeout=0.2)
+                except queue.Empty:
+                    continue
                 if item is None:
                     break
                 buffer.append(item)
                 if len(buffer) >= batch_size:
                     flush()
             flush()
+            if writer_error:
+                raise writer_error[0]
             if reader_error:
                 raise reader_error[0]
         finally:

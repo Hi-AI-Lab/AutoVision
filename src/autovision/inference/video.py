@@ -19,6 +19,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
+from urllib.parse import urlsplit, urlunsplit
 
 from autovision.errors import AutoVisionError
 from autovision.types import PathLike
@@ -32,7 +33,25 @@ __all__ = [
     "VideoSink",
     "get_video_frames_generator",
     "process_video",
+    "redact_source",
 ]
+
+
+def redact_source(source: PathLike) -> str:
+    """Return a log-safe source string with URL credentials removed."""
+    text = str(source)
+    try:
+        parts = urlsplit(text)
+    except ValueError:
+        return text
+    if not parts.scheme or parts.hostname is None:
+        return text
+    netloc = parts.hostname
+    if parts.port is not None:
+        netloc = f"{netloc}:{parts.port}"
+    if parts.username is not None or parts.password is not None:
+        netloc = f"***@{netloc}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
 def _require_cv2() -> Any:
@@ -89,14 +108,20 @@ class VideoFrameStream:
         if not self._capture.isOpened():
             self._capture.release()
             raise AutoVisionError(
-                f"Could not open video source '{self.source}' — check the path "
-                "or stream URL (RTSP/HTTP sources need OpenCV's FFmpeg backend)."
+                f"Could not open video source '{redact_source(self.source)}' — "
+                "check the path or stream URL (RTSP/HTTP sources need OpenCV's "
+                "FFmpeg backend)."
             )
         self.info = VideoInfo(
             width=int(self._capture.get(cv2.CAP_PROP_FRAME_WIDTH)),
             height=int(self._capture.get(cv2.CAP_PROP_FRAME_HEIGHT)),
             fps=float(self._capture.get(cv2.CAP_PROP_FPS)),
             frame_count=int(self._capture.get(cv2.CAP_PROP_FRAME_COUNT)),
+        )
+        # Only local files have a trustworthy frame count. A short read before
+        # that count means truncation/corruption, not a normal EOF.
+        self._strict_frame_count = (
+            self.info.frame_count > 0 and Path(self.source).is_file()
         )
 
     def __iter__(self) -> Iterator[tuple[int, Any]]:
@@ -106,6 +131,13 @@ class VideoFrameStream:
             while self.max_frames is None or index < self.max_frames:
                 ok, frame = self._capture.read()
                 if not ok:
+                    if self._strict_frame_count and index < self.info.frame_count:
+                        raise AutoVisionError(
+                            "Video decode failed at frame "
+                            f"{index}/{self.info.frame_count} for "
+                            f"'{redact_source(self.source)}'; the file may be "
+                            "truncated or corrupt."
+                        )
                     break
                 yield index, cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 index += 1
@@ -136,7 +168,16 @@ class AnnotatedVideoWriter:
 
     def write(self, frame: Any) -> None:
         cv2 = _require_cv2()
-        self._writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+        if not self._writer.isOpened():
+            raise AutoVisionError(
+                f"Video writer for '{self.path}' is closed; frame not written."
+            )
+        try:
+            self._writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+        except cv2.error as error:
+            raise AutoVisionError(
+                f"Video writer for '{self.path}' failed: {error}"
+            ) from error
 
     def close(self) -> None:
         self._writer.release()

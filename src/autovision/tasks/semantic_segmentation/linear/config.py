@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import Field
 
@@ -21,8 +21,8 @@ class LinearSemanticSegmentationTrainArgs(TrainModelArgs):
     the 1x1 classification head trains.
     """
 
-    default_batch_size: int = 32
-    default_steps: int = 20_000
+    default_batch_size: ClassVar[int] = 32
+    default_steps: ClassVar[int] = 20_000
 
     num_classes: int
     backbone: str = "torchvision/resnet18"

@@ -80,8 +80,22 @@ def _chain_first(first_item: dict[str, Any], rest: Iterator[dict[str, Any]]) -> 
 
 
 def _mmap_table_from_file(mmap_filepath) -> pa.Table:
-    with pa.memory_map(str(mmap_filepath)) as source:
-        return ipc.open_file(source).read_all()
+    try:
+        with pa.memory_map(str(mmap_filepath)) as source:
+            return ipc.open_file(source).read_all()
+    except (pa.ArrowInvalid, OSError) as error:
+        if isinstance(error, FileNotFoundError | PermissionError):
+            # Distinct operational failures must keep their own identity:
+            # calling them "corrupt" would mislead troubleshooting.
+            raise
+        # A truncated or clobbered IPC file (crashed writer on an old
+        # format, manual edit) must fail with a rebuild hint, not a raw
+        # Arrow error from deep inside deserialization.
+        raise RuntimeError(
+            f"Memory-mapped dataset file '{mmap_filepath}' is corrupt or "
+            f"truncated ({error}). Rebuild it: delete the file, or re-run "
+            f"with overwrite=True / a fresh output directory."
+        ) from error
 
 
 class MemoryMappedSequence(Sequence[dict[str, Any]]):

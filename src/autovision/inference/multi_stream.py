@@ -19,6 +19,7 @@ reuses :class:`~autovision.inference.video.VideoFrameStream`.
 from __future__ import annotations
 
 import json
+import logging
 import queue
 import threading
 import time
@@ -31,7 +32,12 @@ import numpy as np
 
 from autovision.errors import AutoVisionError
 from autovision.inference.engine import InferenceEngine
-from autovision.inference.video import AnnotatedVideoWriter, VideoFrameStream, VideoInfo
+from autovision.inference.video import (
+    AnnotatedVideoWriter,
+    VideoFrameStream,
+    VideoInfo,
+    redact_source,
+)
 from autovision.results import InferenceResult
 from autovision.types import PathLike
 from autovision.visualize.detection import draw_prediction
@@ -45,6 +51,8 @@ __all__ = [
 ]
 
 _LIVE_SCHEMES = {"rtsp", "rtmp", "http", "https"}
+
+logger = logging.getLogger("autovision.inference.multi_stream")
 
 
 @dataclass(frozen=True)
@@ -71,6 +79,7 @@ class StreamStats:
     frames_read: int = 0
     frames_written: int = 0
     frames_dropped: int = 0
+    frames_failed: int = 0
     reconnects: int = 0
     errors: list[str] = field(default_factory=list)
     jsonl: Path | None = None
@@ -79,11 +88,12 @@ class StreamStats:
     def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
-            "url": self.url,
+            "url": redact_source(self.url),
             "fps": self.fps,
             "frames_read": self.frames_read,
             "frames_written": self.frames_written,
             "frames_dropped": self.frames_dropped,
+            "frames_failed": self.frames_failed,
             "reconnects": self.reconnects,
             "errors": list(self.errors[-5:]),
             "jsonl": str(self.jsonl) if self.jsonl else None,
@@ -115,7 +125,8 @@ class MultiStreamResult:
     def summary(self) -> str:
         parts = [
             f"{stats.name}: frames={stats.frames_written} "
-            f"dropped={stats.frames_dropped} reconnects={stats.reconnects}"
+            f"failed={stats.frames_failed} dropped={stats.frames_dropped} "
+            f"reconnects={stats.reconnects}"
             for stats in sorted(self.sources.values(), key=lambda item: item.name)
         ]
         return (
@@ -241,7 +252,9 @@ class MultiStreamRunner:
         stop = threading.Event()
         lock = threading.Lock()
         stats = {
-            source.name: StreamStats(name=source.name, url=source.url)
+            source.name: StreamStats(
+                name=source.name, url=redact_source(source.url)
+            )
             for source in self.sources
         }
         stats_list = [stats[source.name] for source in self.sources]
@@ -372,13 +385,23 @@ class MultiStreamRunner:
                 try:
                     records = self.engine.run_batch(frames, threshold=self.threshold)
                 except Exception as error:  # noqa: BLE001 - keep other sources alive
+                    logger.warning(
+                        "Inference batch failed (%d frames): %s", len(batch), error
+                    )
                     for packet in batch:
                         stat = stats_list[packet.source_index]
+                        _inc(stat, "frames_failed")
                         _record_error(stat, f"inference failed: {error}")
                     continue
                 if len(records) != len(batch):
+                    logger.warning(
+                        "Engine returned %d records for %d frames",
+                        len(records),
+                        len(batch),
+                    )
                     for packet in batch:
                         stat = stats_list[packet.source_index]
+                        _inc(stat, "frames_failed")
                         _record_error(
                             stat,
                             "engine returned "

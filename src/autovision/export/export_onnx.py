@@ -14,8 +14,11 @@ calibrated) — see ``autovision.export.quantization``.
 
 from __future__ import annotations
 
+import glob
 import json
 import logging
+import os
+import uuid
 from pathlib import Path
 from typing import Any, Iterable, Literal
 
@@ -25,6 +28,7 @@ from torch import nn
 from autovision._license import LICENSE_INFO
 from autovision._version import __version__
 from autovision.errors import AutoVisionError
+from autovision.runtime.fs_utils import sweep_stale_temp_files
 
 __all__ = ["ONNXExportMixin", "ONNXExportPrecisionPolicy"]
 
@@ -83,6 +87,14 @@ def _drop_onnx_artifacts(*paths: Path) -> None:
     for path in paths:
         path.unlink(missing_ok=True)
         path.with_suffix(path.suffix + ".data").unlink(missing_ok=True)
+
+
+def _move_onnx_artifacts(source: Path, target: Path) -> None:
+    """Move an ONNX graph and its external-data sidecar atomically."""
+    os.replace(source, target)
+    source_data = source.with_suffix(source.suffix + ".data")
+    if source_data.exists():
+        os.replace(source_data, target.with_suffix(target.suffix + ".data"))
 
 
 def _dynamic_export_error(exc: BaseException) -> str:
@@ -183,6 +195,63 @@ class ONNXExportMixin(nn.Module):
         write_spec: bool = True,
         format_args: dict[str, Any] | None = None,
     ) -> Path:
+        """Export to a temp graph, verify, then atomically replace ``out``.
+
+        A failed export never leaves a partial graph at the target path (the
+        previous good artifact survives), and the postprocess sidecar is only
+        written after the graph has passed its gates.
+        """
+        final_out = Path(out)
+        final_out.parent.mkdir(parents=True, exist_ok=True)
+        # Hygiene: sweep temp graphs orphaned by a killed exporter. The
+        # pattern ends in ".tmp<suffix>" so a kept FP32 reference
+        # ("{stem}.fp32.onnx") can never match.
+        sweep_stale_temp_files(
+            final_out.parent,
+            f"{glob.escape(final_out.stem)}"
+            f".*.tmp{glob.escape(final_out.suffix or '.onnx')}",
+        )
+        # No leading dot: ONNX external-data locations starting with '..'
+        # are rejected by onnx.load as path traversal.
+        tmp_out = final_out.with_name(
+            f"{final_out.stem}.{uuid.uuid4().hex}.tmp{final_out.suffix or '.onnx'}"
+        )
+        try:
+            self._export_onnx_to_path(
+                tmp_out,
+                precision=precision,
+                batch_size=batch_size,
+                dynamic_batch_size=dynamic_batch_size,
+                dynamic_spatial=dynamic_spatial,
+                opset_version=opset_version,
+                simplify=simplify,
+                verify=verify,
+                write_spec=False,
+                format_args=format_args,
+            )
+            _move_onnx_artifacts(tmp_out, final_out)
+        except Exception:
+            _drop_onnx_artifacts(tmp_out)
+            raise
+        if write_spec:
+            _maybe_write_postprocess_spec(self, final_out)
+        return final_out
+
+    @torch.no_grad()
+    def _export_onnx_to_path(
+        self,
+        out: Path | str,
+        *,
+        precision: str = "fp32",
+        batch_size: int = 1,
+        dynamic_batch_size: bool = True,
+        dynamic_spatial: bool = False,
+        opset_version: int | None = None,
+        simplify: bool = True,
+        verify: bool = True,
+        write_spec: bool = True,
+        format_args: dict[str, Any] | None = None,
+    ) -> Path:
         """Export the model to ONNX with verification gates.
 
         ``write_spec=False`` is used by the TensorRT/OpenVINO wrappers for
@@ -262,6 +331,7 @@ class ONNXExportMixin(nn.Module):
             # into the graph: it would produce a "dynamic" graph whose sizes
             # silently break elsewhere, so dynamic EXPORT requires the dynamo
             # path outright (no legacy fallback).
+            assert trace_error is not None
             raise AutoVisionError(_dynamic_export_error(trace_error)) from trace_error
         if program is None:
             # A strict-trace failure with STATIC axes is not fatal: the legacy
@@ -566,11 +636,19 @@ class ONNXExportMixin(nn.Module):
             from autovision.export.quantization import resolve_calibration_samples
 
             calibration_data = resolve_calibration_samples(self, calibration_data)
-        out = Path(out)
-        out.parent.mkdir(parents=True, exist_ok=True)
+        final_out = Path(out)
+        final_out.parent.mkdir(parents=True, exist_ok=True)
+        # Hygiene: only the int8 chain's own temp names (".int8.tmp…") —
+        # a kept "{stem}.fp32.onnx" reference must never match.
+        stem = glob.escape(final_out.stem)
+        sweep_stale_temp_files(final_out.parent, f"{stem}.*.int8.tmp.onnx")
+        sweep_stale_temp_files(final_out.parent, f"{stem}.*.int8.tmp.fp32.onnx")
+        tmp_out = final_out.with_name(
+            f"{final_out.stem}.{uuid.uuid4().hex}.int8.tmp.onnx"
+        )
 
         # 1. FP32 reference graph (passes the standard FP32 gate itself).
-        fp32_path = out.parent / f"{out.stem}.fp32.onnx"
+        fp32_path = tmp_out.parent / f"{tmp_out.stem}.fp32.onnx"
         try:
             self.export_onnx(
                 fp32_path,
@@ -585,7 +663,7 @@ class ONNXExportMixin(nn.Module):
             reader = calibration_reader or Int8CalibrationReader(
                 calibration_data, expected_input_names=list(self.model_input_spec.input_specs)
             )
-            quantize_onnx_int8(fp32_path, out, reader, quantization_config)
+            quantize_onnx_int8(fp32_path, tmp_out, reader, quantization_config)
             # The reader's sample count is a property of the QUANTIZATION
             # pass; capture it BEFORE the parity gate replays a sample
             # (its rewind+get_next would inflate the count otherwise).
@@ -593,15 +671,14 @@ class ONNXExportMixin(nn.Module):
 
             # 3. int8 parity gate: int8-ONNX vs FP32-ONNX on dim-1 sums.
             if verify:
-                self._verify_int8_parity(fp32_path, out, reader, parity_atol, parity_rtol)
+                self._verify_int8_parity(fp32_path, tmp_out, reader, parity_atol, parity_rtol)
         except Exception:
-            # A failed int8 chain — export, quantization OR the parity gate —
-            # must not leave the partial int8 graph nor the fp32 reference
-            # (plus dynamo's .data sidecars) behind.
-            _drop_onnx_artifacts(out, fp32_path)
+            # A failed int8 chain must not leave a partial graph or delete a
+            # pre-existing good export at the target path.
+            _drop_onnx_artifacts(tmp_out, fp32_path)
             raise
 
-        # 4. Quantization metadata.
+        # 4. Quantization metadata (written before the atomic publish).
         from autovision.export.quantization import (
             Int8QuantizationConfig,
             _int8_metadata_payload,
@@ -609,22 +686,25 @@ class ONNXExportMixin(nn.Module):
 
         config = quantization_config or Int8QuantizationConfig()
         _write_onnx_metadata(
-            out,
+            tmp_out,
             {
                 "int8_quantization": _int8_metadata_payload(config, num_calibration_samples),
                 "int8_parity_atol": str(parity_atol),
                 "int8_parity_rtol": str(parity_rtol),
             },
         )
+        _move_onnx_artifacts(tmp_out, final_out)
 
         # 5. FP32 reference bookkeeping (with the dynamo .data sidecar).
         if keep_fp32_reference:
-            logger.info("Kept FP32 reference graph at '%s'.", fp32_path)
+            kept_fp32 = final_out.parent / f"{final_out.stem}.fp32.onnx"
+            _move_onnx_artifacts(fp32_path, kept_fp32)
+            logger.info("Kept FP32 reference graph at '%s'.", kept_fp32)
         else:
             _drop_onnx_artifacts(fp32_path)
-        logger.info("Exported int8 ONNX model to '%s'.", out)
-        _maybe_write_postprocess_spec(self, out)
-        return out
+        logger.info("Exported int8 ONNX model to '%s'.", final_out)
+        _maybe_write_postprocess_spec(self, final_out)
+        return final_out
 
     def _verify_int8_parity(
         self,

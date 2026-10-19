@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from pydantic import Field
 
@@ -22,8 +22,8 @@ class ImageClassificationTrainArgs(TrainModelArgs):
     network (the backbone then trains with ``backbone_lr_factor`` × lr).
     """
 
-    default_batch_size: int = 128
-    default_steps: int = 10_000
+    default_batch_size: ClassVar[int] = 128
+    default_steps: ClassVar[int] = 10_000
 
     num_classes: int
     backbone: str = "torchvision/resnet18"

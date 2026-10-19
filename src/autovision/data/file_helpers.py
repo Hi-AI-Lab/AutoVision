@@ -36,10 +36,22 @@ def list_image_filenames_from_dir(image_dir: Path) -> Iterator[Path]:
 def open_image(filename: Path | str, num_channels: int = 3) -> torch.Tensor:
     """Decode an image to a uint8 (C, H, W) tensor.
 
-    Fast path: ``torchvision.io.read_image``. Fallback: PIL (tolerates
-    truncated files and exotic formats).
+    Fast path: ``torchvision.io.read_image``. Fallback: PIL for exotic
+    formats; EXIF orientation is normalized so boxes and pixels agree, and
+    truncated files raise instead of silently training on partial data.
     """
     mode = ImageReadMode.RGB if num_channels == 3 else ImageReadMode.UNCHANGED
+    # torchvision's fast decoder does not normalize EXIF rotation. Route
+    # oriented JPEGs through PIL so boxes and pixels share one frame.
+    if Path(filename).suffix.lower() in {".jpg", ".jpeg"}:
+        try:
+            from PIL import Image
+
+            with Image.open(filename) as image:
+                if image.getexif().get(274, 1) not in (None, 1):
+                    return _open_image_pil(filename, num_channels)
+        except Exception:  # noqa: BLE001 - the normal decoder reports it
+            pass
     try:
         return read_image(str(filename), mode=mode)
     except RuntimeError:
@@ -47,12 +59,15 @@ def open_image(filename: Path | str, num_channels: int = 3) -> torch.Tensor:
 
 
 def _open_image_pil(filename: Path | str, num_channels: int) -> torch.Tensor:
-    from PIL import Image, ImageFile
+    from PIL import Image, ImageFile, ImageOps
     from torchvision.transforms import functional as TF
 
-    ImageFile.LOAD_TRUNCATED_IMAGES = True
+    # Truncated images must fail loudly: silently decoding a partial image
+    # trains on pixels that no longer match its annotations.
+    ImageFile.LOAD_TRUNCATED_IMAGES = False
     try:
         with Image.open(filename) as image:
+            image = ImageOps.exif_transpose(image)
             if num_channels == 3:
                 image = image.convert("RGB")
             elif num_channels == 1:

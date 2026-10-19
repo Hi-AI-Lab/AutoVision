@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from autovision._version import __version__
+from autovision.runtime.fs_utils import sweep_stale_temp_files
 
 __all__ = ["RunManifest", "build_run_manifest", "write_run_manifest"]
 
@@ -83,6 +84,7 @@ class RunManifest:
     def save(self, out_dir: str | Path, *, resume: bool | None = None) -> Path:
         directory = Path(out_dir)
         directory.mkdir(parents=True, exist_ok=True)
+        sweep_stale_temp_files(directory, "run_manifest*.tmp")
         is_resume = self.resume if resume is None else resume
         if is_resume:
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")

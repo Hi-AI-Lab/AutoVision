@@ -134,10 +134,15 @@ class LineZone:
     def update(self, tracks: Sequence[Track]) -> LineZoneCounts:
         """Update crossing history with one frame's tracks."""
         self._frame += 1
-        # Drop tracks that have been absent for ``max_age`` frames before
-        # matching this frame, so a recycled id starts a fresh side history.
-        for track_id in list(self._side):
-            if self._frame - self._last_seen.get(track_id, 0) >= self.max_age:
+        # A track absent for more than max_age frames starts a fresh life.
+        # Check the gap before matching so a reappearing id cannot produce a
+        # spurious crossing from its previous side history.
+        for track in tracks:
+            track_id = int(track.track_id)
+            if (
+                self._frame - self._last_seen.get(track_id, 0)
+                > self.max_age
+            ):
                 self._side.pop(track_id, None)
                 self._last_seen.pop(track_id, None)
         for track in tracks:
@@ -162,6 +167,12 @@ class LineZone:
                 self.counts.out_per_class[key] = (
                     self.counts.out_per_class.get(key, 0) + 1
                 )
+        # Evict tracks that were absent for max_age frames; current tracks
+        # were refreshed above, so a gap of exactly max_age is still allowed.
+        for track_id in list(self._side):
+            if self._frame - self._last_seen.get(track_id, 0) >= self.max_age:
+                self._side.pop(track_id, None)
+                self._last_seen.pop(track_id, None)
         return self.counts
 
     def reset(self) -> None:
@@ -269,15 +280,18 @@ class TrackSmoother:
     def update(self, tracks: Sequence[Track]) -> list[Track]:
         """Return tracks with averaged boxes/scores, preserving ids and classes."""
         self._frame += 1
-        # Evict stale histories BEFORE appending: a track that reappears after
-        # a gap must not blend frames from its previous life.
-        for track_id in list(self._history):
-            if self._frame - self._history[track_id].last_seen >= self.max_age:
-                self._history.pop(track_id, None)
         smoothed: list[Track] = []
         for track in tracks:
             track_id = int(track.track_id)
             history = self._history.get(track_id)
+            # A gap longer than max_age starts a new history; a gap of exactly
+            # max_age is still within the allowed tracking window.
+            if (
+                history is not None
+                and self._frame - history.last_seen > self.max_age
+            ):
+                self._history.pop(track_id, None)
+                history = None
             if history is None:
                 history = _TrackHistory(
                     boxes=deque(maxlen=self.length),
@@ -306,6 +320,9 @@ class TrackSmoother:
                     age=track.age,
                 )
             )
+        for track_id in list(self._history):
+            if self._frame - self._history[track_id].last_seen >= self.max_age:
+                self._history.pop(track_id, None)
         return smoothed
 
     def reset(self) -> None:

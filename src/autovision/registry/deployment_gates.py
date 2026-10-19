@@ -112,14 +112,25 @@ def _metadata_path(entry: RegistryEntry, key: str) -> Path | None:
 class ParityGate:
     name = "parity"
 
+    def __init__(self, *, require_report: bool = True) -> None:
+        # A self-asserted metadata flag is not evidence: require the report
+        # file (and, when recorded, its sha256) by default.
+        self.require_report = require_report
+
     def check(self, entry: RegistryEntry) -> list[str]:
-        if entry.metadata.get("parity_passed") is True:
+        if not self.require_report and entry.metadata.get("parity_passed") is True:
             return []
         path = _metadata_path(entry, "parity_report")
         if path is None:
-            return ["no parity_report or parity_passed in registry metadata"]
+            candidate = Path(str(entry.path) + ".parity.json")
+            path = candidate if candidate.is_file() else None
+        if path is None:
+            return ["no parity_report file (or artifact.parity.json sidecar)"]
         if not path.is_file():
             return [f"parity report missing: {path}"]
+        expected_sha = entry.metadata.get("parity_report_sha256")
+        if expected_sha and compute_file_sha256(path) != expected_sha:
+            return ["parity report sha256 does not match registry metadata"]
         try:
             payload = json.loads(path.read_text())
         except Exception as error:  # noqa: BLE001

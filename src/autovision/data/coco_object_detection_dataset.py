@@ -16,6 +16,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from autovision.data.label_helpers import contiguous_class_id_map
+from autovision.errors import AutoVisionError
 
 __all__ = ["COCOObjectDetectionDataArgs"]
 
@@ -89,9 +90,16 @@ class COCOObjectDetectionDataArgs(BaseModel):
         images_dir = split_args.images or Path(split_args.annotations).parent
 
         image_id_to_file: dict[int, tuple[str, int, int]] = {}
+        images_root = Path(images_dir).resolve()
         for image in annotations.get("images", []):
+            candidate = (Path(images_dir) / str(image["file_name"])).resolve()
+            if not candidate.is_relative_to(images_root):
+                raise AutoVisionError(
+                    "COCO image 'file_name' escapes the images directory: "
+                    f"{image['file_name']!r} (resolved to '{candidate}')."
+                )
             image_id_to_file[int(image["id"])] = (
-                str(images_dir / image["file_name"]),
+                str(candidate),
                 int(image["width"]),
                 int(image["height"]),
             )

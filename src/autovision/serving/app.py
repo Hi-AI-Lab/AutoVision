@@ -44,6 +44,7 @@ import json
 import logging
 import math
 import secrets
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -165,10 +166,14 @@ def _client_key(request: Any, *, trust_proxy_headers: bool) -> str:
 
 def _engine_info(engine: Any) -> dict[str, Any]:
     network = getattr(engine, "network", None)
+    artifact = getattr(engine, "artifact", None)
+    # Probes are unauthenticated by design; expose only the filename, never
+    # the deployment's absolute path.
+    artifact_name = Path(artifact).name if artifact else None
     return {
         "backend": getattr(engine, "backend", None),
         "model": type(network).__name__ if network is not None else None,
-        "artifact": str(engine.artifact) if getattr(engine, "artifact", None) else None,
+        "artifact": artifact_name,
         "openvino_device": getattr(engine, "openvino_device", None),
     }
 
@@ -212,6 +217,7 @@ def create_app(
     max_image_pixels: int = _DEFAULT_MAX_IMAGE_PIXELS,
     max_concurrency: int = 1,
     queue_timeout_s: float | None = 30.0,
+    inference_timeout_s: float | None = 120.0,
     mask_format: str = "rle",
     max_json_elements: int = 10_000,
     rate_limit_per_minute: int | None = None,
@@ -236,7 +242,11 @@ def create_app(
     guards default to production-safe values; ``max_concurrency`` stays at
     1 because the TensorRT/OpenVINO runners are not thread-safe.
     ``queue_timeout_s`` bounds the wait for an inference slot (503 on
-    overload; ``None`` waits indefinitely). ``docs_enabled`` exposes
+    overload; ``None`` waits indefinitely). ``inference_timeout_s`` bounds
+    the engine call itself (504 on timeout; the engine is then marked
+    unresponsive and later requests return 503 until restart, because a
+    thread stuck in a non-thread-safe backend cannot be cancelled safely).
+    ``docs_enabled`` exposes
     FastAPI's ``/docs``/``/openapi.json`` (off by default: they reveal the
     inference schema). ``protect_observability_endpoints`` puts ``/metrics``
     and ``/drift`` behind the same API key (probes stay public for Kubernetes).
@@ -276,6 +286,11 @@ def create_app(
     if queue_timeout_s is not None and queue_timeout_s <= 0:
         raise AutoVisionError(
             f"queue_timeout_s must be > 0 or None, got {queue_timeout_s}."
+        )
+    if inference_timeout_s is not None and inference_timeout_s <= 0:
+        raise AutoVisionError(
+            "inference_timeout_s must be > 0 or None, got "
+            f"{inference_timeout_s}."
         )
     if mask_format not in {"rle", "dense", "none"}:
         raise AutoVisionError(
@@ -375,6 +390,10 @@ def create_app(
             {"variant": name}, help_text="1 when this variant is callable",
         )
     inference_slots = asyncio.Semaphore(max_concurrency)
+    # Set when an engine call exceeds inference_timeout_s. The worker thread
+    # may still be inside a non-thread-safe backend, so the slot stays held
+    # and the process must be restarted rather than reusing the engine.
+    inference_poisoned = threading.Event()
     docs_kwargs = (
         {}
         if docs_enabled
@@ -389,14 +408,42 @@ def create_app(
         request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
         request.state.request_id = request_id
         started = time.perf_counter()
-        response = await call_next(request)
-        response.headers["X-Request-ID"] = request_id
-        logger.info(
-            "request method=%s path=%s status=%d latency_ms=%.2f request_id=%s",
-            request.method, request.url.path, response.status_code,
-            (time.perf_counter() - started) * 1000.0, request_id,
+        status = 500
+        try:
+            response = await call_next(request)
+            status = response.status_code
+            response.headers["X-Request-ID"] = request_id
+            return response
+        finally:
+            # Log in finally so unhandled 500s still carry the request id.
+            logger.info(
+                "request method=%s path=%s status=%d latency_ms=%.2f request_id=%s",
+                request.method, request.url.path, status,
+                (time.perf_counter() - started) * 1000.0, request_id,
+            )
+
+    @app.exception_handler(Exception)
+    async def unhandled_exception(request: Request, exc: Exception) -> Any:
+        request_id = getattr(request.state, "request_id", uuid.uuid4().hex)
+        logger.exception(
+            "unhandled request error path=%s request_id=%s",
+            request.url.path,
+            request_id,
         )
-        return response
+        # /predict already counted its 500 before re-raising; avoid a double
+        # count while still counting failures from other endpoints.
+        if not getattr(request.state, "counted_500", False):
+            metrics.inc(
+                "autovision_requests_total",
+                {"endpoint": request.url.path, "status": "500"},
+                help_text=_REQUESTS_HELP,
+            )
+            metrics.inc("autovision_errors_total", help_text=_ERRORS_HELP)
+        return JSONResponse(
+            {"error": "Internal server error.", "request_id": request_id},
+            status_code=500,
+            headers={"X-Request-ID": request_id},
+        )
 
     def _select_variant(request: Request) -> str | None:
         requested = request.headers.get("x-ab-variant")
@@ -429,6 +476,29 @@ def create_app(
             help_text=_VARIANTS_HELP,
         )
 
+    def _throttle(request: Request, endpoint: str) -> Any:
+        """Apply the shared token bucket before auth; return a 429 or None."""
+        if limiter is None:
+            return None
+        key = _client_key(request, trust_proxy_headers=trust_proxy_headers)
+        allowed, retry_after = limiter.allow(key)
+        if allowed:
+            return None
+        metrics.inc(
+            "autovision_requests_total",
+            {"endpoint": endpoint, "status": "429"},
+            help_text=_REQUESTS_HELP,
+        )
+        return JSONResponse(
+            {
+                "error": "Rate limit exceeded.",
+                "request_id": getattr(request.state, "request_id", ""),
+                "retry_after_s": retry_after,
+            },
+            status_code=429,
+            headers={"Retry-After": str(max(1, math.ceil(retry_after)))},
+        )
+
     def _update_drift_metrics(report: dict[str, Any]) -> None:
         status = report.get("status")
         if status is not None:
@@ -456,10 +526,37 @@ def create_app(
             "threshold": threshold,
             "variant": default_variant,
             "variants": sorted(engines),
+            # Liveness stays 200 (restarting the stuck engine thread does
+            # not help), but the flag lets orchestrators trigger a restart.
+            "poisoned": inference_poisoned.is_set(),
         }
 
     @app.get("/readyz")
     def readyz() -> Any:
+        if inference_poisoned.is_set():
+            # The process must be restarted; report not-ready so an
+            # orchestrator removes this instance from load balancing.
+            metrics.set_gauge(
+                "autovision_model_ready", 0.0,
+                help_text="1 when every inference engine is callable",
+            )
+            for name in engines:
+                metrics.set_gauge(
+                    "autovision_variant_ready", 0.0,
+                    {"variant": name},
+                    help_text="1 when this variant is callable",
+                )
+            return JSONResponse(
+                {
+                    "ready": False,
+                    "poisoned": True,
+                    "error": (
+                        "inference engine timed out and can no longer be "
+                        "used; restart the process"
+                    ),
+                },
+                status_code=503,
+            )
         current = {
             name: callable(getattr(candidate, "run_batch", None))
             for name, candidate in engines.items()
@@ -492,7 +589,16 @@ def create_app(
 
     @app.get("/drift")
     def drift(request: Request) -> Any:
+        throttled = _throttle(request, "drift")
+        if throttled is not None:
+            return throttled
         if protect_observability_endpoints and not _authorized(request, api_key):
+            metrics.inc(
+                "autovision_requests_total",
+                {"endpoint": "drift", "status": "401"},
+                help_text=_REQUESTS_HELP,
+            )
+            metrics.inc("autovision_errors_total", help_text=_ERRORS_HELP)
             return JSONResponse({"error": "Unauthorized."}, status_code=401)
         if drift_monitor is None:
             return {"enabled": False}
@@ -502,7 +608,16 @@ def create_app(
 
     @app.get("/metrics")
     def prometheus_metrics(request: Request) -> Any:
+        throttled = _throttle(request, "metrics")
+        if throttled is not None:
+            return throttled
         if protect_observability_endpoints and not _authorized(request, api_key):
+            metrics.inc(
+                "autovision_requests_total",
+                {"endpoint": "metrics", "status": "401"},
+                help_text=_REQUESTS_HELP,
+            )
+            metrics.inc("autovision_errors_total", help_text=_ERRORS_HELP)
             return JSONResponse({"error": "Unauthorized."}, status_code=401)
         if drift_monitor is not None:
             # A Prometheus scrape is the natural sampling point; computing PSI
@@ -560,6 +675,25 @@ def create_app(
                     "request_id": request_id,
                 },
                 status_code=400,
+            )
+        request.state.variant = variant
+        if inference_poisoned.is_set():
+            metrics.inc(
+                "autovision_requests_total",
+                {"endpoint": "predict", "status": "503"},
+                help_text=_REQUESTS_HELP,
+            )
+            _count_variant(variant, "503")
+            return JSONResponse(
+                {
+                    "error": (
+                        "Inference engine is unresponsive after a previous "
+                        "timeout; restart the service."
+                    ),
+                    "request_id": request_id,
+                },
+                status_code=503,
+                headers={"Retry-After": "60"},
             )
         try:
             body = await _read_body_limited(request, max_body_bytes)
@@ -628,6 +762,7 @@ def create_app(
                 },
                 status_code=413,
             )
+        slot_acquired = False
         try:
             if queue_timeout_s is None:
                 await inference_slots.acquire()
@@ -655,24 +790,65 @@ def create_app(
                         status_code=503,
                         headers={"Retry-After": "1"},
                     )
-            try:
+            slot_acquired = True
+            if inference_timeout_s is None:
                 records = await run_in_threadpool(
                     _predict_one, engines[variant], images_raw
                 )
-                if len(records) != len(images_raw):
-                    raise RuntimeError(
-                        "Engine returned "
-                        f"{len(records)} records for {len(images_raw)} images."
+            else:
+                try:
+                    records = await asyncio.wait_for(
+                        run_in_threadpool(
+                            _predict_one, engines[variant], images_raw
+                        ),
+                        timeout=inference_timeout_s,
                     )
-                results = await run_in_threadpool(
-                    _serialize_records,
-                    records,
-                    names,
-                    mask_format,
-                    max_json_elements,
+                except asyncio.TimeoutError:
+                    # The worker may still be inside the engine. Keep the
+                    # slot held and poison the process: reusing a stuck
+                    # TensorRT/OpenVINO runner would be unsafe.
+                    inference_poisoned.set()
+                    metrics.inc(
+                        "autovision_requests_total",
+                        {"endpoint": "predict", "status": "504"},
+                        help_text=_REQUESTS_HELP,
+                    )
+                    _count_variant(variant, "504")
+                    metrics.inc("autovision_errors_total", help_text=_ERRORS_HELP)
+                    metrics.inc(
+                        "autovision_inference_timeouts_total",
+                        help_text="Engine calls that exceeded inference_timeout_s",
+                    )
+                    logger.error(
+                        "Inference timed out after %.3fs (request_id=%s); "
+                        "marking the engine unresponsive.",
+                        inference_timeout_s,
+                        request_id,
+                    )
+                    return JSONResponse(
+                        {
+                            "error": (
+                                "Inference timed out after "
+                                f"{inference_timeout_s}s; the engine is now "
+                                "unresponsive and the service must be restarted."
+                            ),
+                            "request_id": request_id,
+                        },
+                        status_code=504,
+                        headers={"Retry-After": "60"},
+                    )
+            if len(records) != len(images_raw):
+                raise RuntimeError(
+                    "Engine returned "
+                    f"{len(records)} records for {len(images_raw)} images."
                 )
-            finally:
-                inference_slots.release()
+            results = await run_in_threadpool(
+                _serialize_records,
+                records,
+                names,
+                mask_format,
+                max_json_elements,
+            )
         except _PayloadTooLarge as error:
             metrics.inc(
                 "autovision_requests_total",
@@ -697,7 +873,9 @@ def create_app(
             )
         except Exception:
             # Anything else becomes FastAPI's 500 — count it before re-raising
-            # so a failing deployment stays visible on /metrics.
+            # so a failing deployment stays visible on /metrics. The global
+            # handler must not count the same failure twice.
+            request.state.counted_500 = True
             metrics.inc(
                 "autovision_requests_total",
                 {"endpoint": "predict", "status": "500"},
@@ -711,6 +889,9 @@ def create_app(
                 help_text="Per-request predict latency (seconds)",
             )
             raise
+        finally:
+            if slot_acquired and not inference_poisoned.is_set():
+                inference_slots.release()
         elapsed = time.perf_counter() - started
         metrics.inc(
             "autovision_requests_total",
