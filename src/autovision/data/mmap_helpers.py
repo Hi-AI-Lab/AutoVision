@@ -173,19 +173,26 @@ def get_dataset_mmap_file(
     if is_local_rank_zero():
         try:
             write_items_to_file(items_fn(), tmp_path)
-            tmp_path.replace(mmap_filepath.resolve())
+            # Publish the refcount BEFORE the mmap file becomes visible,
+            # under the same lock: a concurrent rank's stale-file check
+            # must never observe an mmap file without an active reference.
+            with FileLock(_lock_path(mmap_filepath), timeout=_REF_COUNT_TIMEOUT):
+                _ref_count_path(mmap_filepath).write_text(json.dumps(1))
+                tmp_path.replace(mmap_filepath.resolve())
         finally:
             tmp_path.unlink(missing_ok=True)
-    else:
-        timeout_sec = Env.MMAP_TIMEOUT_SEC.value
-        start_time = time.time()
-        while not mmap_filepath.exists():
-            if timeout_sec >= 0 and time.time() - start_time > timeout_sec:
-                raise RuntimeError(
-                    f"Rank waited {timeout_sec:.0f}s for mmap file "
-                    f"'{mmap_filepath}' which never appeared."
-                )
-            time.sleep(_POLL_INTERVAL_SEC)
+        # The initialized refcount above already holds this rank's
+        # reference; incrementing again would leak one.
+        return MemoryMappedSequence.from_file(mmap_filepath)
+    timeout_sec = Env.MMAP_TIMEOUT_SEC.value
+    start_time = time.time()
+    while not mmap_filepath.exists():
+        if timeout_sec >= 0 and time.time() - start_time > timeout_sec:
+            raise RuntimeError(
+                f"Rank waited {timeout_sec:.0f}s for mmap file "
+                f"'{mmap_filepath}' which never appeared."
+            )
+        time.sleep(_POLL_INTERVAL_SEC)
     sequence = MemoryMappedSequence.from_file(mmap_filepath)
     _increment_ref_count(mmap_filepath)
     return sequence

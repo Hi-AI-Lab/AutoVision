@@ -26,6 +26,7 @@ Covered refactors:
 - ``_pair_two_crop``: four host transfers packed into two.
 """
 
+import importlib.util
 import math
 
 import pytest
@@ -1199,6 +1200,10 @@ class TestGradientAccumulationResolution:
         with pytest.raises(ValueError, match="auto"):
             self._resolve("sometimes", 64, 16)
 
+    @pytest.mark.skipif(
+        importlib.util.find_spec("timm") is None,
+        reason="detr/n+s backbone needs the timm extra (pip install -e '.[timm]')",
+    )
     def test_auto_accumulation_end_to_end(self, tmp_path):
         """accum=round(8/2)=4 over the 8-image coco8 smoke set."""
         from autovision import train_object_detection

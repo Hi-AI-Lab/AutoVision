@@ -33,6 +33,11 @@ requires_gla = pytest.mark.skipif(
     reason="GTR GLA forward needs flash-linear-attention + CUDA",
 )
 
+requires_fla = pytest.mark.skipif(
+    not _fla,
+    reason="GTR load tests need flash-linear-attention (pip install -e '.[gtr]')",
+)
+
 
 def _depth_checkpoint() -> Path:
     try:
@@ -56,6 +61,7 @@ class TestGtrDepthLoad:
         }
 
     @pytest.mark.parametrize("variant", ["l", "x"])
+    @requires_fla
     def test_lx_official_checkpoint_loads_completely(self, variant):
         try:
             resolve_gtr_asset(f"gtrdepth_{variant}")
@@ -70,6 +76,7 @@ class TestGtrDepthLoad:
         assert net.load_report["unexpected"] == 0
         assert net.load_report["transferred"] == 132
 
+    @requires_fla
     def test_official_checkpoint_loads_completely(self, depth_checkpoint):
         from autovision.tasks.depth_estimation.gtr import GTRDepthEstimation
 

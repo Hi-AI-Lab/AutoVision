@@ -35,6 +35,11 @@ requires_gla = pytest.mark.skipif(
     reason="GTR GLA forward needs flash-linear-attention + CUDA",
 )
 
+requires_fla = pytest.mark.skipif(
+    not _fla,
+    reason="GTR load tests need flash-linear-attention (pip install -e '.[gtr]')",
+)
+
 
 def _semseg_checkpoint() -> Path:
     try:
@@ -48,6 +53,7 @@ def semseg_checkpoint() -> Path:
     return _semseg_checkpoint()
 
 
+@requires_fla
 class TestGtrSemSegFamily:
     def test_variant_table_matches_official_widths(self):
         # configs/semseg/cityscapes_finetune/gtrsemseg_{s,m,l,x}.yml

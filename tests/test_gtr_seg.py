@@ -37,6 +37,11 @@ requires_gla = pytest.mark.skipif(
     reason="GTR GLA forward needs flash-linear-attention + CUDA",
 )
 
+requires_fla = pytest.mark.skipif(
+    not _fla,
+    reason="GTR load tests need flash-linear-attention (pip install -e '.[gtr]')",
+)
+
 
 def _seg_checkpoint() -> Path:
     try:
@@ -107,6 +112,7 @@ class TestGtrSegLoad:
         assert net.load_report["unexpected"] == 0
         assert net.load_report["transferred"] == 309
 
+    @requires_fla
     def test_official_checkpoint_loads_completely(self, seg_checkpoint):
         """Backbone strict + encoder/decoder with the norm rename; the
         mask head rides ``decoder.decoder.segmentation_head.*`` (official
@@ -132,6 +138,7 @@ class TestGtrSegLoad:
         assert all(k.startswith("decoder.decoder.segmentation_head.") for k in head_keys)
         assert len(head_keys) == 35
 
+    @requires_fla
     def test_det_path_unchanged_by_mask_flag(self):
         """Constructing without mask_downsample_ratio adds no mask keys
         (det regression guard)."""

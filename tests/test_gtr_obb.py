@@ -34,6 +34,11 @@ requires_gla = pytest.mark.skipif(
     reason="GTR GLA forward needs flash-linear-attention + CUDA",
 )
 
+requires_fla = pytest.mark.skipif(
+    not _fla,
+    reason="GTR load tests need flash-linear-attention (pip install -e '.[gtr]')",
+)
+
 
 def _obb_checkpoint() -> Path:
     try:
@@ -53,6 +58,7 @@ class TestGtrObbLoad:
         assert GTR_OBB_VARIANTS["s"] == (192, 3, 4.0, 192, 512, 4)
         assert GTR_OBB_VARIANTS["x"] == (384, 6, 6.0, 256, 2048, 4)
 
+    @requires_fla
     def test_x_official_checkpoint_loads_completely(self):
         try:
             resolve_gtr_asset("gtrobb_x_dota")
@@ -75,6 +81,7 @@ class TestGtrObbLoad:
         offsets = net.decoder.decoder.layers[0].cross_attn.sampling_offsets
         assert offsets.weight.shape == (8 * 12 * 2, 256)
 
+    @requires_fla
     def test_official_checkpoint_loads_completely(self, obb_checkpoint):
         from autovision.tasks.oriented_detection.gtr import (
             GTRROBBOrientedDetection,

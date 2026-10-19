@@ -8,6 +8,7 @@ that dynamic spatial export requires the dynamo exporter (the legacy
 TorchScript path bakes the traced size into the graph).
 """
 
+import importlib.util
 import json
 import logging
 
@@ -161,6 +162,10 @@ class TestDynamicSpatialExport:
 class TestDynamicSpatialAcrossFamilies:
     """D2 coverage across backbone families (roadmap §3.6 遗留 ③)."""
 
+    @pytest.mark.skipif(
+        importlib.util.find_spec("timm") is None,
+        reason="HGNetV2 backbone needs the timm extra (pip install -e '.[timm]')",
+    )
     def test_hgnetv2_cnn_exports_and_runs_at_unseen_sizes(self, tmp_path):
         """The timm CNN line (HGNetV2 spectrum backbones) is size-flexible:
         dynamic H/W export + parity at two sizes the export never traced."""
