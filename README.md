@@ -785,6 +785,23 @@ python scripts/check_docs_links.py && mkdocs build --strict              # 文�
 
 完整边界、TensorRT 11 / int8 注记与 GTR 部署工程现状见[已知限制](docs/known_limits.md)。
 
+## 行业方案
+
+基于 AutoVision 的行业场景方案（方案引擎经 `pip install autovision-framework`
+消费本框架稳定接缝；接入设计见
+[行业方案接入](https://hi-agi-lab.github.io/AutoVision/ecosystem/)）：
+
+| 仓库 | 场景 |
+| --- | --- |
+| [ai-traffic](https://github.com/hi-agi-lab/ai-traffic) | 交通事件三域：遗撒散落物 + 事故复合评分分级 + 拥堵监测 |
+| [ai-wildfire](https://github.com/hi-agi-lab/ai-wildfire) | 林草火险 + 防汛防台视频分析 |
+| [ai-illop](https://github.com/hi-agi-lab/ai-illop) | 违规操作视频监管（SOP 分解、注册表驱动逐项验收） |
+| [ai-conflict](https://github.com/hi-agi-lab/ai-conflict) | 治安冲突视频分析（T3 长尾专项） |
+| [ai-perimeter](https://github.com/hi-agi-lab/ai-perimeter) | 周界防护视频分析 |
+| [ai-security](https://github.com/hi-agi-lab/ai-security) | 安防通用视频分析 |
+| [ai-life-line](https://github.com/hi-agi-lab/ai-life-line) | 生命线工程视频分析 |
+| [ai-urban](https://github.com/hi-agi-lab/ai-urban) | 城市治理视频分析 |
+
 ## 许可与溯源
 
 核心代码 Apache-2.0；许可证全文见仓库根目录 `LICENSE`

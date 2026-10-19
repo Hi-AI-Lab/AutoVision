@@ -209,6 +209,23 @@ gated; GTR export is blocked by the GLA kernel lowering; STA-era ViT user-held
 checkpoints are rejected because the DEIMv2 spatial prior was removed. See
 [docs/known_limits.md](docs/known_limits.md) for the full list.
 
+## Industry solutions
+
+Vertical scenario solutions built on AutoVision (solution engines consume the
+framework's stable seams via `pip install autovision-framework`; see the
+[ecosystem design](https://hi-agi-lab.github.io/AutoVision/en/ecosystem/)):
+
+| Repository | Scenario |
+| --- | --- |
+| [ai-traffic](https://github.com/hi-agi-lab/ai-traffic) | Road incidents: FOD + composite accident scoring + congestion |
+| [ai-wildfire](https://github.com/hi-agi-lab/ai-wildfire) | Wildfire + flood/typhoon video analytics |
+| [ai-illop](https://github.com/hi-agi-lab/ai-illop) | SOP violation monitoring (checklist-driven acceptance) |
+| [ai-conflict](https://github.com/hi-agi-lab/ai-conflict) | Public-order conflict analytics (long-tail T3) |
+| [ai-perimeter](https://github.com/hi-agi-lab/ai-perimeter) | Perimeter intrusion video analytics |
+| [ai-security](https://github.com/hi-agi-lab/ai-security) | General security video analytics |
+| [ai-life-line](https://github.com/hi-agi-lab/ai-life-line) | Lifeline infrastructure video analytics |
+| [ai-urban](https://github.com/hi-agi-lab/ai-urban) | Urban governance video analytics |
+
 ## License and provenance
 
 Core code is Apache-2.0; the full text is in repository `LICENSE` and at
