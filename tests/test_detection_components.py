@@ -277,7 +277,7 @@ class TestDecoderAndCriterion:
         expected = (
             losses["loss_vfl"] + 5 * losses["loss_bbox"] + 2 * losses["loss_giou"]
         ).detach()
-        assert losses["loss"].detach() == pytest.approx(expected, rel=1e-5)
+        assert losses["loss"].item() == pytest.approx(expected.item(), rel=1e-5)
 
     def test_vfl_survives_degenerate_pred_boxes(self):
         # Baseline sanitizes the predicted side before the quality IoU: a
@@ -334,7 +334,7 @@ class TestDecoderAndCriterion:
             for key, value in losses.items()
             if key != "loss"
         )
-        assert losses["loss"].detach() == pytest.approx(rebuilt, rel=1e-5)
+        assert losses["loss"].item() == pytest.approx(rebuilt.item(), rel=1e-5)
 
 
 class TestTrainWindow:

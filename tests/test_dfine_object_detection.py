@@ -442,7 +442,7 @@ class TestDFineCriterion:
             for key, value in losses.items()
             if key != "loss"
         )
-        assert losses["loss"].detach() == pytest.approx(rebuilt, rel=1e-5)
+        assert losses["loss"].item() == pytest.approx(rebuilt.item(), rel=1e-5)
 
     def test_dn_pre_outputs_supervised(self):
         # The denoising segment of the pre-output head is supervised like

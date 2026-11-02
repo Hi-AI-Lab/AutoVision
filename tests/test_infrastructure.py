@@ -119,6 +119,10 @@ class TestDocs:
 
     def test_mkdocs_config_nav_targets_exist(self):
         pytest.importorskip("yaml")
+        pytest.importorskip(
+            "material.extensions.emoji.twemoji",
+            reason="mkdocs.yml uses mkdocs-material emoji tags; install .[docs]",
+        )
         import yaml
 
         config = yaml.safe_load((ROOT / "mkdocs.yml").read_text())
@@ -132,6 +136,10 @@ class TestDocs:
 
     def test_every_docs_page_in_nav_or_excluded(self):
         pytest.importorskip("yaml")
+        pytest.importorskip(
+            "material.extensions.emoji.twemoji",
+            reason="mkdocs.yml uses mkdocs-material emoji tags; install .[docs]",
+        )
         import yaml
 
         config = yaml.safe_load((ROOT / "mkdocs.yml").read_text())
@@ -174,6 +182,10 @@ class TestDocs:
         """Internal roadmap/analysis material must not ship in the public tree."""
         assert not (ROOT / "docs" / "strategy").exists()
         pytest.importorskip("yaml")
+        pytest.importorskip(
+            "material.extensions.emoji.twemoji",
+            reason="mkdocs.yml uses mkdocs-material emoji tags; install .[docs]",
+        )
         import yaml
 
         config = yaml.safe_load((ROOT / "mkdocs.yml").read_text())
@@ -198,6 +210,10 @@ class TestDocs:
     def test_docs_i18n_defaults_to_chinese_with_english_alternate(self):
         """Chinese is the default locale; English is built under /en/."""
         pytest.importorskip("yaml")
+        pytest.importorskip(
+            "material.extensions.emoji.twemoji",
+            reason="mkdocs.yml uses mkdocs-material emoji tags; install .[docs]",
+        )
         import yaml
 
         config = yaml.safe_load((ROOT / "mkdocs.yml").read_text())
