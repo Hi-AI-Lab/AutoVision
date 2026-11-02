@@ -97,6 +97,36 @@ def _move_onnx_artifacts(source: Path, target: Path) -> None:
         os.replace(source_data, target.with_suffix(target.suffix + ".data"))
 
 
+def _sweep_orphan_external_data(out: Path) -> None:
+    """Delete the dynamo exporter's ``<out>.data`` sidecar when the final
+    graph no longer references external data.
+
+    torch's dynamo exporter externalizes all initializers, then onnxslim
+    inlines them back into the graph; the success path
+    (:func:`_move_onnx_artifacts`) still moves the sidecar next to the final
+    artifact, where it is dead weight (tens of MB per artifact) that a
+    deployer packaging ``model.onnx*`` would ship by accident. Graphs that
+    genuinely keep external initializers (e.g. beyond the ~2GB protobuf
+    limit) keep their sidecar.
+    """
+    data = out.with_suffix(out.suffix + ".data")
+    if not data.exists():
+        return
+    import onnx
+    from onnx import TensorProto
+
+    # load_external_data=False keeps the graph's external references intact
+    # (the default loader materializes them and clears the data_location
+    # marker) and skips reading gigabytes of weights just to check flags.
+    model = onnx.load(str(out), load_external_data=False)
+    external = any(
+        tensor.data_location == TensorProto.EXTERNAL
+        for tensor in model.graph.initializer
+    )
+    if not external:
+        data.unlink(missing_ok=True)
+
+
 def _dynamic_export_error(exc: BaseException) -> str:
     """Actionable message for a failed dynamic-spatial dynamo export.
 
@@ -151,7 +181,7 @@ class ONNXExportMixin(nn.Module):
         raise NotImplementedError
 
     def verify_onnx_export_outputs(
-        self, torch_outputs: Any, onnx_outputs: list
+        self, torch_outputs: Any, onnx_outputs: list, *, precision: str = "fp32"
     ) -> None:  # pragma: no cover - overridden
         raise NotImplementedError
 
@@ -164,6 +194,32 @@ class ONNXExportMixin(nn.Module):
             if blocker is not None:
                 return blocker
         return None
+
+    def _prepare_onnx_export_modules(self) -> list[nn.Module]:
+        """Duck-typed module-tree hook (same idiom as ``_export_blocker``):
+        call ``prepare_onnx_export()`` on every submodule that declares it.
+
+        Submodules whose eager forward runs ops the tracer cannot lower (the
+        GTR GLA Triton/CUDA kernels, the encoder's CUDA-stream fork/join,
+        einsum in the segmentation head) swap in an ONNX-lowerable path for
+        the duration of one trace and undo it in
+        :meth:`_restore_onnx_export_modules`. Called AFTER ``deploy()`` so a
+        deploy-time ``convert_to_deploy`` cannot clobber the swapped state.
+        """
+        prepared: list[nn.Module] = []
+        for module in self.modules():
+            prepare = getattr(module, "prepare_onnx_export", None)
+            if callable(prepare):
+                prepare()
+                prepared.append(module)
+        return prepared
+
+    @staticmethod
+    def _restore_onnx_export_modules(prepared: list[nn.Module]) -> None:
+        """Undo :meth:`_prepare_onnx_export_modules` (never raises past the
+        real export error: each hook is a plain state flip)."""
+        for module in prepared:
+            module.restore_after_export()
 
     def onnx_export_metadata(self) -> dict[str, str]:
         metadata = {
@@ -271,6 +327,15 @@ class ONNXExportMixin(nn.Module):
         blocker = self._export_blocker()
         if blocker is not None:
             raise AutoVisionError(blocker)
+        if dynamic_spatial:
+            # Duck-typed module-tree scan (same idiom as ``export_blocker``):
+            # models whose graphs are inherently fixed-shape (the GTR GLA
+            # recurrence unrolls for the variant's token count) refuse here
+            # instead of grinding through symbolic-shape tracing.
+            for submodule in self.modules():
+                blocker = getattr(submodule, "dynamic_spatial_blocker", None)
+                if blocker:
+                    raise AutoVisionError(blocker)
 
         out = Path(out)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -285,6 +350,43 @@ class ONNXExportMixin(nn.Module):
         module.to(torch.float32)
         if hasattr(self, "deploy"):
             self.deploy()
+        # The export-prep hooks must come after deploy(): a convert_to_deploy
+        # may re-enable eager-only fast paths (e.g. the encoder's parallel
+        # stages) that the hook then turns back off for the trace.
+        prepared = self._prepare_onnx_export_modules()
+        try:
+            return self._trace_and_write_onnx(
+                out, module,
+                precision=precision,
+                batch_size=batch_size,
+                dynamic_batch_size=dynamic_batch_size,
+                dynamic_spatial=dynamic_spatial,
+                opset_version=opset_version,
+                simplify=simplify,
+                verify=verify,
+                write_spec=write_spec,
+                format_args=format_args,
+            )
+        finally:
+            self._restore_onnx_export_modules(prepared)
+
+    def _trace_and_write_onnx(
+        self,
+        out: Path,
+        module: nn.Module,
+        *,
+        precision: str,
+        batch_size: int,
+        dynamic_batch_size: bool,
+        dynamic_spatial: bool,
+        opset_version: int | None,
+        simplify: bool,
+        verify: bool,
+        write_spec: bool,
+        format_args: dict[str, Any] | None,
+    ) -> Path:
+        """Trace ``module`` (already deployed, export hooks prepared) and write
+        the gated ONNX artifact to ``out`` — steps 2-8 of the export pipeline."""
 
         # 2. torch.export (strict) with batch-dim dynamic shapes.
         from torch.export import Dim
@@ -400,6 +502,9 @@ class ONNXExportMixin(nn.Module):
                 out, example_name, example_tensor, precision,
                 dynamic_spatial=dynamic_spatial,
             )
+        # onnxslim re-inlined the dynamo exporter's external data: the sidecar
+        # is litter unless the graph genuinely keeps external initializers.
+        _sweep_orphan_external_data(out)
         logger.info("Exported ONNX model to '%s' (%s).", out, precision)
         if write_spec:
             _maybe_write_postprocess_spec(self, out)
@@ -514,15 +619,36 @@ class ONNXExportMixin(nn.Module):
             return list(sample)
         return [f"output_{i}" for i in range(len(sample) if isinstance(sample, (list, tuple)) else 1)]
 
+    def _fp16_op_block_list(self) -> list[str]:
+        """Ops the fp16 conversion must keep in fp32: ORT's default block list,
+        the model's precision policy, and any submodule-declared pins.
+
+        Submodules may declare ``onnx_fp32_op_types`` (a tuple of op-type
+        strings; the same duck-typed module-tree scan as ``export_blocker``)
+        when their internals must stay fp32 in an otherwise-fp16 graph —
+        e.g. the GTR GLA keeps its unnormalized fp32 state, and the
+        converter's dtype propagation needs MatMul/Resize pinned to stay
+        consistent across that boundary.
+        """
+        from onnxruntime.transformers import float16 as ort_float16
+
+        block = list(ort_float16.DEFAULT_OP_BLOCK_LIST) + list(
+            self.onnx_export_precision_policy.fp32_onnx_op_types
+        )
+        for module in self.modules():
+            extra = getattr(module, "onnx_fp32_op_types", None)
+            if extra:
+                block.extend(extra)
+        return block
+
     def _apply_fp16(self, out: Path) -> None:
         import onnx
         from onnxruntime.transformers import float16 as ort_float16
 
         model = onnx.load(str(out))
-        op_block_list = list(ort_float16.DEFAULT_OP_BLOCK_LIST) + list(
-            self.onnx_export_precision_policy.fp32_onnx_op_types
+        model = ort_float16.convert_float_to_float16(
+            model, op_block_list=self._fp16_op_block_list()
         )
-        model = ort_float16.convert_float_to_float16(model, op_block_list=op_block_list)
         _remove_duplicate_casts(model)
         _fix_topological_order(model)
         onnx.save(model, str(out))
@@ -539,7 +665,19 @@ class ONNXExportMixin(nn.Module):
 
         onnx.checker.check_model(str(out), full_check=True)
         if precision == "fp16" and "CUDAExecutionProvider" not in ort.get_available_providers():
-            logger.warning("FP16 parity check skipped: no CUDA execution provider.")
+            # ORT's CPU EP runs fp16 graphs through internal fp32 casts, but
+            # the per-model verify hooks are tuned for the CUDA-EP numerics
+            # these graphs target — element-wise parity would false-positive.
+            # Run the runtime smoke gate instead of shipping an export whose
+            # verify=True checked nothing numerical; exact parity still needs
+            # a CUDA-enabled onnxruntime build.
+            logger.warning(
+                "FP16 export: no CUDA execution provider — exact numerical "
+                "parity unavailable, running the execute-and-finiteness "
+                "smoke gate instead. Re-verify on a CUDA-enabled build for "
+                "exact parity."
+            )
+            self._smoke_verify_fp16(out, example_tensor)
             return
 
         reference = copy.deepcopy(self).cpu().float().eval()
@@ -560,7 +698,7 @@ class ONNXExportMixin(nn.Module):
                     feed = feed.half()
                 feeds[session_input.name] = feed.numpy()
             onnx_outputs = session.run(None, feeds)
-            self.verify_onnx_export_outputs(torch_outputs, onnx_outputs)
+            self.verify_onnx_export_outputs(torch_outputs, onnx_outputs, precision=precision)
 
         # The comparison input is SEEDED RANDOM, not the spec's all-zero
         # example: on a zero image a DETR's query selection has tie-broken
@@ -596,6 +734,37 @@ class ONNXExportMixin(nn.Module):
                 probe_width, probe_height, width, height,
             )
             _compare(probe)
+
+    def _smoke_verify_fp16(self, out: Path, example_tensor: torch.Tensor) -> None:
+        """Runtime smoke gate for fp16 graphs on builds without a CUDA EP.
+
+        Executes the graph on the CPU EP with the same seeded-random compare
+        input the parity gate uses and requires every output to be finite:
+        a mixed-dtype conversion artifact or a saturated fp16 segment fails
+        here instead of silently shipping an unverified graph. Exact
+        numerical parity stays on the CUDA-EP path in :meth:`_verify_onnx`.
+        """
+        import numpy as np
+        import onnxruntime as ort
+
+        session = ort.InferenceSession(str(out), providers=["CPUExecutionProvider"])
+        generator = torch.Generator().manual_seed(0)
+        compare = torch.rand(
+            example_tensor.shape, generator=generator, dtype=example_tensor.dtype
+        ).numpy()
+        feeds = {}
+        for session_input in session.get_inputs():
+            feed = compare
+            if session_input.type == "tensor(float16)":
+                feed = feed.astype(np.float16)
+            feeds[session_input.name] = feed
+        outputs = session.run(None, feeds)
+        for index, output in enumerate(outputs):
+            if not np.isfinite(output).all():
+                raise AssertionError(
+                    f"fp16 smoke gate: output {index} carries non-finite "
+                    "values — the fp16 conversion corrupted numerics."
+                )
 
     def export_onnx_int8(
         self,

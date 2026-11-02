@@ -152,7 +152,7 @@ class Dinov2EomtSemanticSegmentation(ONNXExportMixin, TaskNetwork):
         )
 
     def verify_onnx_export_outputs(
-        self, torch_outputs: Any, onnx_outputs: list
+        self, torch_outputs: Any, onnx_outputs: list, *, precision: str = "fp32"
     ) -> None:
         for torch_output, onnx_output in zip(torch_outputs, onnx_outputs):
             torch.testing.assert_close(

@@ -1,13 +1,20 @@
 # Copyright (c) 2026 AutoVision contributors. Apache-2.0.
-"""GTR family export gates: verify hooks + the GLA export blocker.
+"""GTR family export gates: verify hooks + end-to-end ONNX export per route.
 
-The GLA backbone runs custom CUDA kernels (``chunk_gla``, fused
-RMSNorm+gate) without an ONNX lowering, so every model composed with
-``GTRViTBackbone`` is refused by the ONNX/TensorRT pipeline with an
-explicit error (design doc 31 G2). The four task families implement the
-verification-hook contract regardless, so the numerical gate is in place
-the moment the kernel-side lowering lands — the hooks are exercised here
-against synthetic output pairs because a real export cannot run yet.
+The eager GLA runs fla's Triton / CUDA kernels, which have no ONNX
+representation; the export pipeline swaps them for the pure-ONNX lowering
+in :mod:`autovision.tasks.detection.shared.gtr.gla_onnx` via the
+``prepare_onnx_export`` module-tree hook. These tests pin that contract:
+
+- every ``gtr`` route (det / obb / pose / depth / semseg) must pass
+  ``export_onnx(..., verify=True)`` on CPU — the gate runs the real
+  torch-vs-onnxruntime parity check, and the swap makes the torch
+  reference device-independent (no CUDA needed);
+- the lowered GLA kernel must match a naive per-token reference (fp64)
+  and fla's ``chunk_gla`` on CUDA, including with strongly negative gates
+  (the naive factorized decay overflows there; the explicit per-channel
+  form does not);
+- plain models keep a clean ``_export_blocker()``.
 """
 
 from __future__ import annotations
@@ -26,6 +33,9 @@ except Exception:  # noqa: BLE001 - fla missing entirely counts as unavailable
 
 requires_gtr_extra = pytest.mark.skipif(
     not _fla, reason="GTR construction needs flash-linear-attention (pip install -e '.[gtr]')"
+)
+requires_cuda = pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="fla's Triton GLA kernels need CUDA"
 )
 
 
@@ -50,8 +60,36 @@ def _build_semseg():
 def _build_obb():
     from autovision.tasks.oriented_detection.gtr import GTRROBBOrientedDetection
 
-    return GTRROBBOrientedDetection(
-        variant="s", image_size=(64, 64), load_checkpoint=False
+    model = GTRROBBOrientedDetection(
+        variant="s", image_size=(64, 64), num_queries=10, load_checkpoint=False
+    )
+    # The D-FINE-style zero-init reg heads make every decoded box exactly
+    # square at initialization, and the long-edge normalization's ``w < h``
+    # comparison then flips on ulp-level torch-vs-ORT differences (the angle
+    # jumps by exactly pi/2). Real trained weights never sit on that
+    # boundary; break the degeneracy so the random-weight parity gate is
+    # meaningful (same spirit as the exporter's seeded compare input).
+    generator = torch.Generator().manual_seed(7)
+    with torch.no_grad():
+        for module in model.modules():
+            for name, child in module.named_children():
+                if "bbox_head" in name or "pre_bbox_head" in name or "enc_bbox_head" in name:
+                    for parameter in child.parameters():
+                        parameter.add_(torch.randn(parameter.shape, generator=generator) * 0.02)
+    return model
+
+
+def _build_detection():
+    from autovision.tasks.detection.detr.task_model import DETRObjectDetection
+
+    return DETRObjectDetection(
+        num_classes=2,
+        model_name="gtrvit-s",
+        image_size=(64, 64),
+        decoder="dfine_official",
+        num_queries=10,
+        load_weights=False,
+        backbone_pretrained=False,
     )
 
 
@@ -59,10 +97,17 @@ _TASK_MODELS = [
     pytest.param(_build_pose, ((2, 60, 2), (2, 60, 34)), id="pose"),
     pytest.param(_build_depth, ((2, 64, 64),), id="depth"),
     pytest.param(_build_semseg, ((2, 19, 64, 64),), id="semseg"),
-    pytest.param(_build_obb, ((2, 300, 15), (2, 300, 5)), id="obb"),
+    pytest.param(_build_obb, ((2, 10, 15), (2, 10, 5)), id="obb"),
 ]
 
-_TASK_MODEL_BUILDERS = [_build_pose, _build_depth, _build_semseg, _build_obb]
+#: One builder per deployable GTR route, for the end-to-end export gate.
+_EXPORT_BUILDERS = [
+    pytest.param(_build_detection, id="det"),
+    pytest.param(_build_pose, id="pose"),
+    pytest.param(_build_depth, id="depth"),
+    pytest.param(_build_semseg, id="semseg"),
+    pytest.param(_build_obb, id="obb"),
+]
 
 
 def _as_forward_output(tensors: list[torch.Tensor]):
@@ -89,44 +134,254 @@ def test_verify_hook_contract(build, shapes):
 
 
 @requires_gtr_extra
-def test_gtr_backbone_declares_export_blocker():
-    from autovision.tasks.detection.detr.backbone_wrappers import GTRViTBackbone
+def test_pose_fp32_gate_is_strict_but_permutation_tolerant():
+    """The pose hook (no decode in-graph) compares element-wise at fp32:
+    a drift that cancels inside the row-sum tolerance — the historical gate
+    — must now fail, while a reordered-but-equal row set still passes."""
+    torch.manual_seed(0)
+    model = _build_pose()
+    reference = (torch.randn(2, 60, 2), torch.randn(2, 60, 17, 2))
+    model.verify_onnx_export_outputs(reference, [t.numpy() for t in reference])
 
-    backbone = GTRViTBackbone(embed_dim=192, num_heads=3)
-    assert backbone.export_blocker is not None
-    assert "GTR GLA" in backbone.export_blocker
-
-
-@requires_gtr_extra
-@pytest.mark.parametrize(
-    "build", _TASK_MODEL_BUILDERS, ids=("pose", "depth", "semseg", "obb")
-)
-def test_gtr_task_models_refuse_export(build, tmp_path):
-    # Construction/blocking only; no forward runs (needs CUDA).
-    model = build()
-    assert model._export_blocker() is not None
-    out = tmp_path / "model.onnx"
-    with pytest.raises(AutoVisionError, match="GTR GLA"):
-        model.export_onnx(out)
-    assert not out.exists()
-
-
-@requires_gtr_extra
-def test_gtrvit_detection_variant_refuses_export(tmp_path):
-    """The module-tree scan covers composition: ``detr/gtrvit-s`` carries
-    the blocker via its backbone, without any per-model declaration."""
-    from autovision.tasks.detection.detr.task_model import DETRObjectDetection
-
-    network = DETRObjectDetection(
-        num_classes=2,
-        model_name="gtrvit-s",
-        image_size=(64, 64),
-        decoder="dfine_official",
-        load_weights=False,
-        backbone_pretrained=False,
+    # legitimate permutation: swap three queries identically in both outputs
+    order = torch.arange(60)
+    order[[3, 4, 5]] = torch.tensor([5, 3, 4])
+    permuted = (
+        reference[0][:, order].clone(),
+        reference[1][:, order].clone(),
     )
-    with pytest.raises(AutoVisionError, match="GTR GLA"):
-        network.export_onnx(tmp_path / "model.onnx")
+    model.verify_onnx_export_outputs(reference, [t.numpy() for t in permuted])
+
+    # ±0.5 across two rows, same class: row-sums unchanged (old gate passes)
+    drifted = (reference[0].clone(), reference[1].clone())
+    drifted[0][:, 0, 0] += 0.5
+    drifted[0][:, 1, 0] -= 0.5
+    from autovision.export.parity_checks import assert_outputs_close_sum
+
+    assert_outputs_close_sum(reference, drifted)
+    with pytest.raises(AssertionError):
+        model.verify_onnx_export_outputs(reference, [t.numpy() for t in drifted])
+
+    # the fp16 path keeps the drift-tolerant row-sum invariant
+    model.verify_onnx_export_outputs(
+        reference, [t.numpy() for t in drifted], precision="fp16"
+    )
+
+
+@requires_gtr_extra
+def test_depth_fp32_gate_rejects_cancelling_drift():
+    """The depth hook compares the dense map element-wise at fp32: a ±0.5
+    pair that cancels in the spatial sum must fail (the historical gate
+    passed it); fp16 keeps the sum form."""
+    torch.manual_seed(0)
+    model = _build_depth()
+    reference = torch.rand(2, 64, 64)
+    model.verify_onnx_export_outputs(reference, [reference.numpy()])
+
+    drifted = reference.clone()
+    drifted[:, 0, 0] += 0.5
+    drifted[:, 1, 0] -= 0.5
+    from autovision.export.parity_checks import assert_outputs_close_sum
+
+    assert_outputs_close_sum((reference,), (drifted,))
+    with pytest.raises(AssertionError):
+        model.verify_onnx_export_outputs(reference, [drifted.numpy()])
+    model.verify_onnx_export_outputs(
+        reference, [drifted.numpy()], precision="fp16"
+    )
+
+
+@requires_gtr_extra
+@pytest.mark.parametrize("build", _EXPORT_BUILDERS)
+def test_export_onnx_end_to_end(build, tmp_path):
+    """Every GTR route exports through the real gated pipeline: dynamo trace,
+    onnxslim, onnx.checker and the torch-vs-ORT parity gate — on CPU."""
+    pytest.importorskip("onnxruntime")
+    torch.manual_seed(0)
+    model = build()
+    out = model.export_onnx(tmp_path / "model.onnx", verify=True)
+    assert out.exists()
+    # onnxslim re-inlined the dynamo external data: no orphan .data sidecar
+    # may survive next to the artifact (regression: ~45MB litter per model).
+    assert not (tmp_path / "model.onnx.data").exists()
+
+    # The whole point of the lowering: no custom-domain nodes, so the graph
+    # runs on any ONNX runtime without plugins.
+    import onnx
+
+    graph = onnx.load(str(out)).graph
+    custom = [node.op_type for node in graph.node if node.domain not in ("", "ai.onnx")]
+    assert custom == []
+
+
+def _naive_gla_reference(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+                         gk: torch.Tensor, scale: float) -> torch.Tensor:
+    """Per-token GLA recurrence in fp64 — the oracle for :func:`chunk_gla_pure`."""
+    q, k, v, gk = (t.double() for t in (q, k, v, gk))
+    batch, seq, heads, k_dim = q.shape
+    v_dim = v.shape[-1]
+    out = torch.zeros(batch, seq, heads, v_dim, dtype=torch.float64)
+    state = torch.zeros(batch, heads, k_dim, v_dim, dtype=torch.float64)
+    for t in range(seq):
+        decay = gk[:, t].unsqueeze(-1).exp()          # (B, H, K, 1)
+        state = state * decay + k[:, t].unsqueeze(-1) * v[:, t].unsqueeze(2)
+        out[:, t] = scale * (state * q[:, t].unsqueeze(-1)).sum(dim=2)
+    return out.float()
+
+
+@requires_gtr_extra
+@pytest.mark.parametrize("seq_len", [16, 200], ids=["single-chunk", "pad-path"])
+def test_chunk_gla_pure_matches_naive_reference(seq_len):
+    """The lowered kernel equals the per-token recurrence (fp64 oracle),
+    including the T % chunk padding path."""
+    from autovision.tasks.detection.shared.gtr import chunk_gla_pure
+
+    torch.manual_seed(0)
+    q = torch.randn(2, seq_len, 3, 32)
+    k = torch.randn(2, seq_len, 3, 32)
+    v = torch.randn(2, seq_len, 3, 64)
+    gk = torch.nn.functional.logsigmoid(torch.randn(2, seq_len, 3, 32)) / 16.0
+    out = chunk_gla_pure(q, k, v, gk, 32**-0.5)
+    ref = _naive_gla_reference(q, k, v, gk, 32**-0.5)
+    torch.testing.assert_close(out, ref, atol=1e-4, rtol=1e-4)
+
+
+@requires_gtr_extra
+@requires_cuda
+def test_chunk_gla_pure_matches_fla_with_strong_gates():
+    """fla parity, including strongly negative gates where a factorized decay
+    overflows to inf*0=NaN — the explicit per-channel decay must not."""
+    from fla.ops.gla import chunk_gla
+
+    from autovision.tasks.detection.shared.gtr import chunk_gla_pure
+
+    torch.manual_seed(0)
+    q = torch.randn(1, 256, 2, 32, device="cuda")
+    k = torch.randn(1, 256, 2, 32, device="cuda")
+    v = torch.randn(1, 256, 2, 64, device="cuda")
+    scale = 32**-0.5
+    # fla's Triton kernel accumulates in a different order (BT=64 blocks, BC=16
+    # sub-blocks), so fp32 outputs differ from ours by accumulation noise that
+    # grows with the state magnitude along the sequence (observed max_abs
+    # ~0.01-0.03 at cos > 0.9999). Exact math is pinned by the fp64-oracle
+    # test above; this test pins cross-implementation agreement and — the
+    # regression it exists for — no NaN where a factorized decay overflows.
+    for name, gk in (
+        # the distribution the trained models produce (normalizer 16)
+        ("model-like",
+         torch.nn.functional.logsigmoid(torch.randn(1, 256, 2, 32, device="cuda")) / 16.0),
+        # strong gates: logsigmoid(x ~ -100) drives per-chunk decays past -6000,
+        # where fp32 exp() underflows to exact zero and the two orders diverge
+        # further in the last ulp.
+        ("strong",
+         torch.nn.functional.logsigmoid(torch.randn(1, 256, 2, 32, device="cuda") - 100.0)),
+    ):
+        ref = chunk_gla(q=q, k=k, v=v, g=gk)[0]
+        out = chunk_gla_pure(q, k, v, gk, scale)
+        assert not torch.isnan(out).any(), f"{name}: lowered GLA produced NaN"
+        torch.testing.assert_close(out, ref, atol=2e-2, rtol=5e-2)
+
+
+@requires_gtr_extra
+def test_pose_postprocess_handles_deploy_keypoint_layout():
+    """forward_backend emits (B, N, K, 2) keypoints; postprocess must gather per
+    point (upstream deploy_mode branch) — the flat-layout gather regressed to a
+    RuntimeError on every real pose inference."""
+    torch.manual_seed(0)
+    model = _build_pose()
+    logits = torch.randn(2, 60, 2)
+    keypoints = torch.randn(2, 60, 17, 2)
+    records = model.postprocess(
+        (logits, keypoints),
+        [{"orig_w": 64.0, "orig_h": 64.0}] * 2,
+        threshold=0.0,
+    )
+    assert len(records) == 2
+    for record in records:
+        # per-record contract: flattened COCO triplets (n, K*3) with v=1
+        assert record["keypoints"].shape[1] == 17 * 3
+        assert record["keypoints"].shape[0] == record["scores"].shape[0]
+
+
+@requires_gtr_extra
+def test_gtr_rejects_dynamic_spatial_export(tmp_path):
+    """GTR graphs are fixed-shape (the GLA recurrence unrolls for the variant's
+    token count): dynamic H/W export is refused fast with a readable error
+    instead of grinding through symbolic-shape tracing."""
+    model = _build_depth()
+    with pytest.raises(AutoVisionError, match="dynamic_spatial"):
+        model.export_onnx(tmp_path / "model.onnx", dynamic_spatial=True, verify=False)
+
+
+@requires_gtr_extra
+def test_torch_backend_cpu_engine_rejected_readably():
+    """Eager GLA runs fla's Triton kernels (CUDA-only): a CPU torch-backend
+    engine is refused at construction with install/ONNX guidance instead of an
+    opaque Triton pointer error at the first forward."""
+    from autovision.inference.engine import InferenceEngine
+
+    model = _build_depth()
+    with pytest.raises(AutoVisionError, match="backend='onnx'"):
+        InferenceEngine(model, backend="torch")
+
+
+@requires_gtr_extra
+def test_fp16_export_with_gla_fp32_pins(tmp_path):
+    """The GLA's ``onnx_fp32_op_types`` pins keep the fp16 conversion
+    consistent (regression: the unpinned converter produced mixed-type
+    MatMul/Resize nodes that failed onnx.checker) and the artifact runs in
+    onnxruntime on CPU."""
+    pytest.importorskip("onnxruntime")
+    torch.manual_seed(0)
+    model = _build_depth()
+    out = model.export_onnx(tmp_path / "model_fp16.onnx", precision="fp16", verify=True)
+    assert out.exists()
+
+    import numpy as np
+    import onnx
+    import onnxruntime as ort
+
+    graph = onnx.load(str(out)).graph
+    fp16_init = [t for t in graph.initializer if t.data_type == onnx.TensorProto.FLOAT16]
+    assert fp16_init, "expected real fp16 initializers in the graph"
+    session = ort.InferenceSession(str(out), providers=["CPUExecutionProvider"])
+    x = torch.rand(1, 3, 64, 64)
+    feed = x.numpy().astype(np.float16)
+    pred = session.run(None, {"images": feed})[0]
+    assert pred.shape[0] == 1 and np.isfinite(pred).all()
+
+
+@requires_gtr_extra
+def test_fp16_smoke_gate_rejects_nonfinite_graph(tmp_path):
+    """The no-CUDA-EP fp16 fallback runs the execute-and-finiteness smoke
+    gate (regression: verify=True skipped silently on CPU-only onnxruntime
+    builds). A clean fp16 graph passes; NaN-poisoning one initializer must
+    fail the gate instead of shipping an unverified artifact."""
+    pytest.importorskip("onnxruntime")
+    import numpy as np
+    import onnx
+    from onnx import numpy_helper
+
+    torch.manual_seed(0)
+    model = _build_depth()
+    out = tmp_path / "model_fp16.onnx"
+    model.export_onnx(out, precision="fp16", verify=False)
+    example = torch.rand(1, 3, 64, 64)
+    model._smoke_verify_fp16(out, example)
+
+    # Poison the largest fp16 initializer (a main weight, so the NaN
+    # provably reaches the outputs through the random compare input).
+    graph = onnx.load(str(out))
+    target = max(
+        (t for t in graph.graph.initializer if t.data_type == onnx.TensorProto.FLOAT16),
+        key=lambda t: int(np.prod(t.dims)) if t.dims else 1,
+    )
+    poisoned = numpy_helper.to_array(target).copy()
+    poisoned.reshape(-1)[0] = np.float16(np.nan)
+    target.CopyFrom(numpy_helper.from_array(poisoned, target.name))
+    onnx.save(graph, str(out))
+    with pytest.raises(AssertionError, match="non-finite"):
+        model._smoke_verify_fp16(out, example)
 
 
 def test_plain_models_have_no_blocker():

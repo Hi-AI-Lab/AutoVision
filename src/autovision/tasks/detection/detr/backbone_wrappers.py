@@ -313,8 +313,10 @@ class GTRViTBackbone(Module):
     Same-resolution taps (stride = patch_size, uniform ``embed_dim``
     channels); the 8/16/32 pyramid comes from GTREncoder downstream
     (roadmap design doc 31 G2). Requires the ``gtr`` extra
-    (flash-linear-attention) at construction — Triton GLA kernels are
-    CUDA-only, so forward needs a CUDA tensor.
+    (flash-linear-attention) at construction — eager GLA runs fla's
+    Triton kernels (CUDA-only); the ONNX export path swaps in the
+    pure-ONNX GLA lowering (:mod:`...shared.gtr.gla_onnx`) and traces on
+    any device.
     """
 
     def __init__(
@@ -329,7 +331,6 @@ class GTRViTBackbone(Module):
         super().__init__()
         from autovision.errors import AutoVisionError
         from autovision.tasks.detection.shared.gtr import (
-            GTR_ONNX_EXPORT_BLOCKER,
             ViTAdapterSpatialSwiGLU,
             gtr_available,
         )
@@ -341,9 +342,6 @@ class GTRViTBackbone(Module):
             )
         self.embed_dim = embed_dim
         self.patch_size = patch_size
-        # Declared for the export mixin's module-tree scan: the GLA
-        # kernels have no ONNX lowering (see the constant's docstring).
-        self.export_blocker = GTR_ONNX_EXPORT_BLOCKER
         self._adapter = ViTAdapterSpatialSwiGLU(
             embed_dim=embed_dim,
             num_heads=num_heads,

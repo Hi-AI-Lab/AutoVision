@@ -295,12 +295,13 @@ def _build_registry() -> dict[str, DETRVariantSpec]:
     # tasks/detection/shared/gtr/): the REAL GTR backbone (Gated Linear
     # Attention + Spatial SwiGLU + bidirectional scan, DEIMv2-vit-tiny
     # lineage) + GTREncoder pyramid. Requires the "gtr" extra
-    # (flash-linear-attention) at construction; Triton kernels need CUDA.
+    # (flash-linear-attention) at construction; eager GLA runs fla's Triton
+    # kernels (CUDA-only), ONNX export uses the pure-ONNX lowering
+    # (shared/gtr/gla_onnx.py) and works on any device.
     # Widths from the official coco_finetune configs (S: 192/3 heads).
-    # NOT a spec-frozen spectrum tier — G2 acceptance pending: COCO trend open,
-    # and ONNX/TRT export is blocked on the GLA kernel lowering (see
-    # GTRViTBackbone.export_blocker). This is the only GTR detection route:
-    # the former timm HGNetV2 ``gtr-*`` decoder-only targets were removed.
+    # NOT a spec-frozen spectrum tier — G2 acceptance pending: COCO trend
+    # open. This is the only GTR detection route: the former timm HGNetV2
+    # ``gtr-*`` decoder-only targets were removed.
     registry["gtrvit-s"] = DETRVariantSpec(
         backbone_package="gtr",
         backbone_name="gtr_tiny_spatial_swiglu",

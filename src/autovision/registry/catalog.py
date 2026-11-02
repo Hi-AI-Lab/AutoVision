@@ -162,7 +162,7 @@ MODEL_CATALOG: tuple[ModelEntry, ...] = (
         exportable=_DETR_EXPORTABLE,
         notes="Upstream Roboflow weights (T4/TensorRT latency); pretrained handle.",
     ),
-    # ── GTR: MIT, accuracy flagship (GLA kernel -> no export) ───────────
+    # ── GTR: MIT, accuracy flagship (ONNX via the pure-ONNX GLA lowering) ──
     ModelEntry(
         key="detr/gtrvit-s",
         task="detection",
@@ -177,8 +177,8 @@ MODEL_CATALOG: tuple[ModelEntry, ...] = (
         gflops=33.8,
         coco_ap=53.6,
         latency_ms=1.225,
-        exportable=(),
-        notes="Official GTR EMA weights; GLA custom kernel, not ONNX/TRT exportable.",
+        exportable=_DETR_EXPORTABLE,
+        notes="Official GTR EMA weights; ONNX/TensorRT/OpenVINO via the pure-ONNX GLA lowering.",
     ),
     ModelEntry(
         key="detr/gtrvit-m",
@@ -194,8 +194,8 @@ MODEL_CATALOG: tuple[ModelEntry, ...] = (
         gflops=62.6,
         coco_ap=57.3,
         latency_ms=1.462,
-        exportable=(),
-        notes="Official GTR EMA weights; GLA custom kernel, not ONNX/TRT exportable.",
+        exportable=_DETR_EXPORTABLE,
+        notes="Official GTR EMA weights; ONNX/TensorRT/OpenVINO via the pure-ONNX GLA lowering.",
     ),
     ModelEntry(
         key="detr/gtrvit-l",
@@ -211,8 +211,8 @@ MODEL_CATALOG: tuple[ModelEntry, ...] = (
         gflops=106.0,
         coco_ap=58.9,
         latency_ms=1.908,
-        exportable=(),
-        notes="Official GTR EMA weights; GLA custom kernel, not ONNX/TRT exportable.",
+        exportable=_DETR_EXPORTABLE,
+        notes="Official GTR EMA weights; ONNX/TensorRT/OpenVINO via the pure-ONNX GLA lowering.",
     ),
     ModelEntry(
         key="detr/gtrvit-x",
@@ -228,8 +228,8 @@ MODEL_CATALOG: tuple[ModelEntry, ...] = (
         gflops=130.2,
         coco_ap=59.4,
         latency_ms=2.115,
-        exportable=(),
-        notes="Official GTR EMA weights; GLA custom kernel, not ONNX/TRT exportable.",
+        exportable=_DETR_EXPORTABLE,
+        notes="Official GTR EMA weights; ONNX/TensorRT/OpenVINO via the pure-ONNX GLA lowering.",
     ),
     # ── AutoVision DETR spectrum ───────────────────────────────────────
     ModelEntry(

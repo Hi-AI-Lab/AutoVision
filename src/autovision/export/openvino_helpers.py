@@ -56,7 +56,10 @@ def _resolve_ir_path(out: "str | os.PathLike[str]") -> pathlib.Path:
     return target
 
 
-def _verify_openvino_parity(openvino, model: Any, xml_path: pathlib.Path, device: str) -> None:
+def _verify_openvino_parity(
+    openvino: Any, model: Any, xml_path: pathlib.Path, device: str,
+    precision: str = "fp32",
+) -> None:
     """Torch vs the COMPILED OpenVINO model on the example input, through the
     model's own export-parity hook — an artifact that fails is not accepted."""
     import copy
@@ -76,7 +79,7 @@ def _verify_openvino_parity(openvino, model: Any, xml_path: pathlib.Path, device
         ]
     result = compiled(example.numpy())
     openvino_outputs = [result[port] for port in compiled.outputs]
-    model.verify_onnx_export_outputs(torch_outputs, openvino_outputs)
+    model.verify_onnx_export_outputs(torch_outputs, openvino_outputs, precision=precision)
     logger.info("OpenVINO parity gate passed on device '%s'.", device)
 
 
@@ -120,7 +123,7 @@ def export_onnx_to_openvino(
         openvino.save_model(ov_model, str(xml_path))
         logger.info("Saved OpenVINO IR to '%s'.", xml_path)
         if verify:
-            _verify_openvino_parity(openvino, model, xml_path, device)
+            _verify_openvino_parity(openvino, model, xml_path, device, precision)
     finally:
         # The intermediate ONNX (and dynamo's external-data sidecar) never
         # outlives the call unless the caller asked for it — including the

@@ -212,7 +212,7 @@ class RTDETRObjectDetection(ONNXExportMixin, TaskNetwork):
         )
 
     def verify_onnx_export_outputs(
-        self, torch_outputs: tuple, onnx_outputs: list
+        self, torch_outputs: tuple, onnx_outputs: list, *, precision: str = "fp32"
     ) -> None:
         torch.testing.assert_close(
             torch_outputs[0].sum(dim=1),

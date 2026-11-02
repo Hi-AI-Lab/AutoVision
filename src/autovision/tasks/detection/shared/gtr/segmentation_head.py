@@ -7,8 +7,9 @@ MIT License, Copyright (c) 2026 The GTR Authors; that file is itself
 ``point_sample`` / ``get_uncertain_point_coords_with_randomness`` follow
 PointRend's detectron2 implementation), adapted by AutoVision per
 MIT/Apache-2.0 terms (registration cleanup, typing; the ``export()``
-runtime-swap path is dropped — our deploy story lives in ONNX/TRT
-exporters, not a Python-side method swap); provenance ledger entry (GTR multi-task S2, roadmap design doc 31
+runtime-swap path is dropped in favor of the ONNX trace-mode MatMul swap
+behind ``prepare_onnx_export`` — TensorRT's Einsum support is narrower
+than ONNX's); provenance ledger entry (GTR multi-task S2, roadmap design doc 31
 §11).
 
 Contract: ``SegmentationHead(spatial_features, query_features)`` maps
@@ -122,6 +123,25 @@ class SegmentationHead(nn.Module):
         self.bias = nn.Parameter(torch.zeros(1))
         self.image_size = tuple(image_size)
 
+    def prepare_onnx_export(self) -> None:
+        """Export-pipeline hook (the ONNXExportMixin module-tree scan): route the
+        query-spatial product through MatMul for the duration of one trace —
+        TensorRT's Einsum support is narrower than ONNX's."""
+        self._onnx_trace = True
+
+    def restore_after_export(self) -> None:
+        """Undo :meth:`prepare_onnx_export` (restores the einsum form)."""
+        self._onnx_trace = False
+
+    def _query_spatial_product(
+        self, spatial: torch.Tensor, qf: torch.Tensor
+    ) -> torch.Tensor:
+        """(B, C, H, W) x (B, N, C) -> (B, N, H, W) query-spatial logits."""
+        if getattr(self, "_onnx_trace", False):
+            b, _, h, w = spatial.shape
+            return torch.matmul(qf, spatial.flatten(2)).view(b, qf.shape[1], h, w)
+        return torch.einsum("bchw,bnc->bnhw", spatial, qf)
+
     def forward(
         self,
         spatial_features: torch.Tensor,
@@ -145,7 +165,7 @@ class SegmentationHead(nn.Module):
             )
             qf = self.query_features_proj(self.query_features_block(query_features[0]))
             mask_logits.append(
-                torch.einsum("bchw,bnc->bnhw", spatial_features, qf) + self.bias
+                self._query_spatial_product(spatial_features, qf) + self.bias
             )
         elif len(query_features) == 1:
             # Eval path: run the FULL block stack so the spatial features
@@ -156,7 +176,7 @@ class SegmentationHead(nn.Module):
             spatial_proj = self.spatial_features_proj(spatial_features)
             qf = self.query_features_proj(self.query_features_block(query_features[0]))
             mask_logits.append(
-                torch.einsum("bchw,bnc->bnhw", spatial_proj, qf) + self.bias
+                self._query_spatial_product(spatial_proj, qf) + self.bias
             )
         else:
             for block, qf in zip(self.blocks, query_features):
@@ -164,7 +184,7 @@ class SegmentationHead(nn.Module):
                 spatial_proj = self.spatial_features_proj(spatial_features)
                 qf = self.query_features_proj(self.query_features_block(qf))
                 mask_logits.append(
-                    torch.einsum("bchw,bnc->bnhw", spatial_proj, qf) + self.bias
+                    self._query_spatial_product(spatial_proj, qf) + self.bias
                 )
         return mask_logits
 

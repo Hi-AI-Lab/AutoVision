@@ -73,6 +73,7 @@ class InferenceEngine:
         if backend == "torch":
             if device is not None:
                 self.network.to(device=torch.device(device))
+            self._check_cpu_eager_blockers()
             if hasattr(self.network, "deploy"):
                 self.network.deploy()  # export-path reference semantics
             self._forward = self._torch_forward
@@ -84,6 +85,18 @@ class InferenceEngine:
             self._forward = self._make_tensorrt_forward(device)
 
     # ── forwards ────────────────────────────────────────────────────────
+    def _check_cpu_eager_blockers(self) -> None:
+        """Readable failure for CPU torch-backend engines over modules whose
+        eager forward needs CUDA (duck-typed ``cpu_eager_blocker`` attribute,
+        e.g. the GTR GLA fla/Triton kernels) — instead of an opaque Triton
+        pointer error at the first forward."""
+        if self.network._module_device().type != "cpu":
+            return
+        for module in self.network.modules():
+            blocker = getattr(module, "cpu_eager_blocker", None)
+            if blocker:
+                raise AutoVisionError(blocker)
+
     def _torch_forward(self, batch: torch.Tensor) -> Any:
         return self.network.forward_backend(batch.to(self.network._module_device()))
 

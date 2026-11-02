@@ -276,16 +276,30 @@ class GTRPoseEstimation(ONNXExportMixin, TaskNetwork):
         scores = topk_values
         topk_keypoints = (topk_indexes.float() // out_logits.shape[2]).long()
         labels = topk_indexes % out_logits.shape[2]
-        keypoints = torch.gather(
-            out_keypoints,
-            1,
-            topk_keypoints.unsqueeze(-1).repeat(1, 1, self.num_body_points * 2),
-        )
-        keypoints = keypoints * target_sizes.repeat(1, self.num_body_points)[:, None, :]
-        keypoints_res = keypoints.unflatten(-1, (-1, 2))
-        keypoints_res = torch.cat(
-            [keypoints_res, torch.ones_like(keypoints_res[..., 0:1])], dim=-1
-        ).flatten(-2)
+        if out_keypoints.dim() == 4:
+            # Deploy layout (B, N, K, 2) — gather per point (upstream
+            # GTRPosePostProcessor.deploy_mode branch).
+            keypoints = torch.gather(
+                out_keypoints,
+                1,
+                topk_keypoints[..., None, None].expand(-1, -1, self.num_body_points, 2),
+            )
+            keypoints = keypoints * target_sizes[:, None, None, :]
+            keypoints_res = torch.cat(
+                [keypoints, torch.ones_like(keypoints[..., 0:1])], dim=-1
+            ).flatten(-2)
+        else:
+            # Flat layout (B, N, K*2) — the undeployed forward's contract.
+            keypoints = torch.gather(
+                out_keypoints,
+                1,
+                topk_keypoints.unsqueeze(-1).repeat(1, 1, self.num_body_points * 2),
+            )
+            keypoints = keypoints * target_sizes.repeat(1, self.num_body_points)[:, None, :]
+            keypoints_res = keypoints.unflatten(-1, (-1, 2))
+            keypoints_res = torch.cat(
+                [keypoints_res, torch.ones_like(keypoints_res[..., 0:1])], dim=-1
+            ).flatten(-2)
         results = []
         for image_index in range(scores.shape[0]):
             keep = scores[image_index] > threshold
@@ -328,24 +342,21 @@ class GTRPoseEstimation(ONNXExportMixin, TaskNetwork):
         )
 
     def verify_onnx_export_outputs(
-        self, torch_outputs: tuple, onnx_outputs: list
+        self, torch_outputs: tuple, onnx_outputs: list, *, precision: str = "fp32"
     ) -> None:
-        # Two graph outputs: pred_logits, then pred_keypoints.
-        torch.testing.assert_close(
-            torch_outputs[0].sum(dim=1),
-            torch.as_tensor(onnx_outputs[0]).float().sum(dim=1),
-            atol=5e-3,
-            rtol=1e-1,
-            equal_nan=True,
-            check_device=False,
-            check_dtype=False,
+        from autovision.export.parity_checks import (
+            assert_outputs_close_sum,
+            assert_query_outputs_close,
         )
-        torch.testing.assert_close(
-            torch_outputs[1].sum(dim=1),
-            torch.as_tensor(onnx_outputs[1]).float().sum(dim=1),
-            atol=5e-3,
-            rtol=1e-1,
-            equal_nan=True,
-            check_device=False,
-            check_dtype=False,
-        )
+
+        # The graph emits every query in a fixed order (top-k lives in
+        # postprocess, outside the graph), so the fp32 gate can align rows
+        # and compare element-wise — a drifted row fails even when the
+        # row-sum tolerance would absorb it. fp16 graphs on degenerate
+        # weights genuinely drift at decode-adjacent magnitude (observed
+        # ~0.8 element-wise on untrained weights); the row-sum invariant is
+        # the only meaningful one there (see autovision.export.parity_checks).
+        if precision == "fp16":
+            assert_outputs_close_sum(torch_outputs, onnx_outputs)
+            return
+        assert_query_outputs_close(torch_outputs, onnx_outputs)

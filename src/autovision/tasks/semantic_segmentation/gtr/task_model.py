@@ -263,15 +263,17 @@ class GTRSemanticSegmentation(ONNXExportMixin, TaskNetwork):
         )
 
     def verify_onnx_export_outputs(
-        self, torch_outputs: Any, onnx_outputs: list
+        self, torch_outputs: Any, onnx_outputs: list, *, precision: str = "fp32"
     ) -> None:
-        # Single graph output: the per-class logits (B, C, H, W).
-        torch.testing.assert_close(
-            torch_outputs.sum(dim=1),
-            torch.as_tensor(onnx_outputs[0]).float().sum(dim=1),
-            atol=5e-3,
-            rtol=1e-1,
-            equal_nan=True,
-            check_device=False,
-            check_dtype=False,
+        from autovision.export.parity_checks import (
+            assert_dense_close,
+            assert_outputs_close_sum,
         )
+
+        # Single dense output: per-class logits (B, C, H, W). No decode, so
+        # fp32 compares element-wise; fp16 keeps the class-sum form (see
+        # autovision.export.parity_checks for the precision split).
+        if precision == "fp16":
+            assert_outputs_close_sum((torch_outputs,), onnx_outputs)
+            return
+        assert_dense_close(torch_outputs, onnx_outputs[0])

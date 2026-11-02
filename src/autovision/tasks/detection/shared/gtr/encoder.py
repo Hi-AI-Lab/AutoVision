@@ -300,6 +300,17 @@ class GTREncoder(nn.Module):
         self._deploy_parallel_stages = True
         self._stage_streams = None
 
+    def prepare_onnx_export(self) -> None:
+        """Export-pipeline hook (the ONNXExportMixin module-tree scan): force the
+        sequential stage path for the duration of one trace — the CUDA-stream
+        fork/join is ``torch.compiler.disable``-d and torch.export cannot trace it."""
+        self._parallel_stages_saved = getattr(self, "_deploy_parallel_stages", False)
+        self._deploy_parallel_stages = False
+
+    def restore_after_export(self) -> None:
+        """Undo :meth:`prepare_onnx_export` (restores the parallel-stage deploy path)."""
+        self._deploy_parallel_stages = getattr(self, "_parallel_stages_saved", False)
+
     def _run_stage(self, stage_idx, feats):
         samp_list = self.stages_sampling[stage_idx]
         fuse = self.stages[stage_idx]

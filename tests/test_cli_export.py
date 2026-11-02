@@ -90,6 +90,9 @@ def test_export_command_onnx_with_gate(tmp_path):
         str(onnx_path), providers=["CPUExecutionProvider"]
     )
     assert session.get_inputs()[0].shape[1:] == [3, 64, 64]
+    # onnxslim re-inlined the dynamo external data: no orphan sidecar may
+    # survive next to the artifact (regression: 45MB-class litter per model).
+    assert not (tmp_path / "model.onnx.data").exists()
 
 
 @requires_export

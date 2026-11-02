@@ -56,7 +56,8 @@ def test_gtr_rows_match_registered_assets_and_metrics():
         asset = GTR_ASSETS[entry.weights_asset]
         assert asset.coco_ap == entry.coco_ap
         assert asset.license == entry.license
-        assert entry.exportable == ()
+        # exportable via the pure-ONNX GLA lowering (shared/gtr/gla_onnx.py)
+        assert set(entry.exportable) == {"onnx", "tensorrt", "openvino"}
         assert entry.latency_ms is not None
 
 
@@ -98,7 +99,7 @@ def test_table_and_description_are_renderable():
     assert "detr/gtrvit-s" in table
     description = describe_model("detr/gtrvit-s")
     assert "license:    MIT" in description
-    assert "exportable: none" in description
+    assert "exportable: onnx" in description
 
 
 def test_cli_default_stays_encoder_listing():

@@ -12,7 +12,14 @@ design doc 31 G2). AutoVision modifications:
   :class:`GatedLinearAttention` raises with install guidance at
   construction time (``pip install -e ".[gtr]"``);
 - ``ConvNormLayer_fuse`` comes from the sibling re-port
-  (:mod:`autovision.tasks.detection.shared.gtr.encoder`).
+  (:mod:`autovision.tasks.detection.shared.gtr.encoder`);
+- ``convert_to_deploy`` on the fused conv is idempotent (the export
+  pipeline deploys the model and then deploys a deepcopy of it again
+  for the parity reference);
+- the ONNX export pipeline swaps ``GatedLinearAttention.forward`` to the
+  pure-ONNX lowering (:mod:`gla_onnx`) via ``prepare_onnx_export`` /
+  ``restore_after_export`` for the duration of a trace; the eager
+  Triton / CUDA paths below the ``_onnx_trace`` branch are unchanged.
 """
 
 import math
@@ -28,6 +35,8 @@ __all__ = ['ViTAdapter', ]
 
 
 from einops import rearrange, repeat
+
+from autovision.tasks.detection.shared.gtr.gla_onnx import gla_forward_pure
 
 try:  # AutoVision: lazy extra — module imports without fla (extras: gtr)
     from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
@@ -139,10 +148,14 @@ class ConvNormLayer_fuse(nn.Module):
         return self.act(self.norm(self.conv(x)))
 
     def convert_to_deploy(self):
-        if not hasattr(self, 'conv_bn_fused'):
-            self.conv_bn_fused = nn.Conv2d(
-                self.ch_in, self.ch_out, self.kernel_size, self.stride,
-                groups=self.g, padding=self.padding, bias=True)
+        # AutoVision: idempotent — the export pipeline deploys the model and
+        # then deploys a deepcopy of it again for the parity reference, so a
+        # second call must be a no-op (conv/norm are gone after the first).
+        if hasattr(self, 'conv_bn_fused'):
+            return
+        self.conv_bn_fused = nn.Conv2d(
+            self.ch_in, self.ch_out, self.kernel_size, self.stride,
+            groups=self.g, padding=self.padding, bias=True)
         k, b = self._fuse_bn_tensor()
         self.conv_bn_fused.weight.data = k
         self.conv_bn_fused.bias.data = b
@@ -260,6 +273,43 @@ def trunc_normal_(tensor, mean=0., std=1., a=-2., b=2.):
 
 
 class GatedLinearAttention(nn.Module):
+    """Gated Linear Attention (GLA) block — see gla_onnx.py for the ONNX lowering.
+
+    The class attributes below are duck-typed export/deployment guards read by
+    module-tree scans (same idiom as ``export_blocker``); every GTR route
+    embeds this module, so declaring them here covers all five routes.
+    """
+
+    #: Eager GLA runs fla's Triton ``chunk_gla`` (CUDA-only): constructing a
+    #: torch-backend inference engine on CPU would die inside Triton with an
+    #: opaque pointer error, so it is refused with this message instead.
+    cpu_eager_blocker = (
+        "CPU inference with backend='torch' is unavailable for the GTR GLA "
+        "backbone: the eager chunk_gla runs flash-linear-attention's Triton "
+        "kernels, which are CUDA-only. Use backend='onnx' with an exported "
+        "artifact for CPU deployment, or construct the engine with "
+        "device='cuda'."
+    )
+
+    #: The GLA recurrence unrolls for the variant's fixed token count at trace
+    #: time — GTR graphs are inherently fixed-shape, so dynamic H/W export is
+    #: refused instead of grinding through symbolic-shape tracing.
+    dynamic_spatial_blocker = (
+        "ONNX export with dynamic_spatial=True is unavailable for the GTR "
+        "GLA backbone: the chunk recurrence is unrolled for the variant's "
+        "fixed token count at trace time, so GTR graphs are fixed-shape. "
+        "Export without dynamic_spatial at the variant's input size."
+    )
+
+    #: Ops pinned to fp32 by the ONNX fp16 conversion for GTR graphs. The
+    #: lowered GLA keeps its state and decay math in fp32 (an unnormalized
+    #: running sum saturates fp16) and the converter's dtype propagation only
+    #: stays consistent across that boundary with MatMul pinned; Resize has a
+    #: known converter dtype gap. GTR's compute is GEMM-dominated, so fp16
+    #: mainly benefits Conv-heavy segments (ORT-GPU/OpenVINO); ORT CPU is
+    #: slower — prefer the fp32 graph there and let TensorRT manage precision.
+    onnx_fp32_op_types = ("MatMul", "Resize")
+
     def __init__(
         self,
         mode='chunk',
@@ -431,6 +481,16 @@ class GatedLinearAttention(nn.Module):
         else:
             self._use_cuda_rmsnorm_gated = False
 
+    def prepare_onnx_export(self) -> None:
+        """Export-pipeline hook (the ONNXExportMixin module-tree scan): route this
+        module's forward through the pure-ONNX GLA lowering (:mod:`gla_onnx`)
+        for the duration of one trace. No effect on eager training/inference."""
+        self._onnx_trace = True
+
+    def restore_after_export(self) -> None:
+        """Undo :meth:`prepare_onnx_export` (restores the eager kernels)."""
+        self._onnx_trace = False
+
     def _get_or_make_gla_ws(self, q):
         """Return persistent workspace + output buffers for the CUDA chunk_gla
         kernel. Allocating once and reusing is required for CUDA-graph capture
@@ -448,6 +508,11 @@ class GatedLinearAttention(nn.Module):
 
     def forward(self, hidden_states, attention_mask=None, past_key_values=None,
                 use_cache=False, output_attentions=False, **kwargs):
+        if getattr(self, '_onnx_trace', False):
+            # Export trace: pure-ONNX GLA lowering (gla_onnx.py). Everything
+            # below (fla Triton / CUDA-extension kernels) has no ONNX
+            # representation, so the trace must not reach it.
+            return gla_forward_pure(self, hidden_states)
         if attention_mask is not None:
             assert len(attention_mask.shape) == 2
 

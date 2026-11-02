@@ -4,7 +4,9 @@
 MIT re-ports of the Intellindust GTR backbone line + multi-scale
 encoder. Importing this package is safe without the ``gtr`` extra; the
 fla dependency is required only to *construct* the attention modules
-(:func:`gtr_available` reports readiness).
+(:func:`gtr_available` reports readiness). ONNX export swaps the eager
+GLA kernels for the pure-ONNX lowering in :mod:`gla_onnx` via the
+export pipeline's ``prepare_onnx_export`` module-tree hook.
 """
 
 from __future__ import annotations
@@ -25,31 +27,25 @@ from autovision.tasks.detection.shared.gtr.encoder import (  # noqa: E402
     GTREncoder,
     get_activation,
 )
+from autovision.tasks.detection.shared.gtr.gla_onnx import (  # noqa: E402
+    chunk_gla_pure,
+    gla_forward_pure,
+)
 from autovision.tasks.detection.shared.gtr.spatial_swiglu import (  # noqa: E402
     ViTAdapterSpatialSwiGLU,
 )
 from autovision.tasks.detection.shared.gtr.vit_adapter import ViTAdapter  # noqa: E402
 
 __all__ = [
-    "GTR_ONNX_EXPORT_BLOCKER",
     "GTREncoder",
     "ViTAdapter",
     "ViTAdapterSpatialSwiGLU",
     "ConvNormLayer_fuse",
+    "chunk_gla_pure",
+    "gla_forward_pure",
     "get_activation",
     "gtr_available",
 ]
-
-#: Export surface of the GLA backbone. ``GTRViTBackbone`` carries this as
-#: its ``export_blocker``, so any model composed with it (the ``gtr/*``
-#: task families and ``detr/gtrvit-*``) is refused by the ONNX/TensorRT
-#: export pipeline with this message instead of an opaque tracer error.
-GTR_ONNX_EXPORT_BLOCKER = (
-    "ONNX/TensorRT export is unavailable for the GTR GLA backbone: its "
-    "chunk_gla and fused RMSNorm+gate kernels are custom CUDA ops without "
-    "an ONNX lowering yet (deployment engineering, design doc 31 G2; "
-    "TensorRT additionally needs the official gla_plugin.cu)."
-)
 
 
 def gtr_available() -> bool:
