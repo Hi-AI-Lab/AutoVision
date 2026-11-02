@@ -91,6 +91,13 @@ class VisionTransformerSpatialSwiGLU(VisionTransformer):
             blk.mlp.apply(self._init_vit_weights)
 
     def _apply_bid_scan(self, x, layer_idx):
+        # Deploy mode: one Gather with the precomputed per-layer index buffer
+        # (the CLS-free sibling of the base VisionTransformer path —
+        # convert_to_deploy builds the buffer without the CLS offset for this
+        # backbone). Without it the flip/reshape/transpose chain would be
+        # traced verbatim into the deploy graph.
+        if getattr(self, '_deploy_static_perm', False):
+            return x.index_select(1, self._bid_step_perm_full[layer_idx])
         # CLS-free version: the whole sequence is the patch grid.
         x = x.flip(1)
         if layer_idx % 2 == 1 and self.if_quad_dir:
@@ -111,8 +118,10 @@ class VisionTransformerSpatialSwiGLU(VisionTransformer):
         x = self._model.patch_embed(x)
 
         L = x.shape[1]
-        if self.bid_scan:
+        deploy_static = getattr(self, '_deploy_static_perm', False)
+        if self.bid_scan and not deploy_static:
             perm = torch.arange(L, device=x.device)
+            # bid_scan 的置换具有周期性：quad_dir 每 4 层回到 identity，否则每 2 层。
             period = 4 if self.if_quad_dir else 2
 
         outs_by_idx = {}
@@ -120,9 +129,14 @@ class VisionTransformerSpatialSwiGLU(VisionTransformer):
             x = blk(x)
             if self.bid_scan:
                 x = self._apply_bid_scan(x, i)
-                perm = self._update_perm(perm, i)
+                if not deploy_static:
+                    perm = self._update_perm(perm, i)
             if i in rl_set:
-                if self.bid_scan and ((i + 1) % period != 0):
+                if deploy_static:
+                    # convert_to_deploy() asserts return layers fall on period
+                    # boundaries, so the inverse permutation is identity.
+                    patch_out = x
+                elif self.bid_scan and ((i + 1) % period != 0):
                     patch_out = x[:, torch.argsort(perm), :]
                 else:
                     patch_out = x

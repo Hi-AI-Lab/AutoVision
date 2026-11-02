@@ -91,6 +91,7 @@ class GTRPoseEstimation(ONNXExportMixin, TaskNetwork):
             num_heads=num_heads,
             ffn_ratio=ffn_ratio,
             interaction_indexes=(3, 7, 11),
+            eval_spatial_size=self.image_size,
         )
         self.encoder = GTREncoder(
             in_channels=[embed_dim] * 3,

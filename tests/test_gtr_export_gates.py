@@ -344,6 +344,28 @@ def test_fp16_export_with_gla_fp32_pins(tmp_path):
     graph = onnx.load(str(out)).graph
     fp16_init = [t for t in graph.initializer if t.data_type == onnx.TensorProto.FLOAT16]
     assert fp16_init, "expected real fp16 initializers in the graph"
+
+    # The pins are graph-global: EVERY MatMul must stay fp32 (GTR is
+    # GEMM-dominated, so a single mixed-dtype MatMul means the dtype
+    # propagation across the GLA fp32-state boundary broke again).
+    inferred = onnx.shape_inference.infer_shapes(
+        onnx.load(str(out)), strict_mode=False, data_prop=True
+    )
+    dtypes = {
+        vi.name: vi.type.tensor_type.elem_type
+        for vi in list(inferred.graph.value_info) + list(inferred.graph.input)
+    }
+    dtypes.update({t.name: t.data_type for t in inferred.graph.initializer})
+    matmul_input_dtypes = {
+        dtypes.get(name)
+        for node in inferred.graph.node
+        if node.op_type == "MatMul"
+        for name in node.input
+    }
+    assert matmul_input_dtypes == {onnx.TensorProto.FLOAT}, (
+        f"fp16 graph carries non-fp32 MatMul inputs: {matmul_input_dtypes}"
+    )
+
     session = ort.InferenceSession(str(out), providers=["CPUExecutionProvider"])
     x = torch.rand(1, 3, 64, 64)
     feed = x.numpy().astype(np.float16)
@@ -393,3 +415,99 @@ def test_plain_models_have_no_blocker():
         dec_layers=1, num_heads=4, num_top_queries=10,
     )
     assert model._export_blocker() is None
+
+
+@requires_gtr_extra
+def test_openvino_export_end_to_end(tmp_path):
+    """OpenVINO export's parity gate replays the export-safe reference path
+    (regression: the gate deep-copied the model to CPU and ran the eager
+    fla kernels there, killing every GTR route with an opaque Triton
+    pointer error after the IR had already been produced)."""
+    pytest.importorskip("openvino")
+    pytest.importorskip("onnxruntime")
+    torch.manual_seed(0)
+    model = _build_depth()
+    out = model.export_openvino(
+        tmp_path / "model.xml", precision="fp32", device="CPU", verify=True
+    )
+    assert out.exists()
+    assert out.with_suffix(".bin").exists()
+
+
+@requires_gtr_extra
+def test_onnx_gate_reference_runs_after_hooks_restored(tmp_path):
+    """The ONNX gate's reference hooks itself explicitly instead of relying
+    on deepcopy-inheritance from the trace window: ``_verify_onnx`` must
+    also work invoked OUTSIDE a trace (hooks restored), where an inherited
+    reference would run the eager fla kernels and die on CPU."""
+    pytest.importorskip("onnxruntime")
+    torch.manual_seed(0)
+    model = _build_depth()
+    out = tmp_path / "model.onnx"
+    model.export_onnx(out, verify=False)
+    spec = model.model_input_spec
+    example_name, example_tensor = next(
+        iter(spec.example_inputs(batch_size=1).items())
+    )
+    # Post-export re-verify: must pass, not raise the Triton pointer error.
+    model._verify_onnx(out, example_name, example_tensor, "fp32")
+
+
+@requires_gtr_extra
+def test_backend_parity_reference_runs_on_cpu_model():
+    """The backend-parity reference helpers (TensorRT gate path) detect a
+    CPU-resident device-bound model and replay the export-safe path instead
+    of the eager fla kernels — outputs must be finite tensors."""
+    from autovision.export.export_onnx import (
+        _eager_reference_device_bound,
+        _forward_with_export_hooks,
+    )
+
+    torch.manual_seed(0)
+    model = _build_depth()
+    model.eval()
+    # The real gate runs post-ONNX-export, where deploy() has already fused
+    # the GLA projections; mirror that state here.
+    model.deploy()
+    x = torch.rand(2, 3, 64, 64)
+    assert _eager_reference_device_bound(model), (
+        "the deployed GTR model must report its eager forward as device-bound"
+    )
+    with torch.no_grad():
+        outputs = _forward_with_export_hooks(model, x)
+    tensors = outputs if isinstance(outputs, tuple) else (outputs,)
+    for tensor in tensors:
+        assert torch.isfinite(tensor).all()
+
+
+@requires_gtr_extra
+def test_spatial_swiglu_deploy_static_perm_matches_flip_path():
+    """The CLS-free deploy path honors ``_deploy_static_perm``: the static
+    index_select reproduces the flip/transpose chain bit-for-bit per layer,
+    and convert_to_deploy builds a CLS-free (length-L) perm buffer
+    (regression: the override ignored the flag, so the static permutation —
+    and with it the whole eval_spatial_size deploy stamping — was dead code
+    for every GTR route's backbone)."""
+    torch.manual_seed(0)
+    model = _build_depth()
+    model.eval()
+    adapter = model.backbone._adapter
+    vit = adapter.backbone
+    assert not hasattr(vit._model, "cls_token")
+    assert getattr(vit, "_deploy_static_perm", False) is False
+
+    model.deploy()
+    assert vit._deploy_static_perm is True
+    L = (adapter.eval_spatial_size[0] // vit.patch_size) ** 2
+    assert tuple(vit._bid_step_perm_full.shape) == (vit.depth, L)
+
+    tokens = torch.randn(2, L, vit.embed_dim)
+    for i in range(vit.depth):
+        static = vit._apply_bid_scan(tokens, i)
+        flipped = tokens.flip(1)
+        if i % 2 == 1 and vit.if_quad_dir:
+            gs = int(flipped.shape[1] ** 0.5)
+            flipped = flipped.reshape(flipped.shape[0], gs, gs, -1)
+            flipped = flipped.transpose(1, 2).flatten(1, 2)
+        # Both are pure permutations: equality, not allclose.
+        assert torch.equal(static, flipped), f"bid_scan layer {i} mismatch"

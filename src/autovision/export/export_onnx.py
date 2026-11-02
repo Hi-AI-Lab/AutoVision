@@ -158,6 +158,37 @@ def _dynamic_export_error(exc: BaseException) -> str:
     )
 
 
+def _forward_with_export_hooks(network: Any, example: Any) -> Any:
+    """``network.forward_backend`` with the export-safe module swaps active.
+
+    The GTR routes' eager forward runs fla's CUDA-only Triton GLA kernels,
+    so a parity reference that must run on CPU (the OpenVINO gate deep-copies
+    to CPU) replays the trace-time swapped path instead — numerically the
+    exported graph's own semantics. Networks without the duck-typed hook
+    (and hook-less modules) forward unchanged.
+    """
+    prepare = getattr(network, "_prepare_onnx_export_modules", None)
+    if not callable(prepare):
+        return network.forward_backend(example)
+    prepared = prepare()
+    try:
+        return network.forward_backend(example)
+    finally:
+        network._restore_onnx_export_modules(prepared)
+
+
+def _eager_reference_device_bound(network: Any) -> bool:
+    """True when the eager forward cannot run where the model currently
+    sits: a CPU-resident network with a ``cpu_eager_blocker`` module (the
+    duck-typed GTR GLA flag)."""
+    parameter = next(network.parameters(), None)
+    if parameter is None or parameter.device.type != "cpu":
+        return False
+    return any(
+        getattr(module, "cpu_eager_blocker", None) for module in network.modules()
+    )
+
+
 class ONNXExportPrecisionPolicy:
     """Per-model ops that must stay FP32 in an FP16 export."""
 
@@ -683,57 +714,67 @@ class ONNXExportMixin(nn.Module):
         reference = copy.deepcopy(self).cpu().float().eval()
         if hasattr(reference, "deploy"):
             reference.deploy()
-        session = ort.InferenceSession(str(out), providers=["CPUExecutionProvider"])
+        # The reference must replay the EXPORTED graph's semantics, not the
+        # eager CUDA-only kernels: run it through the same module swaps the
+        # trace used. Hooking it explicitly (not by deepcopy-inheritance
+        # from the trace window) keeps the gate correct wherever it runs,
+        # including a post-export re-verify on a hooks-restored model.
+        prepare = getattr(reference, "_prepare_onnx_export_modules", None)
+        prepared = prepare() if callable(prepare) else []
+        try:
+            session = ort.InferenceSession(str(out), providers=["CPUExecutionProvider"])
 
-        def _compare(tensor: torch.Tensor) -> None:
-            torch_outputs = reference.forward_backend(tensor.float().cpu())
-            if not isinstance(torch_outputs, (list, tuple)):
-                import dataclasses
-                if dataclasses.is_dataclass(torch_outputs):
-                    torch_outputs = [getattr(torch_outputs, f.name) for f in dataclasses.fields(torch_outputs)]
-            feeds = {}
-            for session_input in session.get_inputs():
-                feed = tensor.float().cpu()
-                if session_input.type == "tensor(float16)":
-                    feed = feed.half()
-                feeds[session_input.name] = feed.numpy()
-            onnx_outputs = session.run(None, feeds)
-            self.verify_onnx_export_outputs(torch_outputs, onnx_outputs, precision=precision)
+            def _compare(tensor: torch.Tensor) -> None:
+                torch_outputs = reference.forward_backend(tensor.float().cpu())
+                if not isinstance(torch_outputs, (list, tuple)):
+                    import dataclasses
+                    if dataclasses.is_dataclass(torch_outputs):
+                        torch_outputs = [getattr(torch_outputs, f.name) for f in dataclasses.fields(torch_outputs)]
+                feeds = {}
+                for session_input in session.get_inputs():
+                    feed = tensor.float().cpu()
+                    if session_input.type == "tensor(float16)":
+                        feed = feed.half()
+                    feeds[session_input.name] = feed.numpy()
+                onnx_outputs = session.run(None, feeds)
+                self.verify_onnx_export_outputs(torch_outputs, onnx_outputs, precision=precision)
 
-        # The comparison input is SEEDED RANDOM, not the spec's all-zero
-        # example: on a zero image a DETR's query selection has tie-broken
-        # grid coordinates (many equal scores), so element-wise near-ties
-        # between torch and the backend flip top-k boxes and the gate turns
-        # flaky on a perfectly valid graph (largest observed: box sums
-        # differing by ~0.5 on a 640px two-class model). Tracing still uses
-        # the spec example.
-        generator = torch.Generator().manual_seed(0)
-        compare_tensor = torch.rand(
-            example_tensor.shape, generator=generator, dtype=example_tensor.dtype
-        )
-        _compare(compare_tensor)
-        if dynamic_spatial:
-            # A graph that merely traced at one size can still be wrong at
-            # another; the gate runs a SECOND spatial size (torch vs ORT at
-            # the same size — the "does the dynamic graph stay accurate"
-            # question, independent of the variant's resize conventions).
-            # The probe scales DOWN for large examples (the common
-            # production need) and UP for small ones (a downscale would
-            # undercut feature-pyramid floors).
-            _, _, height, width = example_tensor.shape
-            factor = (2, 3) if min(height, width) >= 128 else (3, 2)
-            probe_height = max(1, height * factor[0] // factor[1])
-            probe_width = max(1, width * factor[0] // factor[1])
-            probe = torch.rand(
-                (example_tensor.shape[0], example_tensor.shape[1],
-                 probe_height, probe_width),
-                dtype=example_tensor.dtype,
+            # The comparison input is SEEDED RANDOM, not the spec's all-zero
+            # example: on a zero image a DETR's query selection has tie-broken
+            # grid coordinates (many equal scores), so element-wise near-ties
+            # between torch and the backend flip top-k boxes and the gate turns
+            # flaky on a perfectly valid graph (largest observed: box sums
+            # differing by ~0.5 on a 640px two-class model). Tracing still uses
+            # the spec example.
+            generator = torch.Generator().manual_seed(0)
+            compare_tensor = torch.rand(
+                example_tensor.shape, generator=generator, dtype=example_tensor.dtype
             )
-            logger.info(
-                "Dynamic-spatial parity probe at %dx%d (example %dx%d).",
-                probe_width, probe_height, width, height,
-            )
-            _compare(probe)
+            _compare(compare_tensor)
+            if dynamic_spatial:
+                # A graph that merely traced at one size can still be wrong at
+                # another; the gate runs a SECOND spatial size (torch vs ORT at
+                # the same size — the "does the dynamic graph stay accurate"
+                # question, independent of the variant's resize conventions).
+                # The probe scales DOWN for large examples (the common
+                # production need) and UP for small ones (a downscale would
+                # undercut feature-pyramid floors).
+                _, _, height, width = example_tensor.shape
+                factor = (2, 3) if min(height, width) >= 128 else (3, 2)
+                probe_height = max(1, height * factor[0] // factor[1])
+                probe_width = max(1, width * factor[0] // factor[1])
+                probe = torch.rand(
+                    (example_tensor.shape[0], example_tensor.shape[1],
+                     probe_height, probe_width),
+                    dtype=example_tensor.dtype,
+                )
+                logger.info(
+                    "Dynamic-spatial parity probe at %dx%d (example %dx%d).",
+                    probe_width, probe_height, width, height,
+                )
+                _compare(probe)
+        finally:
+            self._restore_onnx_export_modules(prepared)
 
     def _smoke_verify_fp16(self, out: Path, example_tensor: torch.Tensor) -> None:
         """Runtime smoke gate for fp16 graphs on builds without a CUDA EP.
@@ -999,7 +1040,20 @@ class ONNXExportMixin(nn.Module):
                 "int8": (2.0, 0.5),
             }[resolved_precision]
             with torch.no_grad():
-                expected = self.forward_backend(compare)
+                # The eager reference runs where the model sits. A CPU-resident
+                # GTR model cannot run its fla kernels there — fall back to the
+                # export-safe swapped path (the gate then checks engine-vs-
+                # exported-graph numerics, the strongest CPU check available —
+                # a CUDA-resident model keeps the eager-vs-engine gate).
+                if _eager_reference_device_bound(self):
+                    logger.warning(
+                        "TensorRT parity gate: eager forward unavailable on the "
+                        "model's device (cpu); comparing the engine against the "
+                        "export-safe reference path instead."
+                    )
+                    expected = _forward_with_export_hooks(self, compare)
+                else:
+                    expected = self.forward_backend(compare)
             runner_device = (
                 str(compare.device)
                 if compare.device.type == "cuda"

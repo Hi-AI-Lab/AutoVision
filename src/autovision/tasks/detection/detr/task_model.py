@@ -373,6 +373,7 @@ class DETRObjectDetection(ONNXExportMixin, TaskNetwork):
                 patch_size=spec.patch_size,
                 finetune=True,
                 ffn_ratio=spec.backbone_ffn_ratio,
+                eval_spatial_size=self.image_size,
             )
         else:
             self.backbone = ConvNeXtDetectionBackbone(

@@ -1152,15 +1152,17 @@ class ViTAdapter(nn.Module):
             # Spatial SwiGLU backbones have no pos_embed; any parameter gives the right device.
             buf_device = next(backbone.parameters()).device
             identity = torch.arange(L, dtype=torch.long, device=buf_device)
+            # CLS-free backbones (SpatialSwiGLU) permute the whole sequence;
+            # CLS backbones index over [CLS, patches] in one shot.
+            has_cls = hasattr(backbone._model, 'cls_token')
             full_perms = []
             for i in range(backbone.depth):
                 p = identity.flip(0)
                 if i % 2 == 1 and backbone.if_quad_dir:
                     p = p.view(eval_h_grid, eval_w_grid).t().reshape(-1).contiguous()
-                backbone.register_buffer(f'_bid_step_perm_{i}', p, persistent=False)
-                # Full-sequence index that maps over [CLS, patches] in one shot.
-                full_p = torch.cat([torch.zeros(1, dtype=torch.long, device=buf_device), p + 1])
-                full_perms.append(full_p.contiguous())
+                if has_cls:
+                    p = torch.cat([torch.zeros(1, dtype=torch.long, device=buf_device), p + 1])
+                full_perms.append(p.contiguous())
             # Stacked tensor: integer indexing in the forward loop is Dynamo-friendly
             # (no per-layer recompiles from f-string getattr).
             backbone.register_buffer('_bid_step_perm_full',

@@ -15,7 +15,7 @@ ONNX 图的 H/W 轴动态，导出时内置「第二尺寸 parity 探针」（to
 | `rtdetr/resnet18` 等 torchvision CNN | 支持 | 纯 CNN，可符号化 |
 | HGNetV2 谱系（`detr/n`、`detr/s`、`detr/hgnetv2-*`） | 支持 | 同上 |
 | HF 骨干（`detr/dinov2-*`、`detr/dinov3-*`） | 不支持 | 上游 transformers 在输入尺寸上有 Python 级分支 / 守卫，严格导出无法符号化；会以可读错误指引（导出静态 H/W 或改用可符号化骨干） |
-| `detr/gtrvit-s` | 支持 | GLA 走纯 ONNX 降级（`shared/gtr/gla_onnx.py`），eager 仍是 Triton/CUDA 核 |
+| GTR 全线（`detr/gtrvit-*`、`obb/pose/depth/semseg` 的 `gtr`） | 不支持 | chunk 循环按变体固定 token 数展开，图天生定形；`dynamic_spatial=True` 被可读报错快速拒绝（`dynamic_spatial_blocker`），在变体输入尺寸上静态导出即可 |
 
 ## int8 首层 fp32 配方
 
@@ -155,6 +155,16 @@ FP32 黑名单继续保护溢出敏感算子）。
   会被可读报错拒绝（用 `backend='onnx'` 或 `device='cuda'`）。Triton 核已
   迁移（2× 提速）；`torch.compile` 对 GLA 段负收益；官方自研核 +
   `gla_plugin.cu` 插件路线需自行编译 `shared/gtr/csrc`。
+- TensorRT / OpenVINO 的 parity 参考同样经 `prepare_onnx_export` 钩子回放
+  导出安全路径：OpenVINO 门禁的参考固定在 CPU 上（fla 核无法在 CPU
+  运行），TensorRT 门禁在模型驻留 CPU 时也回退该路径并告警——GPU 驻留
+  模型保持 eager-vs-engine 强校验不变。导出 CLI（`device=cpu` 默认）因此
+  对 GTR 的 `.engine` / `.xml` 目标不再崩在参考侧。
+- TensorRT 引擎从展开后的纯 ONNX 图构建（无 GLA plugin 节点）。上游
+  GTR 的 plugin 路线（每 ViT block 一个自定义核）是该图的延迟路线：官方
+  读数 det S fp16 batch1 ≈ 2.3 ms（4090 级），纯图引擎应预期明显更高的
+  延迟——要贴上游延迟需自行编译上游 `tensorrt_plugin/libgla_plugin.so`
+  并走其导出脚本。
 - parity 门禁按精度与 decode 形态分治（`export/parity_checks.py`）：pose
   / depth / semseg 的 fp32 导出做逐元素对拍（贪心行匹配，行重排放行、
   局部漂移必失败）；fp16 的这三类与任意精度的 det / obb 保持行求和不变

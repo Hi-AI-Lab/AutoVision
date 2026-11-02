@@ -327,6 +327,7 @@ class GTRViTBackbone(Module):
         patch_size: int = 16,
         finetune: bool = True,
         ffn_ratio: float = 4.0,
+        eval_spatial_size: tuple[int, int] | None = None,
     ) -> None:
         super().__init__()
         from autovision.errors import AutoVisionError
@@ -350,6 +351,11 @@ class GTRViTBackbone(Module):
             skip_weights_warning=True,
             patch_size=patch_size,
             ffn_ratio=ffn_ratio,
+            # Arms the deploy-time static bid_scan permutation (the
+            # pos_embed resize is a no-op on this pos_embed-free backbone):
+            # without it convert_to_deploy leaves the flip/transpose chain
+            # in every deploy/export graph.
+            eval_spatial_size=eval_spatial_size,
         )
         if not finetune:
             self._adapter.eval()

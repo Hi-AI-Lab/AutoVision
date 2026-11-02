@@ -65,6 +65,7 @@ class GTRSemanticSegmentation(ONNXExportMixin, TaskNetwork):
             num_heads=num_heads,
             ffn_ratio=ffn_ratio,
             interaction_indexes=_INTERACTION_INDEXES,
+            eval_spatial_size=self.image_size,
         )
         # Official semseg encoder: ONE stride-8 level (base config
         # ``scale_factors: [2.0], feat_strides: [8]``). Its output width

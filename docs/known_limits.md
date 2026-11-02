@@ -136,7 +136,10 @@ base→x，选型标准为可导出 + 许可干净），实现待落地。`detr/
   ——CPU 部署用 fp32 图，TensorRT 建议由 fp32 图自行管精度。
 - GTR 的 eager 前向依赖 fla 的 Triton 核（CUDA-only）：CPU 上构造
   `backend='torch'` 的推理引擎会被可读报错拒绝（用 `backend='onnx'` 或
-  `device='cuda'`）；CPU eager 部署走 ONNX 后端。
+  `device='cuda'`）；CPU eager 部署走 ONNX 后端。TensorRT / OpenVINO 导出
+  的 parity 参考经同一钩子回放导出安全路径：OpenVINO 参考固定在 CPU（此前
+  会在 eager fla 核上崩掉全部 GTR 路线），TensorRT 在模型驻留 CPU 时回退并
+  告警、GPU 驻留保持 eager-vs-engine 强校验。
 - ONNX FP16 parity 门禁需要 CUDA execution provider：无 CUDA EP 的构建（如
   CPU-only onnxruntime）退化为「执行 + 有限性」smoke 门禁（输出含非有限值即
   失败）并告警；ONNX 导出的示例输入跟随模型设备（GPU 上训练后可直接导出）。
@@ -154,6 +157,8 @@ base→x，选型标准为可导出 + 许可干净），实现待落地。`detr/
 - GTR 部署工程：eager 侧 Triton GLA 核已迁移（2× 提速），但 `torch.compile` 对
   GLA 段负收益、CUDA Graphs 与自研核原地写接口冲突（需 op 改造）；导出路线用
   纯 ONNX 降级（无需插件）；官方自研核 + `gla_plugin.cu` 插件路线需自行编译。
+  TensorRT 引擎从展开纯图构建（无 plugin 节点）：上游 plugin 路线才是延迟
+  路线（官方读数 det S fp16 b1 ≈ 2.3 ms），纯图引擎延迟应预期明显更高。
 - 官方训练增广（mosaic / mixup / zoom-out / color-jitter）未移植；姿态官方配方为
   `precision="32-true"`（`use_amp: False`）。
 

@@ -178,7 +178,7 @@ MODEL_CATALOG: tuple[ModelEntry, ...] = (
         coco_ap=53.6,
         latency_ms=1.225,
         exportable=_DETR_EXPORTABLE,
-        notes="Official GTR EMA weights; ONNX/TensorRT/OpenVINO via the pure-ONNX GLA lowering.",
+        notes="Official GTR EMA weights; ONNX/TensorRT/OpenVINO via the pure-ONNX GLA lowering (TRT builds from the unrolled pure graph, no GLA plugin — expect higher engine latency than the upstream plugin route).",
     ),
     ModelEntry(
         key="detr/gtrvit-m",
@@ -195,7 +195,7 @@ MODEL_CATALOG: tuple[ModelEntry, ...] = (
         coco_ap=57.3,
         latency_ms=1.462,
         exportable=_DETR_EXPORTABLE,
-        notes="Official GTR EMA weights; ONNX/TensorRT/OpenVINO via the pure-ONNX GLA lowering.",
+        notes="Official GTR EMA weights; ONNX/TensorRT/OpenVINO via the pure-ONNX GLA lowering (TRT builds from the unrolled pure graph, no GLA plugin — expect higher engine latency than the upstream plugin route).",
     ),
     ModelEntry(
         key="detr/gtrvit-l",
@@ -212,7 +212,7 @@ MODEL_CATALOG: tuple[ModelEntry, ...] = (
         coco_ap=58.9,
         latency_ms=1.908,
         exportable=_DETR_EXPORTABLE,
-        notes="Official GTR EMA weights; ONNX/TensorRT/OpenVINO via the pure-ONNX GLA lowering.",
+        notes="Official GTR EMA weights; ONNX/TensorRT/OpenVINO via the pure-ONNX GLA lowering (TRT builds from the unrolled pure graph, no GLA plugin — expect higher engine latency than the upstream plugin route).",
     ),
     ModelEntry(
         key="detr/gtrvit-x",
@@ -229,7 +229,7 @@ MODEL_CATALOG: tuple[ModelEntry, ...] = (
         coco_ap=59.4,
         latency_ms=2.115,
         exportable=_DETR_EXPORTABLE,
-        notes="Official GTR EMA weights; ONNX/TensorRT/OpenVINO via the pure-ONNX GLA lowering.",
+        notes="Official GTR EMA weights; ONNX/TensorRT/OpenVINO via the pure-ONNX GLA lowering (TRT builds from the unrolled pure graph, no GLA plugin — expect higher engine latency than the upstream plugin route).",
     ),
     # ── AutoVision DETR spectrum ───────────────────────────────────────
     ModelEntry(

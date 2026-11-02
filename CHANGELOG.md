@@ -8,7 +8,33 @@
 
 ## [Unreleased]
 
-（下一版本开发中。）
+### 修复
+
+- **GTR 路线的 OpenVINO 导出不再在 parity 门禁崩溃**：OpenVINO 参考被强制
+  deepcopy 到 CPU，而 eager GLA 是 fla 的 CUDA-only Triton 核——五条 GTR
+  路线（det/obb/pose/depth/semseg）在 `verify=True`（默认）下 IR 转换成功后
+  必然以 `ValueError: Pointer argument cannot be accessed from Triton` 失败。
+  参考现在经 `prepare_onnx_export` 钩子回放 trace 期同一导出安全路径（即导出
+  图自身的语义），CPU 上即可完成对拍；新增 OpenVINO 端到端门禁测试。
+- **GTR 路线的 TensorRT 引擎校验在模型驻留 CPU 时不再崩溃**：engine 校验的
+  eager 参考跑在模型所在设备上，而导出 CLI 默认 `device=cpu`——校验触发同一
+  Triton 错误并删除已构建的引擎。现在 CPU 驻留且存在 `cpu_eager_blocker`
+  模块时回退导出安全参考路径并告警；GPU 驻留模型保持 eager-vs-engine 强校验。
+- **GTR ONNX parity 门禁的参考侧显式挂钩**：此前 CPU 参考之所以走导出安全
+  路径，靠的是「deepcopy 恰好发生在 trace 窗口内、继承 `_onnx_trace=True`」
+  这一副作用——窗口外的任何 re-verify（如后置校验）都会落到 eager 核上崩溃。
+  参考现在显式挂钩（行为不变，不再依赖继承时序），新增窗口外 re-verify 回归
+  测试。
+- **GTR SpatialSwiGLU 骨干的 deploy 静态 bid_scan 置换生效**：两层原因使该
+  优化对所有路线都是死代码——`GTRViTBackbone` 从未向骨干传递
+  `eval_spatial_size`（`convert_to_deploy` 直接 return），且
+  `VisionTransformerSpatialSwiGLU._apply_bid_scan` 覆写不检查
+  `_deploy_static_perm`。现在五个构建点传入 `image_size`，覆写遵守标记（静态
+  `index_select` 与 flip 链逐位一致，含 CLS-free 置换 buffer 构建），deploy /
+  导出图里的 Flip+Reshape+Transpose 链与常量 `argsort` 簿记被单个 Gather 替代；
+  顺带移除从未被读取的 per-layer 置换 buffer 注册。
+- **修正 `docs/export.md` 动态 H/W 支持面表**：GTR 全线此前被误标为
+  「支持」，实际 `dynamic_spatial=True` 被 `dynamic_spatial_blocker` 可读拒绝。
 
 ## [0.4.0] - 2026-11-02
 

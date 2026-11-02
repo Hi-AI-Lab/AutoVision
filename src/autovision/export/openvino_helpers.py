@@ -72,7 +72,13 @@ def _verify_openvino_parity(
     example_inputs = model.model_input_spec.example_inputs(batch_size=2)
     input_name = next(iter(example_inputs))
     example = example_inputs[input_name].cpu().float()
-    torch_outputs = reference.forward_backend(example)
+    # The reference replays the trace-time swapped path, not the eager
+    # kernels: the IR is compiled from the swapped-path ONNX, and the
+    # reference is forced onto CPU where device-bound eager kernels (the
+    # GTR GLA fla/Triton ops) cannot run at all.
+    from autovision.export.export_onnx import _forward_with_export_hooks
+
+    torch_outputs = _forward_with_export_hooks(reference, example)
     if not isinstance(torch_outputs, (list, tuple)) and dataclasses.is_dataclass(torch_outputs):
         torch_outputs = [
             getattr(torch_outputs, f.name) for f in dataclasses.fields(torch_outputs)
