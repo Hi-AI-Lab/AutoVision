@@ -9,7 +9,7 @@
 site_name: AutoVision
 site_description: 企业级视觉模型训练框架：预训练/蒸馏 → 微调 → 评测 → 导出
 site_url: https://hi-agi-lab.github.io/AutoVision/
-repo_url: https://github.com/hi-agi-lab/AutoVision
+repo_url: https://github.com/Hi-AI-Lab/AutoVision
 
 theme:
   name: material

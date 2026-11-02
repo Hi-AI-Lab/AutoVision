@@ -1,19 +1,20 @@
 # AutoVision
 
-Enterprise-grade visual model training framework: self-supervised pretrain /
-distill → finetune → evaluate → export in one chain. Covers detection, rotated
-boxes, instance / panoptic / semantic segmentation, pose, depth, and
-classification; the Python API and `autovision-cli` share the same strict
-Pydantic validation.
+Enterprise-grade visual model training framework: train → evaluate → export →
+deploy in one chain. Its flagship model family is **GTR** (MIT): one shared
+backbone covering detection, oriented detection, instance / semantic
+segmentation, depth and pose, with all 26 official weights registered and
+sha256-pinned. The Python API and `autovision-cli` share one strict Pydantic
+validation surface.
 
 > **Distribution name**: the PyPI package is `autovision-framework`, while the
-> import package stays `autovision` and the CLI stays `autovision-cli`. This
-> project is unrelated to the unrelated `autovision` 0.0.1 package on PyPI;
-> make sure you install `autovision-framework`.
+> import package stays `autovision` and the CLI stays `autovision-cli`. An
+> unrelated `autovision` 0.0.1 package exists on PyPI — make sure you install
+> `autovision-framework`.
 
-**Links**: [Source repository](https://github.com/hi-agi-lab/AutoVision) ·
+**Links**: [Source repository](https://github.com/Hi-AI-Lab/AutoVision) ·
 [Documentation](https://hi-agi-lab.github.io/AutoVision/) ·
-[Changelog](https://github.com/hi-agi-lab/AutoVision/blob/main/CHANGELOG.md)
+[Changelog](https://github.com/Hi-AI-Lab/AutoVision/blob/main/CHANGELOG.md)
 
 ## Installation
 
@@ -22,73 +23,82 @@ Python ≥ 3.10:
 ```bash
 pip install autovision-framework
 
-# Common extras: HF backbones + timm + ONNX export
-pip install "autovision-framework[transformers,timm,export]"
+# GTR route: backbone + official weight download + ONNX export (CUDA required)
+pip install "autovision-framework[gtr,download,export]"
 
-# Pretrained RF-DETR direct inference
+# CPU-friendly detection route
 pip install "autovision-framework[rfdetr,export]"
 ```
 
 Model packages load lazily per extra; a missing extra yields an empty registry
 listing instead of an error. See the
-[repository README](https://github.com/hi-agi-lab/AutoVision#installation)
-for the full extras table.
+[repository README](https://github.com/Hi-AI-Lab/AutoVision#readme)
+for the full extras table and the GTR task matrix.
 
-## Quick start
+## Quick start (GTR)
 
-No training — load released weights and predict:
+Download the official MIT weights, then run inference — no training:
 
-```python
-import autovision
-
-model = autovision.detection("rfdetr/rf-detr-small", pretrained=True)
-result = model.predict("image.jpg")   # {'bboxes': ..., 'scores': ..., 'labels': ...}
-model.export("model.onnx")            # parity gate + postprocess spec
+```bash
+python scripts/download_gtr_assets.py --task det   # or --all for all 26
 ```
 
-Object detection, train → validate → predict → export:
-
 ```python
 import autovision
 
-data = autovision.ensure_coco8()   # synthetic smoke dataset; swap in COCO/YOLO configs
-model = autovision.detection("rtdetr/resnet18").train(
-    out="runs/det1", data=data, steps=2000, batch_size="auto",
+model = autovision.detection("detr/gtrvit-s", pretrained=True)  # COCO AP 53.6
+result = model.predict("image.jpg")   # {'bboxes': ..., 'scores': ..., 'labels': ...}
+model.export("model.onnx")            # ONNX export, parity gate on by default
+```
+
+Finetune from official weights (pose shown; five more tasks share the shape):
+
+```python
+result = autovision.train_pose_estimation(
+    out="runs/pose", data=data,       # COCO person_keypoints JSON + images
+    model="gtr/s",
+    model_args={"checkpoint": "gtrpose_s_coco"},   # omit for random init
 )
-model.val(data=data)          # {'map': ..., 'map_50': ...}
-model.predict("image.jpg")    # {'bboxes': ..., 'scores': ..., 'labels': ...}
-model.export("model.onnx")    # dispatches by .onnx / .engine / .pt suffix
+print(result.best_exported_model_path, result.metrics)
 ```
 
 Equivalent CLI (same Pydantic validation):
 
 ```bash
-autovision-cli train-object-detection out=runs/det1 data=data.yaml steps=2000
-autovision-cli val     model=runs/det1/exported_models/exported_best.pt data=coco8
-autovision-cli predict model=runs/det1/exported_models/exported_best.pt images=dir/ out=preds/ threshold=0.5
+autovision-cli list-models --task detection --pretrained
+autovision-cli train-pose-estimation out=runs/pose data=pose.yaml model=gtr/s \
+    model_args='{"checkpoint": "gtrpose_s_coco"}'
+autovision-cli predict model=runs/pose/exported_models/exported_best.pt images=dir/ out=preds/
 ```
+
+CPU smoke path (no GPU): `rtdetr/resnet18` on the bundled `coco8` dataset via
+`autovision.detection("rtdetr/resnet18").train(...)`.
 
 ## Common extras
 
 | extra | capability |
 |---|---|
+| `gtr` | GTR GLA backbone (Triton forward, CUDA required) |
+| `download` | on-demand GTR upstream weight download (huggingface_hub) |
+| `export` | ONNX export + numerical parity gate |
 | `transformers` | DINOv2 / DINOv3 backbones (HuggingFace weights) |
 | `timm` | full timm backbone zoo (arbitrary input channels) |
-| `export` | ONNX export + numerical parity gate |
+| `rfdetr` | RF-DETR detection family (CPU-friendly released weights) |
 | `openvino` | OpenVINO IR export and runtime |
 | `video` | video / RTSP reference inference runtime |
 | `serving` | FastAPI reference serving (`/predict`, `/metrics`) |
-| `gtr` | GTR GLA backbone (Triton, CUDA required) |
-| `download` | on-demand GTR upstream weight download (huggingface_hub) |
 | `dev` | pytest / ruff (same as CI) |
+
+GTR exports ONNX / TensorRT / OpenVINO via the pure-ONNX GLA lowering
+(fixed-size graphs); the eager forward needs the `gtr` extra on CUDA.
 
 ## License
 
 Apache-2.0 (AutoVision original code; full text:
 <https://www.apache.org/licenses/LICENSE-2.0>). Third-party component and
-weight provenance ship in `NOTICE` and `THIRD_PARTY_LICENSES.md`.
-Restricted-license weights (DINOv2 CC-BY-NC 4.0 / DINOv3 License) are not
-downloaded by default; user-held weights may not be redistributed.
+weight provenance ship in `NOTICE` and `THIRD_PARTY_LICENSES.md`. GTR weights
+are MIT. Restricted-license weights (DINOv2 CC-BY-NC 4.0 / DINOv3 License)
+are not downloaded by default; user-held weights may not be redistributed.
 
 Full documentation (model zoo, benchmarks, export details, known limits) is
 available on the

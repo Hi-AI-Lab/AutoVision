@@ -57,11 +57,11 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/hi-agi-lab/AutoVision"
+Homepage = "https://github.com/Hi-AI-Lab/AutoVision"
 Documentation = "https://hi-agi-lab.github.io/AutoVision/"
-Repository = "https://github.com/hi-agi-lab/AutoVision"
-Issues = "https://github.com/hi-agi-lab/AutoVision/issues"
-Changelog = "https://github.com/hi-agi-lab/AutoVision/blob/main/CHANGELOG.md"
+Repository = "https://github.com/Hi-AI-Lab/AutoVision"
+Issues = "https://github.com/Hi-AI-Lab/AutoVision/issues"
+Changelog = "https://github.com/Hi-AI-Lab/AutoVision/blob/main/CHANGELOG.md"
 
 [project.scripts]
 autovision-cli = "autovision.cli._app:cli_entrypoint"
