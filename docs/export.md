@@ -15,7 +15,7 @@ ONNX 图的 H/W 轴动态，导出时内置「第二尺寸 parity 探针」（to
 | `rtdetr/resnet18` 等 torchvision CNN | 支持 | 纯 CNN，可符号化 |
 | HGNetV2 谱系（`detr/n`、`detr/s`、`detr/hgnetv2-*`） | 支持 | 同上 |
 | HF 骨干（`detr/dinov2-*`、`detr/dinov3-*`） | 不支持 | 上游 transformers 在输入尺寸上有 Python 级分支 / 守卫，严格导出无法符号化；会以可读错误指引（导出静态 H/W 或改用可符号化骨干） |
-| `detr/gtrvit-s` | 不支持 | 带 export_blocker（GLA 无 ONNX 降级） |
+| `detr/gtrvit-s` | 支持 | GLA 走纯 ONNX 降级（`shared/gtr/gla_onnx.py`），eager 仍是 Triton/CUDA 核 |
 
 ## int8 首层 fp32 配方
 
@@ -127,17 +127,39 @@ FP32 黑名单继续保护溢出敏感算子）。
 
 ## parity 门禁与示例输入
 
-- ONNX FP16 parity 门禁在无 CUDA execution provider 时跳过并告警。
+- ONNX FP16 parity 门禁需要 CUDA execution provider：无 CUDA EP 的
+  onnxruntime 构建（如 CPU-only pip 包）退化为「执行 + 有限性」smoke 门禁
+  （CPU EP 实际执行图，输出含非有限值即失败）并告警；精确数值 parity 在
+  CUDA EP 构建上运行。ORT CPU 会把 fp16 图内部转 fp32 执行，直接逐元素
+  parity 会误报，因此不在 CPU EP 上做精确对拍。
 - ONNX 导出的示例输入跟随模型设备（GPU 上训练后可直接导出）。
 - OpenVINO IR 同样走对拍门禁；`precision=fp16` 可出半精度 IR。
 
 ## GTR 导出与部署现状
 
-- GTR 模型（含 `detr/gtrvit-*`）当前不可导出 ONNX/TensorRT：导出入口以明确报错
-  拒绝（GLA 自定义 CUDA 核无 ONNX 降级，见 `GTRViTBackbone.export_blocker`）；
-  四个 GTR 任务模型的导出 verify 钩子已就位，随部署工程落地生效。
-- Triton GLA 核已迁移（2× 提速）；`torch.compile` 对 GLA 段负收益；CUDA Graphs
-  与自研核原地写接口冲突（需 op 改造）；TensorRT 部署需官方 `gla_plugin.cu`。
+- GTR 全部五条路线（`detr/gtrvit-*`、`obb/gtr`、`pose/gtr`、`depth/gtr`、
+  `semseg/gtr`）均可导出 ONNX/TensorRT/OpenVINO：导出管线在 trace 前经
+  `prepare_onnx_export` 模块树钩子把 GLA 换成纯 ONNX 降级
+  （`shared/gtr/gla_onnx.py`，标准 opset-17 算子，trace 后还原，eager
+  训练/推理路径不受影响），验证参考与图同用降级路径，CPU 即可跑完 parity
+  门禁；五条路线的最小端到端导出门禁见 `tests/test_gtr_export_gates.py`。
+- 导出为固定尺寸图（GTR 输入尺寸由变体定义；chunk 循环按导出尺寸展开，
+  `dynamic_spatial=True` 会被可读报错快速拒绝）。导出耗时随尺寸增长
+  （640² 约 6 分钟、1024² 约 25 分钟，dynamo 展开为主因），fp32 图
+  84–124 MB。
+- fp16 导出可用：GLA 的 fp32 状态段经 `onnx_fp32_op_types` 钉住 MatMul/
+  Resize 以保持图一致；因 GTR 计算以 GEMM 为主，fp16 主要加速 Conv 段
+  （ORT-GPU/OpenVINO），ORT CPU 上反而更慢——CPU 用 fp32 图，TensorRT
+  从 fp32 图自行管精度。
+- eager GLA 仍是 fla Triton / CUDA 核：CPU 上构造 `backend='torch'` 引擎
+  会被可读报错拒绝（用 `backend='onnx'` 或 `device='cuda'`）。Triton 核已
+  迁移（2× 提速）；`torch.compile` 对 GLA 段负收益；官方自研核 +
+  `gla_plugin.cu` 插件路线需自行编译 `shared/gtr/csrc`。
+- parity 门禁按精度与 decode 形态分治（`export/parity_checks.py`）：pose
+  / depth / semseg 的 fp32 导出做逐元素对拍（贪心行匹配，行重排放行、
+  局部漂移必失败）；fp16 的这三类与任意精度的 det / obb 保持行求和不变
+  式——fp16 简并权重有实测 ~0.8 的 decode 相邻漂移、det/obb 图内 top-k
+  在任意精度会整行换入近平局候选，逐元素对齐不可行。
 - 官方训练增广（mosaic / mixup / zoom-out / color-jitter）未移植；姿态官方配方为
   `precision="32-true"`（`use_amp: False`）。
 

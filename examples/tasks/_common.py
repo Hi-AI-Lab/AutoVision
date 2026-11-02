@@ -64,24 +64,6 @@ EOMT_MODEL_ARGS = {
     "num_attention_heads": 4,
 }
 
-#: Tiny RT-DETR configuration shared by detection / OBB examples.
-RTDETR_MODEL_ARGS = {
-    "backbone": "torchvision/resnet18",
-    "image_size": (64, 64),
-    "hidden_dim": 32,
-    "num_queries": 10,
-    "dec_layers": 2,
-    "num_heads": 4,
-    "num_top_queries": 10,
-}
-
-RTDETR_TRANSFORM_ARGS = {
-    "scale_jitter": None,
-    "photometric_distort_prob": 0.5,
-    "random_zoom_out_prob": None,
-    "random_iou_crop_prob": None,
-}
-
 #: OBB has its own transform schema (no scale-jitter/crop keys).
 OBB_TRANSFORM_ARGS = {
     "photometric_distort_prob": None,
@@ -539,8 +521,10 @@ def gtr_requirement() -> None:
 
     if importlib.util.find_spec("fla") is None or not torch.cuda.is_available():
         raise SystemExit(
-            "This example trains the GTR family and needs the `gtr` extra on a "
+            "This example runs the GTR family and needs the `gtr` extra on a "
             "CUDA machine:\n"
             "  pip install -e '.[gtr]'\n"
-            "Run with --dry-run to inspect the data contract without training."
+            "Training examples: re-run with --dry-run to inspect the data "
+            "contract. Inference examples: pass --weights exported from a "
+            "non-GTR training run."
         )

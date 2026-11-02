@@ -125,11 +125,25 @@ base→x，选型标准为可导出 + 许可干净），实现待落地。`detr/
 
 ## 导出与部署
 
-- GTR 模型（含 `detr/gtrvit-*`）不可导出 ONNX/TensorRT：导出入口以明确报错拒绝
-  （GLA 自定义 CUDA 核无 ONNX 降级，见 `GTRViTBackbone.export_blocker`）；四个 GTR
-  任务模型的导出 verify 钩子已就位，随部署工程落地生效。
-- ONNX FP16 parity 门禁在无 CUDA execution provider 时跳过并告警；ONNX 导出的示例
-  输入跟随模型设备（GPU 上训练后可直接导出）。
+- GTR 全部五条路线（`detr/gtrvit-*`、`obb/gtr`、`pose/gtr`、`depth/gtr`、
+  `semseg/gtr`）已可导出 ONNX/TensorRT/OpenVINO：trace 期经
+  `prepare_onnx_export` 钩子换用 GLA 纯 ONNX 降级
+  （`shared/gtr/gla_onnx.py`），eager 路径不变；导出为固定尺寸图（
+  `dynamic_spatial=True` 会被快速拒绝），五条路线的端到端门禁在
+  `tests/test_gtr_export_gates.py`。fp16 导出可用：GLA 的 fp32 状态段经
+  `onnx_fp32_op_types`（MatMul/Resize）钉住以保持图一致，但 GTR 的计算以
+  GEMM 为主，fp16 主要惠及 Conv 段（ORT-GPU/OpenVINO），ORT CPU 反而更慢
+  ——CPU 部署用 fp32 图，TensorRT 建议由 fp32 图自行管精度。
+- GTR 的 eager 前向依赖 fla 的 Triton 核（CUDA-only）：CPU 上构造
+  `backend='torch'` 的推理引擎会被可读报错拒绝（用 `backend='onnx'` 或
+  `device='cuda'`）；CPU eager 部署走 ONNX 后端。
+- ONNX FP16 parity 门禁需要 CUDA execution provider：无 CUDA EP 的构建（如
+  CPU-only onnxruntime）退化为「执行 + 有限性」smoke 门禁（输出含非有限值即
+  失败）并告警；ONNX 导出的示例输入跟随模型设备（GPU 上训练后可直接导出）。
+  即使有 CUDA EP，fp16 的 pose / depth / semseg 与任意精度的 det / obb parity
+  仍为行求和不变式（fp16 简并权重存在 decode 相邻真实漂移、det/obb 图内
+  top-k 会整行换入近平局候选，逐元素对齐不可行）；fp32 的 pose / depth /
+  semseg 为逐元素对拍。
 - 动态 H/W 支持面、int8 首层 fp32 配方、TensorRT 11 适配见[导出与部署](export.md)。
 - int8 全量 AP 报告（`scripts/measure_int8_accuracy.py`）需要兼容的
   ONNX Runtime / TensorRT 环境；`export` extra 已要求 `numpy>=1.25`
@@ -137,9 +151,9 @@ base→x，选型标准为可导出 + 许可干净），实现待落地。`detr/
   仍是旧 numpy，所以本地 ONNX 集成测试按环境门控跳过。
 - `examples/cpp/` 是参考运行时，不是 ABI/SDK；完整构建需要 ONNX Runtime 与
   OpenCV 开发库，host-only 后处理测试只需 g++。
-- GTR 部署工程：Triton GLA 核已迁移（2× 提速），但 `torch.compile` 对 GLA 段负收益、
-  CUDA Graphs 与自研核原地写接口冲突（需 op 改造）、TensorRT 部署需官方
-  `gla_plugin.cu`。
+- GTR 部署工程：eager 侧 Triton GLA 核已迁移（2× 提速），但 `torch.compile` 对
+  GLA 段负收益、CUDA Graphs 与自研核原地写接口冲突（需 op 改造）；导出路线用
+  纯 ONNX 降级（无需插件）；官方自研核 + `gla_plugin.cu` 插件路线需自行编译。
 - 官方训练增广（mosaic / mixup / zoom-out / color-jitter）未移植；姿态官方配方为
   `precision="32-true"`（`use_amp: False`）。
 

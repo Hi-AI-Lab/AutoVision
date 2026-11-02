@@ -10,8 +10,81 @@
 
 （下一版本开发中。）
 
+### 修复
+
+- **ONNX 导出不再遗留孤儿外部数据文件**：dynamo 导出器把全部 initializer 写到
+  `<name>.onnx.data`，onnxslim 内联回图后成功路径仍会把这个 sidecar 移到最终
+  产物旁（实测每个 GTR fp32/fp16 产物旁遗留 ~45MB 死文件，且 fp32/fp16 的
+  `.data` 逐字节相同）。导出收尾现在检查最终图：仍有外部 initializer 引用
+  （如超过 ~2GB protobuf 上限的图）则保留 sidecar，否则删除。
+- **FP16 导出在无 CUDA execution provider 的 onnxruntime 构建上不再零验证**：
+  此前 `verify=True` 的 fp16 导出在该场景只打告警就跳过（`_verify_onnx` 直接
+  return），数值完全不设防。现退化为「执行 + 有限性」smoke 门禁——在 CPU EP
+  上以 parity 同款种子随机输入实际执行图，任一输出含非有限值即判导出失败；
+  精确数值 parity 仍需 CUDA EP（ORT CPU 跑 fp16 图会内部转 fp32，逐元素
+  parity 会误报）。
+- **GTR parity 门禁按精度与 decode 形态分治**，消除行求和归约的误差抵消盲区：
+  新增 `export/parity_checks.py` 共享帮助模块（贪心行匹配 + 匹配后逐元素
+  比较）。pose（图内无 top-k，固定顺序输出全部 query）与 depth / semseg
+  （稠密图）在 fp32 下从「`sum(dim=…)` 后比较」升级为逐元素比较——历史上
+  ±0.5 成对漂移可在求和中完全抵消并绕过门禁，现在必然失败；合法的行重排
+  （近简并分数下的 top-k 翻转）经行匹配后仍放行。fp16 下的 pose/depth/
+  semseg 与任意精度下的 det / obb 保留行求和不变式：fp16 图在简并权重上
+  存在实测 ~0.8 的 decode 相邻真实漂移、det/obb 图内 top-k 在任意精度都会
+  整行换入不同候选（观察过 ~0.5 的 box-sum 差异），逐元素对齐不存在。
+  `verify_onnx_export_outputs` 钩子新增 keyword-only `precision` 参数
+  （默认 fp32，向后兼容），ONNX 与 OpenVINO 门禁均传入。
+
+### 新增
+
+- **GTR 全线支持 ONNX/TensorRT/OpenVINO 导出**：新增 GLA 纯 ONNX 降级
+  （`tasks/detection/shared/gtr/gla_onnx.py`，fla 同款显式逐通道衰减的
+  chunkwise 递推，标准 opset-17 算子，fp32 状态防 fp16 饱和）；导出管线
+  新增 `prepare_onnx_export` 模块树钩子，trace 期把 eager GLA（Triton/
+  CUDA 核）换成降级实现并在 `finally` 中还原（encoder 并行流、semseg 头
+  einsum 同步切换），eager 训练/推理路径不变。解除 `GTR_ONNX_EXPORT_BLOCKER`，
+  五条 GTR 路线（`detr/gtrvit-*`、`obb/gtr`、`pose/gtr`、`depth/gtr`、
+  `semseg/gtr`）的模型目录行 `exportable` 翻开；每条路线补最小端到端
+  导出门禁（CPU 可跑），GLA 降级配 fp64 朴素递推 oracle 与 fla CUDA
+  对拍（含强负门控防溢出回归）。顺带修复 `ConvNormLayer_fuse
+  .convert_to_deploy` 不幂等（验证阶段二次 deploy 会崩）与 pose 后处理
+  gather 维度错配（按关键点张量秩双分支：部署布局 (B,N,K,2) 走上游
+  `deploy_mode` 逐点 gather，扁平训练布局 (B,N,K·2) 保持原路径——此前
+  部署后的每次真实姿态推理都会在 `torch.gather` 崩溃）。GTR 导出面同步
+  补齐：fp16 导出可用（GLA 经 `onnx_fp32_op_types` 钉住 MatMul/Resize
+  保持图一致；GEMM 为主的 GTR 在 ORT CPU 上 fp16 更慢，见 known_limits）；
+  `dynamic_spatial=True` 与 CPU `backend='torch'` 两类不适用场景由
+  duck-typed 模块树守卫快速可读拒绝（`dynamic_spatial_blocker` /
+  `cpu_eager_blocker`），不再出现符号推理 grinding 或晦涩的 Triton 报错。
+
 ### 文档
 
+- **任务示例默认全面切换到 GTR**：`examples/tasks/` 六条 GTR 路线的推理与
+  训练脚本统一默认 GTR——`detection.py` 默认权重从 `rfdetr/rf-detr-nano`
+  改为官方 `detr/gtrvit-s`（MIT，含 `--model rfdetr/rf-detr-nano` 的 CPU
+  友好回退），`detection_train.py` 从 RT-DETR tiny 改为 `detr/gtrvit-s`
+  tiny（64px / 10 queries / 随机初始化），`oriented_detection_train.py` /
+  `instance_segmentation_train.py` / `semantic_segmentation_train.py` 从
+  rtdetr-obb / dinov2-eomt / torchvision 线性头改为 `gtr/s` tiny
+  （随机初始化）；GTR 训练/推理脚本统一前置 `gtr_requirement()` 守卫
+  （CUDA + fla 缺失时给出可读指引）。`_common` 的 RT-DETR tiny 常量随调用
+  方移除；GTR 部署边界（tiny 导出 / `--dry-run` 离线检查）写入脚本 docstring。
+  已验证：8 个训练示例 `--dry-run` 全过，4 个改动脚本在 CUDA 上 2 步真实
+  跑通（train → val → export），6 个 GTR 推理脚本加载官方权重全部出框/
+  出图（机场图上 `detr/gtrvit-s` 检出 12飞机 + 1巴士）；tests/test_task_examples.py
+  33 项全过。`examples/tasks/README.md` 与 `docs/task_examples(.en).md`
+  的安装 / 任务矩阵 / 默认权重表同步更新。
+- **双语 README 重构为「GTR 优先」**：GTR（MIT）提为首个正式章节——一个共享
+  骨干覆盖六任务的定位、26 个官方权重的逐任务指标表与部署边界；快速开始
+  全程 GTR 化（安装 → `download_gtr_assets.py` 下载 → `pretrained=True`
+  推理/导出 → `model_args.checkpoint` 官方权重直载微调）；任务入口表只列
+  GTR 路线（全景分割 / 分类标注暂无 GTR）；折叠能力区新增「GTR 训练与部署
+  细节」；移除「开发」章节与安装节的 extras 一览折叠块（安装命令改为 GTR
+  组合 `.[gtr,download,export]`，其余 extras 指向 `pyproject.toml` 与权重
+  下载文档；贡献 / 发布 / 安全披露入口并入「许可与溯源」）；能力子系统、
+  检测谱系与用户自持权重、导出部署、视频推理、serving、进阶功能收敛为折叠节。顺带同步两处过时表述：GTR 导出状态改为「ONNX/TensorRT/OpenVINO
+  全支持（GLA 纯 ONNX 降级，固定尺寸图）」，与已知限制页及目录行为一致；
+  版本号更新为 0.3.2。
 - **P0 生态互链落地**：双语 README 新增「行业方案 / Industry solutions」
   小节，链接 8 个行业场景方案仓与生态设计页；8 个场景仓 README 已加
   "Powered by AutoVision" 徽章、PyPI 徽章与框架回链，并统一添加

@@ -160,7 +160,7 @@ parity 探针，本轮实测）：`rtdetr/resnet18` ✅、`detr/hgnetv2-b0`（25
 `detr/dinov3-convnext-*`）不支持——上游 transformers 在**输入尺寸上有 Python 级
 分支/守卫**（ViT 嵌入的 patch 数分支、ConvNeXt 的 stage-grid 守卫），严格导出
 无法把它们符号化，现以可读错误指引（导出静态 H/W 或改用可符号化骨干）拒绝；`detr/gtrvit-s`
-本身带 export_blocker（GLA 无 ONNX 降级），不适用。HF 骨干的**静态**导出此前
+走 GLA 纯 ONNX 降级导出（`shared/gtr/gla_onnx.py`，门禁见 `tests/test_gtr_export_gates.py`）。HF 骨干的**静态**导出此前
 在 transformers ≥5.x 全线失败（首个 eager 前向在 `threading.Lock` 下安装
 output-capturing hooks，dynamo 无法 trace `with <lock>`），已修复（trace 前
 warm-up 一次前向）。

@@ -9,8 +9,10 @@ Every example:
 
 - writes a tiny synthetic dataset when `--data` is omitted (except detection,
   which uses the bundled `coco8` smoke set);
-- trains a small model for 1-3 steps so it runs on CPU (pose/depth need the
-  GTR CUDA stack);
+- defaults to the GTR family: inference loads the official MIT checkpoints,
+  training runs a tiny random-init GTR configuration for 1-3 steps (needs
+  `.[gtr]` + CUDA; only panoptic/classification have no GTR route and stay
+  CPU-friendly);
 - prints the checkpoint, exported model, validation metrics and class map;
 - can render one prediction with `--predict-image` and copy the exported
   `.pt` with `--export`;
@@ -19,9 +21,9 @@ Every example:
 ## Install
 
 ```bash
-pip install -e ".[transformers,timm,export]"   # EOMT / detection examples
-# pose + depth only:
-pip install -e ".[gtr]"                        # CUDA + Triton required
+pip install -e ".[gtr,download,export]"   # GTR examples (CUDA + Triton required)
+# panoptic/classification only (CPU-friendly):
+pip install -e ".[transformers,timm,export]"
 ```
 
 ## Quick start
@@ -87,10 +89,11 @@ Apache-2.0 core.
 | `--device auto\|cpu\|cuda` | inference device |
 | `--out DIR` | output directory (default: `runs/examples/<task>`) |
 
-Detection additionally accepts `--model KEY` (default `rfdetr/rf-detr-nano`)
-and the GTR tasks accept `--checkpoint NAME` / `--variant s|m|l|x`
-(official MIT assets). Panoptic/classification have no released task
-checkpoint and require `--weights`.
+Detection additionally accepts `--model KEY` (default `detr/gtrvit-s`;
+pass `rfdetr/rf-detr-nano` for a CPU-friendly released checkpoint) and the
+GTR tasks accept `--checkpoint NAME` / `--variant s|m|l|x` (official MIT
+assets). Panoptic/classification have no released task checkpoint and
+require `--weights`.
 
 ## Common flags (training examples)
 
@@ -112,7 +115,7 @@ checkpoint and require `--weights`.
 
 | Task | Inference | Training | Default inference weights |
 |---|---|---|---|
-| Detection | `detection.py` | `detection_train.py` | `rfdetr/rf-detr-nano` |
+| Detection | `detection.py` | `detection_train.py` | `detr/gtrvit-s` (GTR, COCO) |
 | Oriented detection | `oriented_detection.py` | `oriented_detection_train.py` | `gtrobb_s_dota` (GTR, DOTA) |
 | Instance segmentation | `instance_segmentation.py` | `instance_segmentation_train.py` | `gtrseg_s_coco` (GTR, COCO) |
 | Panoptic segmentation | `panoptic_segmentation.py` | `panoptic_segmentation_train.py` | requires `--weights` |
@@ -122,9 +125,12 @@ checkpoint and require `--weights`.
 | Classification | `classification.py` | `classification_train.py` | requires `--weights` |
 
 Training defaults: `detection_train.py` uses coco8; the other `_train.py`
-scripts generate tiny synthetic data (see `--dry-run`). GTR inference/training
-needs `pip install -e ".[gtr]"` and CUDA; panoptic/classification inference
-uses a checkpoint exported by the matching training script.
+scripts generate tiny synthetic data (see `--dry-run`). The GTR training
+examples (detection / OBB / instance / semantic / pose / depth) run a tiny
+random-init GTR configuration and need `pip install -e ".[gtr]"` + CUDA;
+panoptic/classification training stays CPU-friendly. GTR inference also
+needs the same stack; official weights download via
+`scripts/download_gtr_assets.py`.
 
 ## Real data contracts
 
@@ -169,8 +175,10 @@ data = {"train": "data/train", "val": "data/val"}
 - Demo metrics after 1-3 steps are meaningless by design; they only prove the
   pipeline runs. Use real data and the recipes in `docs/benchmarks.md` for
   numbers.
-- Pose/depth require the GTR CUDA stack. Without it, use `--dry-run` to inspect
-  the data contract, or run the other six examples on CPU.
+- Pose/depth were always GTR; detection / OBB / instance / semantic now
+  default to the GTR family too. Without the CUDA stack, use `--dry-run` to
+  inspect the data contract, or run the panoptic/classification examples on
+  CPU (or any inference script with `--weights` from a non-GTR training run).
 - `--export` only copies `.pt`; use `autovision-cli export` for ONNX,
   OpenVINO and TensorRT parity gates.
 - `assets/airport_aerial.jpg` is CC0 (see `assets/README.md`); it ships in the

@@ -17,14 +17,15 @@ CLI 编排层，放在任务包内会破坏仓库的单向分层约束。
 
 训练示例：
 
-- 用很小的模型配置跑 1–3 步，CPU 即可运行（姿态/深度需要 GTR CUDA 栈）；
+- 默认 GTR 家族：用很小的随机初始化配置跑 1–3 步，需要 `.[gtr]` + CUDA
+  （仅全景/分类没有 GTR 路线，保持 CPU 友好）；
 - 打印 checkpoint、导出模型、验证指标与类别表；
 - 支持 `--predict-image`、`--export`、`--dry-run`。
 
 ## 安装与快速开始
 
 ```bash
-pip install -e ".[transformers,timm,export]"
+pip install -e ".[gtr,download,export]"   # GTR 示例（CUDA + Triton）
 
 # 推理：官方权重，不训练
 python examples/tasks/detection.py
@@ -44,9 +45,10 @@ python examples/tasks/classification_train.py --steps 2
 python examples/tasks/instance_segmentation_train.py --dry-run
 ```
 
-`detection.py` 直接加载 `rfdetr/rf-detr-nano` 官方权重；GTR 推理脚本默认加载
+所有推理示例默认加载官方 GTR MIT 权重：检测 `detr/gtrvit-s`，其余任务
 `gtrobb_s_dota` / `gtrseg_s_coco` / `gtrsemseg_s_cityscapes` /
-`gtrpose_s_coco` / `gtrdepth_s`。所有推理脚本默认使用 CC0 的
+`gtrpose_s_coco` / `gtrdepth_s`（检测可用 `--model rfdetr/rf-detr-nano`
+切换到 CPU 友好的发布权重）。所有推理脚本默认使用 CC0 的
 `assets/airport_aerial.jpg`（与 DOTA 旋转框权重的俯视域匹配）；需要街景或其他
 任务图片时用 `--image` 指定。GTR 需要：
 
@@ -88,7 +90,7 @@ python examples/tasks/yolo/classification.py
 
 | 任务 | 推理脚本 | 训练脚本 | 默认推理权重 |
 |---|---|---|---|
-| 检测 | `detection.py` | `detection_train.py` | `rfdetr/rf-detr-nano` |
+| 检测 | `detection.py` | `detection_train.py` | `detr/gtrvit-s`（GTR, COCO） |
 | 旋转框 | `oriented_detection.py` | `oriented_detection_train.py` | `gtrobb_s_dota`（GTR, DOTA） |
 | 实例分割 | `instance_segmentation.py` | `instance_segmentation_train.py` | `gtrseg_s_coco`（GTR, COCO） |
 | 全景分割 | `panoptic_segmentation.py` | `panoptic_segmentation_train.py` | 需 `--weights` |
@@ -99,7 +101,9 @@ python examples/tasks/yolo/classification.py
 
 训练脚本的数据契约不变（检测 COCO/YOLO、旋转框 YOLO-OBB、实例 COCO
 instances、全景 masks + segments、语义成对 images/masks、姿态 COCO
-person_keypoints、深度 images + depths、分类 ImageFolder）。
+person_keypoints、深度 images + depths、分类 ImageFolder）；六个 GTR 路线
+（检测 / 旋转框 / 实例 / 语义 / 姿态 / 深度）的训练示例默认 tiny 随机初始化
+配置，官方权重可用 `model_args={"checkpoint": "<资产名>"}` 直载微调。
 
 真实数据配置示例：
 

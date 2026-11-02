@@ -14,6 +14,7 @@
 | `tasks/detection/shared/rtdetrv2_decoder.py`、`hybrid_encoder.py`、`rtdetrv2_criterion.py`、`matcher.py`、`denoising.py`、`tasks/shared/ema.py` | [lyuwenyu/RT-DETR](https://github.com/lyuwenyu/RT-DETR) | Apache-2.0 | ported | NOTICE、LICENSE |
 | `tasks/detection/shared/_msda_src/`、`msda.py`、`ms_deformable_attention.py` | Detectron2 / Deformable DETR lineage | Apache-2.0 | vendored | 文件头、NOTICE、LICENSE |
 | `tasks/detection/shared/gtr/*`、`tasks/detection/shared/gtr/csrc/*` | [Intellindust-AI-Lab/GTR](https://github.com/Intellindust-AI-Lab/GTR) | MIT | ported / vendored | 文件头、NOTICE、THIRD_PARTY_LICENSES |
+| `tasks/detection/shared/gtr/gla_onnx.py`（GLA 纯 ONNX 降级） | [Intellindust-AI-Lab/GTR](https://github.com/Intellindust-AI-Lab/GTR) `tensorrt_plugin` 导出补丁；chunk-GLA 递推遵循 [fla-org/flash-linear-attention](https://github.com/fla-org/flash-linear-attention) | MIT | ported（导出期 swap，eager 不变） | 文件头、NOTICE |
 | `tasks/detection/shared/matcher.py` 的 LSAP 路径 | [torch-linear-assignment](https://github.com/ivan-chai/torch-linear-assignment) | Apache-2.0 | 可选依赖（未 vendored） | NOTICE、pyproject extra |
 | `tasks/detection/picodet/` | [PaddleDetection PP-PicoDet](https://github.com/PaddlePaddle/PaddleDetection) | Apache-2.0 | 架构参考；AutoVision 实现 | README 致谢、NOTICE |
 | `tracking/byte_track.py` | [ByteTrack](https://github.com/ifzhang/ByteTrack)（ECCV 2022） | MIT（上游） | 算法参考；AutoVision 实现 | 文件头、README 致谢 |

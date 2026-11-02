@@ -151,8 +151,10 @@ CI（GitHub Actions / GitLab CI 同款）逐项强制：
   拒绝产出；TensorRT 后端纳入 benchmark parity 对比。
 - 官方权重直载做加载对拍（张量逐位 / 前向逐位，按资产能力）；重打包容器附
   逐位忠实性对拍。
-- GLA 骨干（`detr/gtrvit-*` 与 `gtr/*`）当前不可导出：导出入口以明确报错
-  拒绝（自定义 CUDA 核无 ONNX 降级），见 `GTRViTBackbone.export_blocker`。
+- GLA 骨干（`detr/gtrvit-*` 与 `gtr/*`）可导出：导出管线经模块树
+  `prepare_onnx_export` 钩子把 eager GLA 换成纯 ONNX 降级
+  （`shared/gtr/gla_onnx.py`，标准 opset-17 算子，eager 路径不变）；eager GLA
+  仍是 fla Triton / CUDA 核（无 ONNX 表示），若绕过钩子直接 trace 仍会被拒绝。
 - **动态 H/W**（`dynamic_spatial=True`）仅在 dynamo 导出路径可用（fail-closed：
   legacy 图会把尺寸烘成常量），并内置"第二尺寸 parity 探针"；HF 骨干
   （`detr/dinov2-*`、`detr/dinov3-*`）在上游 transformers 的输入尺寸分支上

@@ -2,212 +2,256 @@
 
 # AutoVision
 
-An enterprise-grade visual model training framework: self-supervised
-pretraining / distillation → finetuning → evaluation → export and deployment.
-The Python API and `autovision-cli` (30 commands) share one strict Pydantic
-validation surface across detection, oriented detection, instance / panoptic /
-semantic segmentation, pose estimation, depth estimation and classification.
+An enterprise-grade visual model training framework: train → evaluate →
+export → deploy. Its flagship model family is
+**[GTR](https://github.com/Intellindust-AI-Lab/GTR)** (MIT): one shared
+backbone covering six tasks, with all 26 official weights registered and
+ready to download. The Python API and `autovision-cli` (30 commands) share
+one strict Pydantic validation surface.
 
-Current version: **0.3.0 (Beta)**. It targets teams that need self-hosted
-training, evaluation, export and private deployment; it is not a hosted API and
-does not replace a production gateway. Core code is Apache-2.0; restricted-license
-weights are not downloaded by default.
+Current version: **0.3.2**. It targets teams that need self-hosted training,
+evaluation, export and private deployment; it is not a hosted API and does
+not replace a production gateway. Core code is Apache-2.0; weight licenses
+are registered per asset in the [model zoo](docs/model_zoo.md), and
+restricted-license weights are not downloaded by default.
 
 > This is the English entry point. The Chinese [README](README.md) is the
 > canonical long-form document. Some deep documentation pages currently fall
 > back to the Chinese original until translated.
 
-- **Clean licensing**: Apache-2.0 core; repository-wide provenance gates; weight
-  license gates (DINOv2 / DINOv3 restricted weights are opt-in, AGPL components
-  are isolated behind extras). The [model zoo](docs/model_zoo.md) lists license
-  and sha256 per asset.
-- **Verifiable consistency**: export-time numerical parity gates for ONNX /
-  TensorRT / OpenVINO; official-weight loading and forward parity (including
-  bit-equal checks); golden loss-trajectory snapshots.
-- **Protocolized benchmarks**: the [benchmark table](docs/benchmarks.md) cites
-  only published values, requires reproduction scripts for in-house numbers, and
-  is append-only with an errata section.
+## GTR: one backbone, six tasks
 
-Documentation: [Task examples](docs/task_examples.en.md) · [Model zoo](docs/model_zoo.md) ·
-[Weight downloads](docs/download_weights.md) · [Benchmarks](docs/benchmarks.md) ·
-[Architecture](docs/framework_design.md) · [Export & deployment](docs/export.md) ·
-[Plugin protocol](docs/plugins.md) · [Private registry](docs/registry.md) ·
-[Compliance](docs/compliance.md) · [Hardware packs](docs/hardware_packs.md) ·
-[User-held weights](docs/user_held_weights.en.md) · [LTS policy](docs/lts_policy.md) ·
-[Support policy](docs/support_policy.md) · [Known limits](docs/known_limits.en.md) ·
-[Contributing](CONTRIBUTING.md)
+GTR (MIT) covers detection, instance segmentation, semantic segmentation,
+depth estimation, oriented detection and pose estimation with one shared GLA
+backbone + ViT adapter; each task only swaps the head / decoder. AutoVision
+registers **all 26 official weights** (sha256-pinned) and verifies
+weight loading and forward numerics bit-for-bit.
+
+![GTR one backbone across six tasks: semantic segmentation / pose / depth / detection / instance segmentation](docs/images/gtr_six_tasks.png)
+
+| Task (benchmark) | Model keys | Official metric | Weight assets |
+|---|---|---|---|
+| Detection (COCO) | `detr/gtrvit-<s\|m\|l\|x>` | AP 53.6 / 57.3 / 58.9 / 59.4 | `gtr_{s,m,l,x}_coco` |
+| Instance seg (COCO) | `gtr/<s\|m\|l\|x>` | mask AP 45.0 / 47.7 / 49.5 / 49.8 | `gtrseg_{s,m,l,x}_coco` |
+| Semantic seg (Cityscapes) | `gtr/<s\|m\|l\|x>` | mIoU 81.5 / 83.0 / 83.2 / 83.3 | `gtrsemseg_{s,m,l,x}_cityscapes` |
+| Depth (NYU) | `gtr/<s\|m\|l\|x>` | absRel 0.074 / 0.069 / 0.069 / 0.067 | `gtrdepth_{s,m,l,x}` |
+| Oriented det (DOTA) | `gtr/<s\|x>` | AP50 80.0 / 81.3 | `gtrobb_{s,x}_dota` |
+| Pose (COCO) | `gtr/<s\|m\|l\|x>` | kp AP 70.1 / 74.1 / 74.7 / 75.5 | `gtrpose_{s,m,l,x}_coco` |
+| Det pretrain (Objects365, as init) | — | — | `gtr_{s,m,l,x}_obj365` |
+
+For installation, hands-on usage and finetuning see
+[Quick start](#quick-start).
+
+**Boundary**: the GTR eager forward needs Triton (CUDA-only, `gtr` extra);
+CPU deployment goes through the ONNX backend. Export uses the pure-ONNX GLA
+lowering (fixed-size graphs, fp16 available) and supports ONNX / TensorRT /
+OpenVINO. Mirrors, caching and upstream gated repos are covered in
+[weight downloads](docs/download_weights.md); per-asset licenses and official
+metrics in the [model zoo](docs/model_zoo.md).
 
 ## Installation
 
-Python ≥ 3.10. Source installation is the current supported path; after the PyPI
-release, `pip install autovision-framework` will be available (the distribution
-name is `autovision-framework`, the import name remains `autovision`):
+Python ≥ 3.10. Source installation is the current supported path; after the
+PyPI release, `pip install autovision-framework` will be available (the
+import name remains `autovision`; an unrelated `autovision` 0.0.1 package
+already exists on PyPI). From the repository root:
 
 ```bash
-# Common: HuggingFace backbones + timm + ONNX export
-pip install -e ".[transformers,timm,export]"
-
-# Pretrained RF-DETR inference
-pip install -e ".[rfdetr,export]"
-
-# Reference video / RTSP runtime (OpenCV)
-pip install -e ".[video]"
-
-# Development / full test suite
-pip install -e ".[dev,export,serving,video,transformers]"
+pip install -e ".[gtr,download,export]"   # GTR backbone + weight downloads + ONNX export
 ```
 
-Model families are loaded lazily per extra; a missing extra produces an empty
-registry instead of an import error. GTR (MIT) requires the `gtr` extra. See
-[docs/download_weights.md](docs/download_weights.md) for weight download, cache
-and mirror configuration. Restricted licenses are opt-in: DINOv2 CC-BY-NC 4.0
-and DINOv3 weights are not downloaded by default.
+Other extras (`transformers` / `timm` / `rfdetr` / `super-gradients` /
+`video` / `serving` / `dev` and more training, inference and development
+components) are listed in `pyproject.toml`; weight downloads, mirrors and
+restricted-license gates are covered in
+[docs/download_weights.md](docs/download_weights.md).
 
 ## Quick start
 
-Inference with released weights, no training:
+The GTR end-to-end flow (eager inference needs CUDA; CPU deployment goes
+through the ONNX backend).
 
-```python
-import autovision
-
-model = autovision.detection("rfdetr/rf-detr-small", pretrained=True)
-result = model.predict("image.jpg")   # {'bboxes': ..., 'scores': ..., 'labels': ...}
-model.export("model.onnx")            # parity gate + postprocess spec
-```
-
-List models and inspect export boundaries:
+**1. Install + download official weights**
 
 ```bash
-autovision-cli list-models --task detection --pretrained
-autovision-cli model-info rfdetr/rf-detr-small
+pip install -e ".[gtr,download,export]"
+python scripts/download_gtr_assets.py --task det   # detection weights; --all for all 26
 ```
 
-Object detection: train → validate → predict → export:
+**2. No training: load official weights, predict, export**
 
 ```python
 import autovision
 
-data = autovision.ensure_coco8()   # synthetic smoke dataset; use COCO/YOLO YAML or "coco8"
-model = autovision.detection("rtdetr/resnet18").train(
-    out="runs/det1", data=data, steps=2000, batch_size="auto",
+model = autovision.detection("detr/gtrvit-s", pretrained=True)  # official MIT weights
+result = model.predict("image.jpg")   # {'bboxes': ..., 'scores': ..., 'labels': ...}
+model.export("model.onnx")            # ONNX export, parity gate on by default
+```
+
+**3. Finetune from official weights** (pose shown; other tasks are shaped
+the same — swap the task entry and asset name, see
+[task entry points](#task-entry-points))
+
+```python
+result = autovision.train_pose_estimation(
+    out="runs/pose", data=data,       # COCO person_keypoints JSON + images
+    model="gtr/s",
+    model_args={"checkpoint": "gtrpose_s_coco"},   # omit for random init
 )
-model.val(data=data)          # {'map': ..., 'map_50': ...}
-model.predict("image.jpg")    # {'bboxes': ..., 'scores': ..., 'labels': ...}
-model.export("model.onnx")    # dispatches by .onnx / .engine / .pt suffix
+print(result.best_exported_model_path, result.metrics)
 ```
 
 Equivalent CLI (same Pydantic validation):
 
 ```bash
-autovision-cli train-object-detection out=runs/det1 data=data.yaml steps=2000
-autovision-cli val     model=runs/det1/exported_models/exported_best.pt data=coco8
-autovision-cli export  model=runs/det1/exported_models/exported_best.pt out=model.onnx precision=fp16
-autovision-cli predict model=runs/det1/exported_models/exported_best.pt source=clip.mp4 out=preds/ batch_size=4
+autovision-cli list-models --task detection --pretrained   # GTR / RF-DETR keys
+autovision-cli train-pose-estimation out=runs/pose data=pose.yaml model=gtr/s \
+    model_args='{"checkpoint": "gtrpose_s_coco"}'
+autovision-cli predict model=runs/pose/exported_models/exported_best.pt images=dir/ out=preds/
 ```
+
+Each task ships an inference and a training example under `examples/tasks/`,
+all defaulting to GTR (inference loads the official MIT weights; training
+runs a tiny random-init configuration on CUDA with the `gtr` extra);
+`--dry-run` prints the data contract. See
+[docs/task_examples.md](docs/task_examples.md).
 
 ## Task entry points
 
-| Task | Training API / CLI | Default recipe | Data form | Notes |
-|---|---|---|---|---|
-| Detection | `train_object_detection` / `train-object-detection` | `rtdetr/resnet18` | COCO / YOLO | Full task surface |
-| Oriented detection | `train_oriented_object_detection` / `train-oriented-object-detection` | `rtdetr/obb-resnet18` | DOTA / YOLO-OBB | Rotated boxes |
-| Instance segmentation | `train_instance_segmentation` / `train-instance-segmentation` | `dinov2/eomt` | COCO | EOMT / GTR |
-| Panoptic segmentation | `train_panoptic_segmentation` / `train-panoptic-segmentation` | `dinov2/eomt` | COCO panoptic | EOMT |
-| Semantic segmentation | `train_semantic_segmentation` / `train-semantic-segmentation` | `dinov2/eomt` | Cityscapes / VOC | EOMT / GTR / linear head |
-| Pose estimation | `train_pose_estimation` / `train-pose-estimation` | `gtr/pose-s` | COCO keypoints | GTR CUDA stack |
-| Depth estimation | `train_depth_estimation` / `train-depth-estimation` | `gtr/s` | images + depth (`.npy` meters or 16-bit PNG) | GTR CUDA stack |
-| Classification | `train_image_classification` / `train-image-classification` | `torchvision/resnet18` | ImageFolder `train/`, `val/` | — |
+All tasks share one API / CLI shape: the Python API is `train_<task>` (e.g.
+`train_pose_estimation`) and the CLI is the kebab-case twin. The model column
+prefers the GTR route: it uniformly needs the `gtr` extra, and loading
+official weights additionally needs `download`
+(`scripts/download_gtr_assets.py`;
+`model_args={"checkpoint": "<asset>"}` with asset names in the
+[GTR table](#gtr-one-backbone-six-tasks)). Panoptic segmentation and
+classification have no GTR route yet.
 
-Each task has an inference and a training example under `examples/tasks/`;
-`--dry-run` prints the data contract without training. See
-[docs/task_examples.md](docs/task_examples.md).
+| Task | Model | Data form | Notes |
+|---|---|---|---|
+| Detection | `detr/gtrvit-<s\|m\|l\|x>` | COCO / YOLO | — |
+| Pose estimation | `gtr/s` | COCO keypoints | — |
+| Depth estimation | `gtr/s` | images + depth (`.npy` meters or 16-bit PNG) | — |
+| Instance segmentation | `gtr/<s\|m\|l\|x>` | COCO | `num_classes` required |
+| Semantic segmentation | `gtr/<s\|m\|l\|x>` | images + masks PNG | `num_classes` required |
+| Oriented detection | `gtr/<s\|x>` | DOTA / YOLO-OBB | — |
+| Panoptic segmentation | `dinov2/eomt` (no GTR yet) | COCO panoptic | `transformers` extra |
+| Classification | `torchvision/resnet18` (no GTR yet) | ImageFolder `train/`, `val/` | — |
 
-## Capabilities and subsystems
+`dinov2/eomt` and GTR models depend on DINOv2 and GTR official weights
+respectively; use `-notpretrained` variants or local checkpoints in offline
+or restricted-network environments.
 
-- **Config and registry**: strict Pydantic validation with did-you-mean errors;
-  CLI and Python API share the same schema; model/asset/plugin registries.
-- **Model layer**: torchvision, timm, super-gradients, Ultralytics (AGPL-isolated),
-  DINOv2, DINOv3, RF-DETR, plus in-tree RT-DETR, DETR/GTR, D-FINE, PicoDet,
-  RF-DETR and GTR families.
-- **Data and transforms**: 11 dataset families; mmap manifests with content
-  fingerprints and atomic publication; mosaic / mixup / copyblend / box-aware
-  eraser; VOC, YOLO-pose, YOLO-seg conversion and COCO merging; data quality and
-  hard-example loops.
-- **Pretraining / distillation**: DINO, DINOv2, DINOv3, SimCLR, DenseCL, DetCon,
-  DistillationV3, in-training kNN probes.
-- **Training runtime**: DDP, mixed precision, atomic checkpoints + resume,
-  gradient accumulation, gradient checkpointing, FSDP, early stopping and
-  callbacks, deterministic mode, run manifests, NaN capture, TensorBoard /
-  MLflow / W&B / JSONL, OTel (opt-in).
-- **Evaluation and analysis**: mAP, task metrics with DDP aggregation, error
-  analysis with FP attribution and confusion matrices, hard-example manifests,
-  HPO (random / grid / ASHA), pseudo-labeling and self-training.
-- **Inference and serving**: `InferenceResult` at the API boundary; task-aware
-  annotators; video/RTSP runtime with a reader/infer/writer pipeline; ByteTrack
-  tracking; LineZone / PolygonZone analytics; reference FastAPI serving with
-  TLS, workers, rate limiting, drift and A/B/canary support.
-- **Export and deployment**: ONNX (fp32/fp16/int8), TensorRT, OpenVINO;
-  `postprocess.json` sidecars; end-to-end box-level parity; C++ ONNX Runtime +
-  OpenCV reference runtime under `examples/cpp/`.
+## More capabilities (collapsed)
 
-## Models and metrics
+<details>
+<summary>GTR training and deployment notes</summary>
+
+- **Eager forward**: relies on fla Triton kernels (CUDA-only). Building a
+  `backend='torch'` engine on CPU fails with a readable error — use
+  `backend='onnx'` or CUDA; CPU deployment goes through the ONNX backend.
+- **Export**: tracing swaps in the pure-ONNX GLA lowering automatically
+  (eager path unchanged), producing fixed-size graphs
+  (`dynamic_spatial=True` is rejected fast). fp16 works (the GLA fp32 state
+  segment is pinned via `onnx_fp32_op_types`), but GTR is GEMM-heavy —
+  prefer fp32 graphs on ORT CPU; let TensorRT manage precision from an fp32
+  graph. End-to-end gates live in `tests/test_gtr_export_gates.py`.
+- **Training recipe**: the official pose recipe is `precision="32-true"`
+  (AMP off); official augmentations (mosaic / mixup / zoom-out) are not
+  ported.
+- **Objects365 weights** (`gtr_{s,m,l,x}_obj365`) can initialize detection
+  finetuning.
+
+</details>
+
+<details>
+<summary>Model registry and metrics</summary>
 
 The [model zoo](docs/model_zoo.md) is generated from the registries and lists
-every asset with license, sha256, official metric and a loading snippet. It
-covers RF-DETR, GTR (detection / segmentation / pose / depth / OBB / semantic),
-in-tree DETR / RT-DETR / D-FINE / PicoDet, and the user-held DINOv3 detectors
-(out-of-tree, non-redistributable).
+every asset with license, sha256, official metric and a loading snippet: the
+41 registered detection keys (DINOv2 / DINOv3 ViT, DINOv3 ConvNeXt, GTR GLA,
+timm HGNetV2 backbones plus `detr/n` / `detr/s` tier aliases), the GTR
+26-weight family above, in-tree RT-DETR / D-FINE / PicoDet, and the
+user-held DINOv3 detectors (out-of-tree, non-redistributable, 3 STA-era
+checkpoints rejected by the loader). DINOv2/v3 ViT models use the no-STA
+adapter; legacy checkpoints containing `backbone.sta.*` are refused.
 
-## Export and deployment
+</details>
 
-```python
-model.export("model.onnx")     # ONNX + parity gate + postprocess spec
-model.export("model.engine")   # TensorRT (requires CUDA + TensorRT)
-model.export("model.xml")      # OpenVINO IR (requires openvino extra)
-```
+<details>
+<summary>Export and deployment</summary>
 
-Exports run numerical parity gates by default; dynamic spatial inputs require
-the dynamo exporter and are verified at unseen sizes. See
-[docs/export.md](docs/export.md) for backend details, int8, TensorRT 11 and GTR
-deployment notes.
-
-## Inference runtime and serving
+`model.export(...)` dispatches by suffix (`.onnx` / `.engine` / `.xml` /
+`.pt`) and runs numerical parity gates by default:
 
 ```python
-from autovision.inference import run_stream
-run_stream("clip.mp4", "preds/", model="best.pt", track=True)
+result = autovision.train_object_detection(out="runs/det1", data="coco8", steps=2000)
+model = autovision.load_task_model(result.best_exported_model_path)
+model.export_onnx("model.onnx", precision="fp16")
 ```
 
-The stream runtime includes a prefetched decode / infer / render / write
-pipeline, JSONL output, optional tracking and zone analytics. The reference
-serving layer provides `/predict`, `/healthz`, `/readyz`, `/metrics`, `/drift`,
-optional API-key auth, request limits, TLS, workers, rate limiting and
-A/B/canary routing. It is a reference implementation, not a complete production
-gateway.
+Detection exports write a `<artifact>.postprocess.json` sidecar (top-k,
+threshold, preprocessing) so device-side consumers can reproduce final boxes
+via `autovision.export.decode_detections_numpy`; `verify_end_to_end_parity`
+compares final boxes / scores / labels across backends as a release gate.
+A minimal C++ ONNX Runtime + OpenCV runtime lives under `examples/cpp/`.
+See [docs/export.md](docs/export.md) for int8, dynamic shapes and TensorRT 11.
 
-## Development
+</details>
+
+<details>
+<summary>Video / RTSP inference and tracking</summary>
 
 ```bash
-pip install -e ".[dev,export,serving,video,transformers]"
-pytest tests
-ruff check src tests scripts
-bandit -r src/autovision -ll -ii -q
-python scripts/check_provenance.py && python scripts/check_layering.py
-python scripts/check_docs_links.py && mkdocs build --strict
+pip install -e ".[video]"
+autovision-cli predict model=exported_best.pt source=clip.mp4 out=preds/ batch_size=4
+autovision-cli predict model=exported_best.pt sources=rtsp://cam1/live,rtsp://cam2/live out=preds/
+autovision-cli predict model=exported_best.pt source=clip.mp4 out=preds/ track=true   # ByteTrack
 ```
 
-The full test suite is CPU-compatible; gated tests (TensorRT, HF downloads,
-private user-held stores, multi-process DDP) are enabled by their documented
-environment variables. See [CONTRIBUTING.md](CONTRIBUTING.md) and
-[docs/release_process.md](docs/release_process.md).
+Single-stream runs write `predictions.jsonl` + `annotated.mp4`; multi-stream
+runs share batching with per-source artifacts, reconnect and backpressure.
+Tracking adds per-frame `tracks` records; `LineZone` / `PolygonZone`
+analytics are available via `run_stream(..., track=True)`.
 
-## Known limits
+</details>
 
-Highlights: no DeepSpeed/ZeRO/elastic training; multi-node NCCL and fault
-injection are not covered by public CI; TensorRT/OpenVINO heavy tests are
-gated; GTR export is blocked by the GLA kernel lowering; STA-era ViT user-held
-checkpoints are rejected because the DEIMv2 spatial prior was removed. See
-[docs/known_limits.md](docs/known_limits.md) for the full list.
+<details>
+<summary>Reference serving (FastAPI)</summary>
+
+```bash
+pip install -e ".[serving]"
+autovision-cli serve model=exported_best.pt port=8000
+```
+
+`POST /predict` (base64 batches, same pre/postprocessing as evaluation),
+`/healthz`, `/readyz`, `/drift` (PSI), `/metrics` (Prometheus); optional API
+key, request limits, concurrency gate, TLS, workers, in-process rate
+limiting and A/B / canary routing (`create_app(variants=...)`). It is a
+reference implementation, not a complete production gateway.
+
+</details>
+
+<details>
+<summary>Advanced features</summary>
+
+- **Self-supervised pretraining / distillation**: `autovision.pretrain(...)`
+  — DINO / DINOv2 / DINOv3, SimCLR, DenseCL, DetCon, DistillationV3,
+  in-training kNN probes.
+- **Large-image tiled inference (SAHI)**: `predict_sahi(...)`, batched
+  tiling, NMM merge, per-label cross-tile filtering.
+- **Data versioning**: `autovision-cli data-snapshot` content-addressed
+  snapshots with drift verification.
+- **Early stopping and callbacks**: `trainer_args` (patience / min-delta) and
+  Python training callbacks.
+- **HPO**: random / grid / ASHA via `autovision-cli hpo`, resumable, with
+  `report.md` + `trials.jsonl` + `best.json`.
+- **Data loops**: VOC / CVAT / Label Studio conversion (`convert-data`),
+  dataset QA (`data-check`), error analysis with FP attribution
+  (`analyze-errors`), hard-example resampling, pseudo-label self-training,
+  long-tail samplers.
+
+</details>
 
 ## Industry solutions
 
@@ -226,23 +270,52 @@ framework's stable seams via `pip install autovision-framework`; see the
 | [ai-life-line](https://github.com/hi-agi-lab/ai-life-line) | Lifeline infrastructure video analytics |
 | [ai-urban](https://github.com/hi-agi-lab/ai-urban) | Urban governance video analytics |
 
+## Known limits
+
+- Positioning: training + reference inference framework; serving is a
+  reference implementation, not a production gateway.
+- DINOv2 / DINOv3 weights are not downloaded by default (restricted
+  licenses, explicit opt-in gates); `detr/n` / `detr/s` tiers are
+  spec-frozen (weights pending).
+- Dynamic H/W is not supported for HF backbones (`detr/dinov2-*`,
+  `detr/dinov3-*`); ONNX FP16 parity needs a CUDA execution provider and
+  degrades to an execute + finiteness smoke gate without one.
+- GTR eager forward is CUDA-only (Triton); exports are fixed-size graphs;
+  CPU deployment uses the ONNX backend.
+
+See [docs/known_limits.md](docs/known_limits.md) for the full list.
+
 ## License and provenance
 
 Core code is Apache-2.0; the full text is in repository `LICENSE` and at
-<https://www.apache.org/licenses/LICENSE-2.0>. Third-party components and weight
-provenance are listed in `NOTICE`, `THIRD_PARTY_LICENSES.md` and
+<https://www.apache.org/licenses/LICENSE-2.0>. Third-party components and
+weight provenance are listed in `NOTICE`,
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) and
 [docs/provenance/LEDGER.md](docs/provenance/LEDGER.md).
 
-Restricted weights (DINOv2 CC-BY-NC 4.0 / DINOv3 License) are opt-in and not
-redistributed. The user-held DINOv3 detector store is out-of-tree,
-non-redistributable and not part of `ASSET_MANIFEST`.
+GTR weights are MIT (26 assets, sha256-pinned); `ultralytics` is AGPL-3.0
+and isolated behind an extra; the user-held detector store (out-of-tree) is
+non-redistributable. Boundaries in
+[docs/user_held_weights.en.md](docs/user_held_weights.en.md).
+
+Contributing and governance: [CONTRIBUTING.md](CONTRIBUTING.md) (environment
+/ gates / provenance rules), release process
+[docs/release_process.md](docs/release_process.md), changelog
+[CHANGELOG.md](CHANGELOG.md); security disclosure in
+[SECURITY.md](SECURITY.md) (no public issues, please).
 
 ## Acknowledgements
 
 AutoVision benefits from PyTorch, torchvision, HuggingFace Transformers, ONNX
 Runtime, NVIDIA TensorRT, OpenVINO, FastAPI, MLflow, Weights & Biases,
-TensorBoard, RT-DETR, D-FINE, DEIM, GTR, ByteTrack, SAHI, Roboflow RF-DETR,
-PicoDet and supervision. See [NOTICE](NOTICE) and
+TensorBoard, [RT-DETR](https://github.com/lyuwenyu/RT-DETR),
+[D-FINE](https://github.com/Peterande/D-FINE),
+[DEIM](https://github.com/Intellindust-AI-Lab/DEIM),
+[GTR](https://github.com/Intellindust-AI-Lab/GTR),
+[ByteTrack](https://github.com/ifzhang/ByteTrack),
+[SAHI](https://github.com/obss/sahi),
+[Roboflow RF-DETR](https://github.com/roboflow/rf-detr), PicoDet and
+supervision. See [NOTICE](NOTICE) and
 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for legal attribution.
 
 > Translation status: this English README covers the main entry points. The

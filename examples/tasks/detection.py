@@ -2,12 +2,15 @@
 # Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Object detection inference: load weights -> predict -> annotate.
 
-No training. By default this loads the released ``rfdetr/rf-detr-nano``
-checkpoint and runs it on the bundled CC0 airport image:
+No training. By default this loads the official ``detr/gtrvit-s`` GTR
+checkpoint (MIT, COCO AP 53.6) and runs it on the bundled CC0 airport image:
 
     python examples/tasks/detection.py
     python examples/tasks/detection.py --image path/to/image.jpg --threshold 0.5
     python examples/tasks/detection.py --effect blur
+
+The GTR forward needs the ``gtr`` extra on a CUDA machine; pass
+``--model rfdetr/rf-detr-nano`` for a CPU-friendly released checkpoint.
 
 ``--effect`` renders through the annotators migrated from supervision
 (``autovision.visualize.effects``): ``corner`` / ``round`` replace the plain
@@ -27,6 +30,7 @@ from collections import Counter
 from pathlib import Path
 
 import torch
+from _common import gtr_requirement
 from PIL import Image
 
 import autovision
@@ -83,8 +87,11 @@ def main() -> None:
     parser.add_argument("--image", type=Path, default=ASSET)
     parser.add_argument(
         "--model",
-        default="rfdetr/rf-detr-nano",
-        help="released registry key (ignored when --weights is given)",
+        default="detr/gtrvit-s",
+        help=(
+            "released registry key (ignored when --weights is given); "
+            "GTR keys need the `gtr` extra on CUDA"
+        ),
     )
     parser.add_argument(
         "--weights",
@@ -127,6 +134,8 @@ def main() -> None:
         model = autovision.load_model(args.weights, device=device)
         names = None  # custom checkpoints carry their own class ids
     else:
+        if args.model.startswith("detr/gtrvit"):
+            gtr_requirement()
         names = pretrained_class_names(args.model)
         model = autovision.detection(args.model, pretrained=True)
         model.to(device)

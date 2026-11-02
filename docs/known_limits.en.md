@@ -157,13 +157,31 @@ Machine-readable status and variant lists are in the [model zoo](model_zoo.md).
 
 ## Export and deployment
 
-- GTR models (including `detr/gtrvit-*`) cannot be exported to ONNX/TensorRT:
-  the export entry point fails explicitly (the GLA custom CUDA kernel has no ONNX
-  lowering; see `GTRViTBackbone.export_blocker`). The four GTR task models have
-  export verify hooks ready and will take effect with the deployment work.
-- The ONNX FP16 parity gate skips with a warning when no CUDA execution provider
-  is available; ONNX example inputs follow the model device (GPU-trained models
-  can be exported directly).
+- All five GTR routes (`detr/gtrvit-*`, `obb/gtr`, `pose/gtr`, `depth/gtr`,
+  `semseg/gtr`) now export to ONNX/TensorRT/OpenVINO: the trace swaps the GLA
+  for the pure-ONNX lowering via the `prepare_onnx_export` hook
+  (`shared/gtr/gla_onnx.py`); the eager path is untouched. Exports are
+  fixed-shape (`dynamic_spatial=True` is rejected fast); the per-route
+  end-to-end gates live in `tests/test_gtr_export_gates.py`. FP16 export
+  works: the GLA's fp32-state segment is pinned via `onnx_fp32_op_types`
+  (MatMul/Resize) to keep the graph consistent, but GTR compute is
+  GEMM-dominated, so fp16 mainly benefits Conv segments (ORT-GPU/OpenVINO)
+  and is SLOWER on ORT CPU — use the fp32 graph for CPU deployment and let
+  TensorRT manage precision from the fp32 graph.
+- The GTR eager forward needs fla's Triton kernels (CUDA-only): constructing
+  a CPU `backend='torch'` engine is refused with a readable error (use
+  `backend='onnx'` or `device='cuda'`); CPU deployment goes through the ONNX
+  backend.
+- The ONNX FP16 parity gate needs a CUDA execution provider: on builds without
+  one (e.g. a CPU-only onnxruntime), it degrades to an execute-and-finiteness
+  smoke gate (export fails if any output carries non-finite values) with a
+  warning; ONNX example inputs follow the model device (GPU-trained models
+  can be exported directly). Even with a CUDA EP, parity for fp16 pose /
+  depth / semseg and for det / OBB at any precision stays a row-sum
+  invariant (fp16 degenerate weights drift at decode-adjacent magnitude and
+  in-graph top-k swaps whole rows between near-tied candidates, so no
+  element-wise alignment exists); fp32 pose / depth / semseg parity is
+  element-wise.
 - Dynamic H/W support, the int8 first-layer fp32 recipe and TensorRT 11
   adaptation are covered in [export & deployment](export.md).
 - The full int8 AP report (`scripts/measure_int8_accuracy.py`) requires a
@@ -174,10 +192,11 @@ Machine-readable status and variant lists are in the [model zoo](model_zoo.md).
 - `examples/cpp/` is a reference runtime, not an ABI/SDK; the full build requires
   ONNX Runtime and OpenCV development libraries, while the host-only postprocess
   test needs only g++.
-- GTR deployment work: the Triton GLA kernel is ported (2× speedup), but
-  `torch.compile` is negative for the GLA segment, CUDA Graphs conflict with the
-  custom kernel's in-place writes (requires op changes), and TensorRT deployment
-  needs the official `gla_plugin.cu`.
+- GTR deployment work: the eager-side Triton GLA kernel is ported (2× speedup),
+  but `torch.compile` is negative for the GLA segment and CUDA Graphs conflict
+  with the custom kernel's in-place writes (requires op changes). The export
+  route uses the pure-ONNX lowering (no plugin needed); the official custom
+  kernel + `gla_plugin.cu` plugin route requires building `shared/gtr/csrc`.
 - Official training augmentations (mosaic / mixup / zoom-out / color-jitter) are
   not ported; the official pose recipe uses `precision="32-true"`
   (`use_amp: False`).

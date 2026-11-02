@@ -21,14 +21,16 @@ Inference examples:
 Training examples:
 
 - run 1–3 steps with a tiny model configuration; CPU is enough for most tasks
-  (pose/depth require the GTR CUDA stack);
+- default to the GTR family: run 1–3 steps with a tiny random-init GTR
+  configuration; this needs `.[gtr]` + CUDA (only panoptic/classification
+  have no GTR route and stay CPU-friendly);
 - print the checkpoint, exported model, validation metrics and class map;
 - support `--predict-image`, `--export` and `--dry-run`.
 
 ## Install and quick start
 
 ```bash
-pip install -e ".[transformers,timm,export]"
+pip install -e ".[gtr,download,export]"   # GTR examples (CUDA + Triton)
 
 # Inference with official weights, no training
 python examples/tasks/detection.py
@@ -48,9 +50,11 @@ python examples/tasks/classification_train.py --steps 2
 python examples/tasks/instance_segmentation_train.py --dry-run
 ```
 
-`detection.py` loads the official `rfdetr/rf-detr-nano` weights directly; GTR
-inference scripts load `gtrobb_s_dota` / `gtrseg_s_coco` /
-`gtrsemseg_s_cityscapes` / `gtrpose_s_coco` / `gtrdepth_s` by default. All
+All inference examples load the official GTR MIT weights by default:
+detection `detr/gtrvit-s`, and the other tasks `gtrobb_s_dota` /
+`gtrseg_s_coco` / `gtrsemseg_s_cityscapes` / `gtrpose_s_coco` / `gtrdepth_s`
+(detection accepts `--model rfdetr/rf-detr-nano` for a CPU-friendly released
+checkpoint). All
 inference scripts default to the CC0 `assets/airport_aerial.jpg` (its overhead
 domain matches the DOTA-trained OBB checkpoint); pass `--image` for street-level
 or task-specific imagery. GTR requires:
@@ -95,7 +99,7 @@ the Ultralytics default source or a local `--model /path/to/*.pt`. See
 
 | Task | Inference | Training | Default inference weights |
 |---|---|---|---|
-| Detection | `detection.py` | `detection_train.py` | `rfdetr/rf-detr-nano` |
+| Detection | `detection.py` | `detection_train.py` | `detr/gtrvit-s` (GTR, COCO) |
 | Oriented detection | `oriented_detection.py` | `oriented_detection_train.py` | `gtrobb_s_dota` (GTR, DOTA) |
 | Instance segmentation | `instance_segmentation.py` | `instance_segmentation_train.py` | `gtrseg_s_coco` (GTR, COCO) |
 | Panoptic segmentation | `panoptic_segmentation.py` | `panoptic_segmentation_train.py` | requires `--weights` |
@@ -107,7 +111,9 @@ the Ultralytics default source or a local `--model /path/to/*.pt`. See
 The training data contracts are unchanged: detection COCO/YOLO, oriented
 detection YOLO-OBB, instance COCO instances, panoptic masks + segments, semantic
 paired images/masks, pose COCO person_keypoints, depth images + depths, and
-classification ImageFolder.
+classification ImageFolder. The six GTR routes (detection / OBB / instance /
+semantic / pose / depth) train tiny random-init configurations by default;
+official weights finetune via `model_args={"checkpoint": "<asset name>"}`.
 
 Real-data configuration examples:
 

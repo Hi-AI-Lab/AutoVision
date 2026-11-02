@@ -14,6 +14,7 @@ license text is already covered by `LICENSE`.
 | RT-DETR hybrid encoder / decoder / criterion / matcher | lyuwenyu/RT-DETR | Apache-2.0 | ported |
 | `_msda_src/` deformable attention | Detectron2 lineage | Apache-2.0 | vendored |
 | GTR backbone / heads / CUDA kernels | Intellindust-AI-Lab/GTR | MIT | ported / vendored |
+| `shared/gtr/gla_onnx.py` GLA ONNX lowering | Intellindust-AI-Lab/GTR (tensorrt_plugin) / flash-linear-attention | MIT | ported |
 | `matcher.py` optional LSAP solver | ivan-chai/torch-linear-assignment | Apache-2.0 | optional dependency |
 | `tasks/detection/picodet/` | PaddleDetection PP-PicoDet | Apache-2.0 | architecture reference; AutoVision implementation |
 | `tracking/byte_track.py` | ByteTrack (ECCV 2022) | MIT (upstream) | independent implementation |

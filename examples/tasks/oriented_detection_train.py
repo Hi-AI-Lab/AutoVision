@@ -2,8 +2,11 @@
 # Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Oriented object detection: YOLO-OBB -> predict.
 
-The default demo writes normalized 8-point labels for two classes. Real data
-is a YOLO-OBB ``data.yaml``:
+The default model is the GTR ``gtr/s`` family (the released OBB checkpoint is
+DOTA-trained). Training the GTR family needs ``pip install -e '.[gtr]'`` and
+a CUDA machine (Triton kernels); use ``--dry-run`` to inspect the data
+contract offline. The default demo writes normalized 8-point labels for two
+classes. Real data is a YOLO-OBB ``data.yaml``:
 
     format: yolo-obb
     train: images/train
@@ -15,11 +18,11 @@ from __future__ import annotations
 
 from _common import (
     OBB_TRANSFORM_ARGS,
-    RTDETR_MODEL_ARGS,
     build_parser,
     demo_root,
     dry_run,
     finish,
+    gtr_requirement,
     obb_demo,
 )
 
@@ -36,17 +39,24 @@ def main() -> None:
     if args.dry_run:
         dry_run("oriented_object_detection", data)
         return
+    gtr_requirement()
 
     result = autovision.train_oriented_object_detection(
         out=args.out,
         data=data,
-        model="rtdetr-obb/resnet18",
+        model="gtr/s",
         steps=args.steps,
         batch_size=args.batch_size,
         num_workers=0,
         seed=args.seed,
         overwrite=args.overwrite,
-        model_args=RTDETR_MODEL_ARGS,
+        model_args={
+            "image_size": (128, 128),
+            "num_queries": 16,
+            "num_denoising": 0,
+            "load_checkpoint": False,
+            "lr_warmup_steps": 2,
+        },
         transform_args=OBB_TRANSFORM_ARGS,
         trainer_args={"val_every_num_steps": max(1, args.steps)},
     )

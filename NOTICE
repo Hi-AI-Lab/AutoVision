@@ -77,7 +77,10 @@ THIRD_PARTY_LICENSES.md; policy: CONTRIBUTING.md):
   obb_criterion.py and obb_denoising.py, and the pose training pieces
   (GTR's engine/gtr/pose/{criterion,matcher,keypoint_loss,
   dn_component}.py) in src/autovision/tasks/detection/shared/gtr/
-  pose_criterion.py and pose_dn.py.
+  pose_criterion.py and pose_dn.py, and the pure-ONNX export lowering of
+  the GLA block (adapted from GTR's MIT tensorrt_plugin/gtr_onnx_patches.py
+  export patches; the chunk-GLA recurrence follows fla's MIT chunk_gla) in
+  src/autovision/tasks/detection/shared/gtr/gla_onnx.py.
   Runtime dependency (optional extra ``gtr``): flash-linear-attention
   0.5.0 (MIT).
 
