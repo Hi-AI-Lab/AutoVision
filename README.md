@@ -55,9 +55,14 @@ TensorRT / OpenVINO 全支持。镜像、缓存与上游 gated 仓库的处理�
 
 ## 安装
 
-Python ≥ 3.10。源码安装是当前可用路径；PyPI 发布后可用
-`pip install autovision-framework`（import 名仍是 `autovision`；注意 PyPI 上
-另有一个无关的 `autovision` 0.0.1 包）。在仓库根目录执行：
+Python ≥ 3.10。直接从 PyPI 安装（发行名 `autovision-framework`，import 名
+仍是 `autovision`；注意 PyPI 上另有一个无关的 `autovision` 0.0.1 包）：
+
+```bash
+pip install "autovision-framework[gtr,download,export]"
+```
+
+从源码安装（仓库根目录执行）：
 
 ```bash
 pip install -e ".[gtr,download,export]"   # GTR 骨干 + 官方权重下载 + ONNX 导出

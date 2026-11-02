@@ -51,10 +51,15 @@ metrics in the [model zoo](docs/model_zoo.md).
 
 ## Installation
 
-Python ≥ 3.10. Source installation is the current supported path; after the
-PyPI release, `pip install autovision-framework` will be available (the
+Python ≥ 3.10. Install from PyPI (distribution name `autovision-framework`,
 import name remains `autovision`; an unrelated `autovision` 0.0.1 package
-already exists on PyPI). From the repository root:
+exists on PyPI):
+
+```bash
+pip install "autovision-framework[gtr,download,export]"
+```
+
+From the repository root (source installation):
 
 ```bash
 pip install -e ".[gtr,download,export]"   # GTR backbone + weight downloads + ONNX export
