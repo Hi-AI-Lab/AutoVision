@@ -179,3 +179,24 @@ software (e.g. Ultralytics, DINOv3/DINOv2 weights) are isolated behind
 optional extras and runtime downloads and must never have source or weights
 copied into this repository (docs/provenance/LEDGER.md;
 CONTRIBUTING.md license/provenance red lines).
+
+AGPL-licensed codebases may additionally be consulted as ARCHITECTURE
+REFERENCES driving clean-room re-implementations maintained in this tree;
+the registry of adopted designs is docs/design_ultralytics_adoption.md
+(entries D1+; landed files in docs/provenance/LEDGER.md). The same
+protocol governs every adoption, current and future:
+
+* Permitted — reading upstream code to extract a design (component
+  structure, interface shape, algorithm steps, edge-case handling), then
+  implementing that design in AutoVision from the design document and
+  paper-level algorithm semantics, in this repository's own style.
+
+* Prohibited — copying or line-by-line translating upstream source;
+  copying upstream comments, docstrings, constant tables, or test data;
+  importing upstream packages anywhere outside the isolated
+  optional-extra boundary. The red line above is unchanged.
+
+* Required — every landed file is registered in
+  docs/provenance/LEDGER.md as an architecture reference with a
+  clean-room statement and a review date, and the AGPL boundary is
+  re-reviewed before any commercial distribution.

@@ -149,10 +149,18 @@ def get_dataloader(
     batch_size_per_device: int,
     num_workers: int,
     collate_fn: Any = None,
+    seed: int | None = None,
 ) -> DataLoader:
     timeout = (
         _dataloader_timeout() if num_workers > 0 else 0.0
     )
+    worker_init_fn = None
+    generator = None
+    if seed is not None:
+        from autovision.engine.engine import make_dataloader_generator, seed_worker
+
+        worker_init_fn = seed_worker
+        generator = make_dataloader_generator(seed)
     return DataLoader(
         dataset,
         batch_size=batch_size_per_device,
@@ -160,6 +168,8 @@ def get_dataloader(
         drop_last=True,
         num_workers=num_workers,
         collate_fn=collate_fn,
+        worker_init_fn=worker_init_fn,
+        generator=generator,
         timeout=timeout,
     )
 

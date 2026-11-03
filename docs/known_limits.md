@@ -25,7 +25,10 @@ serving 支持可选 API key（`AUTOVISION_SERVING_API_KEY` 或 `api_key=`）、
   mid-epoch sampler 位置，也不校验配置/版本差异；续训时优化器状态会覆盖新的
   `lr` 等参数。需要严格轨迹复现时请从 epoch 边界续训。加载跨版本 checkpoint
   会记录 warning（不阻断）。checkpoint/导出/manifest 写入均先清扫同目标
-  超过 1 小时的崩溃残留临时文件，再开始本次写入。
+  超过 1 小时的崩溃残留临时文件，再开始本次写入。D17 后 resume 会续接早停
+  耐心计数并对白名单外超参漂移逐键告警（当前调用参数治理）；dataloader 的
+  worker 播种流（D23a）从运行起点的 seed 重建，与首次运行的 shuffle 顺序
+  不保证逐位一致。
 - **mmap 缓存完整性**：缓存文件打开时校验，损坏/截断会报带重建指引的错误
   （删除文件或 `overwrite=True` 重建）。运行中文件被外部截断（与他人共享
   `AUTOVISION_DATA_CACHE_DIR` 时的外部写入者）会导致 SIGBUS 进程崩溃——这是
@@ -131,9 +134,17 @@ base→x，选型标准为可导出 + 许可干净），实现待落地。`detr/
   （`shared/gtr/gla_onnx.py`），eager 路径不变；导出为固定尺寸图（
   `dynamic_spatial=True` 会被快速拒绝），五条路线的端到端门禁在
   `tests/test_gtr_export_gates.py`。fp16 导出可用：GLA 的 fp32 状态段经
-  `onnx_fp32_op_types`（MatMul/Resize）钉住以保持图一致，但 GTR 的计算以
-  GEMM 为主，fp16 主要惠及 Conv 段（ORT-GPU/OpenVINO），ORT CPU 反而更慢
-  ——CPU 部署用 fp32 图，TensorRT 建议由 fp32 图自行管精度。
+  `onnx_fp32_op_types`（MatMul/Resize/ConstantOfShape）钉住以保持图一致
+  （ConstantOfShape 是 GLA causal 掩码的 trace 产物，多 chunk 尺寸下会被
+  ORT float16 转换器漏转），但 GTR 的计算以 GEMM 为主，fp16 主要惠及
+  Conv 段（ORT-GPU/OpenVINO），ORT CPU 反而更慢——CPU 部署用 fp32 图，
+  TensorRT 建议由 fp32 图自行管精度。
+- **TensorRT 版本边界**：GTR 展开纯图的 fp32 引擎在 TensorRT 11.4
+  （11.4.0.106）上构建成功但数值错误（det/depth 输出系统性偏离 torch 与
+  onnxruntime 参考；上游受支持环境是 TensorRT 10.14）。`export_tensorrt`
+  在 TensorRT ≥ 11 上构建前会主动告警；引擎对拍门禁会拒绝并删除这类引擎
+  （fail-closed）；该 TRT 版本上勿对 GTR 关闭 verify，部署走受支持的
+  TensorRT 版本或上游 plugin 路线（见 docs/export.md）。
 - GTR 的 eager 前向依赖 fla 的 Triton 核（CUDA-only）：CPU 上构造
   `backend='torch'` 的推理引擎会被可读报错拒绝（用 `backend='onnx'` 或
   `device='cuda'`）；CPU eager 部署走 ONNX 后端。TensorRT / OpenVINO 导出

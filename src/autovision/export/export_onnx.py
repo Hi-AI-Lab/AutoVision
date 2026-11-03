@@ -15,7 +15,6 @@ calibrated) — see ``autovision.export.quantization``.
 from __future__ import annotations
 
 import glob
-import json
 import logging
 import os
 import uuid
@@ -25,8 +24,6 @@ from typing import Any, Iterable, Literal
 import torch
 from torch import nn
 
-from autovision._license import LICENSE_INFO
-from autovision._version import __version__
 from autovision.errors import AutoVisionError
 from autovision.runtime.fs_utils import sweep_stale_temp_files
 
@@ -36,6 +33,11 @@ __all__ = ["ONNXExportMixin", "ONNXExportPrecisionPolicy"]
 # expected to shift logits; the gate only catches structural breakage.
 INT8_PARITY_ATOL = 2.0
 INT8_PARITY_RTOL = 0.5
+
+#: Exported graphs below this size are treated as truncated (design D14b):
+#: a header-only "success" fails the export instead of shipping a graph
+#: with no weights.
+_MIN_ARTIFACT_BYTES = 4096
 
 logger = logging.getLogger("autovision")
 
@@ -189,6 +191,50 @@ def _eager_reference_device_bound(network: Any) -> bool:
     )
 
 
+def _warn_tensorrt_version_advisory(network: Any) -> None:
+    """Warn when a module declares a TensorRT-version advisory and the
+    installed TensorRT falls in the known-bad range (the GTR pure-ONNX
+    graph miscompiles on TensorRT 11.x — docs/known_limits.md).
+
+    Soft on purpose: ``verify=True`` still fail-closes a wrong-numerics
+    engine after the build; this warning exists so ``verify=False`` builds
+    are not silent and the user knows before spending the build time.
+    """
+    advisory = next(
+        (
+            message
+            for message in (
+                getattr(module, "trt_version_advisory", None)
+                for module in network.modules()
+            )
+            if message
+        ),
+        None,
+    )
+    if advisory is None:
+        return
+    try:
+        import tensorrt
+    except ImportError:
+        # Nothing to advise on yet; the engine build raises its own
+        # actionable error about the missing package.
+        return
+    try:
+        major = int(tensorrt.__version__.split(".")[0])
+    except (AttributeError, ValueError):
+        return
+    if major < 11:
+        return
+    logger.warning(
+        "TensorRT %s: %s Keep verify=True (the engine parity gate deletes "
+        "an engine whose numerics drift); deploy on TensorRT 10.x or via "
+        "the upstream GLA plugin route (docs/export.md, "
+        "docs/known_limits.md).",
+        tensorrt.__version__,
+        advisory,
+    )
+
+
 class ONNXExportPrecisionPolicy:
     """Per-model ops that must stay FP32 in an FP16 export."""
 
@@ -253,19 +299,12 @@ class ONNXExportMixin(nn.Module):
             module.restore_after_export()
 
     def onnx_export_metadata(self) -> dict[str, str]:
-        metadata = {
-            "autovision_version": __version__,
-            "license_info": LICENSE_INFO,
-        }
-        model_name = self.init_args.get("model_name") or self.init_args.get("backbone")
-        if model_name:
-            metadata["model_name"] = str(model_name)
-        normalize = getattr(self, "normalize", None)
-        if normalize is not None:
-            metadata["image_normalize"] = json.dumps(normalize.to_dict(), sort_keys=True)
-        if hasattr(self, "num_classes"):
-            metadata["num_classes"] = str(self.num_classes)
-        return metadata
+        """Artifact identity (design D1): the schema lives in
+        ``artifact_metadata.build_metadata`` so the ONNX in-graph metadata
+        and the OpenVINO/TensorRT sidecars carry exactly the same keys."""
+        from autovision.export.artifact_metadata import build_metadata
+
+        return build_metadata(self)
 
     @torch.no_grad()
     def export_onnx(
@@ -525,13 +564,29 @@ class ONNXExportMixin(nn.Module):
         _repair_value_info(out)
 
         # 7. metadata.
-        _write_onnx_metadata(out, self.onnx_export_metadata())
+        metadata = self.onnx_export_metadata()
+        _write_onnx_metadata(out, metadata)
+        logger.info(
+            "Artifact identity: task=%s, num_classes=%s, image_size=%s.",
+            metadata.get("autovision_task"),
+            metadata.get("num_classes"),
+            metadata.get("autovision_image_size"),
+        )
 
         # 8. verification gate.
         if verify:
             self._verify_onnx(
                 out, example_name, example_tensor, precision,
                 dynamic_spatial=dynamic_spatial,
+            )
+        # Gross-truncation guard (parity owns numerics; this owns the
+        # "wrote only a header" accident). A real exported graph with its
+        # weights is never this small.
+        if out.stat().st_size < _MIN_ARTIFACT_BYTES:
+            raise AutoVisionError(
+                f"Exported ONNX artifact '{out.name}' is only "
+                f"{out.stat().st_size} bytes (< {_MIN_ARTIFACT_BYTES}); the "
+                "graph looks truncated. Re-run the export."
             )
         # onnxslim re-inlined the dynamo exporter's external data: the sidecar
         # is litter unless the graph genuinely keeps external initializers.
@@ -703,10 +758,12 @@ class ONNXExportMixin(nn.Module):
             # verify=True checked nothing numerical; exact parity still needs
             # a CUDA-enabled onnxruntime build.
             logger.warning(
-                "FP16 export: no CUDA execution provider — exact numerical "
-                "parity unavailable, running the execute-and-finiteness "
-                "smoke gate instead. Re-verify on a CUDA-enabled build for "
-                "exact parity."
+                "FP16 export: no CUDA execution provider (installed "
+                "providers: %s) — exact numerical parity unavailable, "
+                "running the execute-and-finiteness smoke gate instead. "
+                "Re-verify on a CUDA-enabled onnxruntime build (e.g. pip "
+                "install onnxruntime-gpu) for exact parity.",
+                ", ".join(ort.get_available_providers()),
             )
             self._smoke_verify_fp16(out, example_tensor)
             return
@@ -1002,6 +1059,7 @@ class ONNXExportMixin(nn.Module):
         deletes the engine and raises. Set ``verify=False`` only for
         throwaway debug builds.
         """
+        _warn_tensorrt_version_advisory(self)
         from autovision.export.tensorrt_helpers import export_onnx_to_tensorrt
 
         def _verify_engine(engine_path: Path) -> None:
@@ -1199,6 +1257,7 @@ class ONNXExportMixin(nn.Module):
                 if not keep_int8_onnx:
                     _drop(int8_onnx)
             _verify_engine(engine)
+            _write_engine_identity(self, engine, precision)
             _maybe_write_postprocess_spec(self, engine)
             if not keep_int8_onnx:
                 # export_onnx_int8 wrote the staged ONNX sidecar; the engine
@@ -1221,6 +1280,7 @@ class ONNXExportMixin(nn.Module):
             debug=debug,
         )
         _verify_engine(engine)
+        _write_engine_identity(self, engine, precision)
         _maybe_write_postprocess_spec(self, engine)
         return engine
 
@@ -1258,6 +1318,24 @@ class ONNXExportMixin(nn.Module):
         )
         _maybe_write_postprocess_spec(self, xml_path)
         return xml_path
+
+
+def _write_engine_identity(network: Any, engine: Path, precision: str) -> None:
+    """Write the TensorRT engine's identity sidecar (design D1).
+
+    Engines cannot carry in-graph metadata; the ``<engine>.meta.json``
+    sidecar mirrors the OpenVINO ``<xml>.json`` (identity + backend and
+    precision) so ``InferenceEngine`` can verify network-vs-artifact
+    identity the same way for every backend.
+    """
+    from autovision.export.artifact_metadata import write_artifact_metadata
+
+    write_artifact_metadata(
+        network,
+        engine,
+        backend="tensorrt",
+        extra={"backend": "tensorrt", "precision": precision},
+    )
 
 
 def _maybe_write_postprocess_spec(network: Any, artifact: Path) -> None:

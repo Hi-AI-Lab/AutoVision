@@ -70,6 +70,14 @@ class InferenceEngine:
         self.artifact = Path(artifact) if artifact is not None else None
         self.openvino_device = openvino_device if backend == "openvino" else None
 
+        if backend != "torch":
+            # Identity gate (design D1): the artifact must have been
+            # exported from THIS network. Legacy artifacts without
+            # metadata pass through unchanged.
+            from autovision.export.artifact_metadata import verify_engine_artifact
+
+            verify_engine_artifact(self.network, self.artifact, backend=backend)
+
         if backend == "torch":
             if device is not None:
                 self.network.to(device=torch.device(device))

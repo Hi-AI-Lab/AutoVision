@@ -392,16 +392,16 @@ AutoVision 的架构与实现受益于以下开源工作。代码 lineage 与修
   （MIT）、[SAHI](https://github.com/obss/sahi)（MIT）、
   [Roboflow supervision](https://github.com/roboflow/supervision)（MIT）
   提供了算法参考；本仓库为 AutoVision 实现，不引入 supervision 运行时依赖。
+- **训练工程参考**：[Ultralytics](https://github.com/ultralytics/ultralytics)
+  （AGPL-3.0）提供了训练 / 追踪 / 数据 / 导出的工程化架构参考，
+  [LightlyTrain](https://github.com/lightly-ai/lightly-train)（AGPL-3.0）
+  提供了自监督预训练与模型注册表的设计参考；两者均为净室实现，
+  `ultralytics` 仅以 AGPL extra 隔离惰性加载，LightlyTrain 零运行时依赖。
 - **推理 / 训练工具**：PyTorch、torchvision、HuggingFace Transformers、
   ONNX Runtime、NVIDIA TensorRT、OpenVINO、FastAPI、MLflow、
   Weights & Biases、TensorBoard。
 - **数据集**：COCO、PASCAL VOC、Cityscapes、DOTA、NYU Depth V2、Objects365、
   ImageNet；各自条款适用，不随本仓库分发。
-
-> YOLO / Ultralytics 名称仅用于兼容性描述，不表示官方背书或关联；
-> `ultralytics` 组件以 AGPL-3.0 extra 隔离，不进入核心依赖、不随仓库分发。
-> README 致谢是社区信用；法律归属以 `NOTICE` / `THIRD_PARTY_LICENSES.md`
-> 为准。
 
 ## 已知限制
 

@@ -301,14 +301,33 @@ class GatedLinearAttention(nn.Module):
         "Export without dynamic_spatial at the variant's input size."
     )
 
+    #: Read by the TensorRT export path (module-tree scan, same idiom as the
+    #: blockers above): TensorRT 11.x builds the exported pure graph but the
+    #: engine numerics are wrong — Myelin miscompiles the unrolled
+    #: CumSum/Exp/MatMul GLA chain, so det/depth outputs drift from the torch
+    #: and onnxruntime references (the upstream-supported environment is
+    #: TensorRT 10.14). A warning, not a blocker: the verify=True engine gate
+    #: remains the fail-closed protection; see docs/known_limits.md.
+    trt_version_advisory = (
+        "the exported GTR pure-ONNX graph is affected by a TensorRT 11.x "
+        "Myelin miscompile (engines build fine but their outputs drift from "
+        "the torch/onnxruntime references)."
+    )
+
     #: Ops pinned to fp32 by the ONNX fp16 conversion for GTR graphs. The
     #: lowered GLA keeps its state and decay math in fp32 (an unnormalized
     #: running sum saturates fp16) and the converter's dtype propagation only
     #: stays consistent across that boundary with MatMul pinned; Resize has a
-    #: known converter dtype gap. GTR's compute is GEMM-dominated, so fp16
-    #: mainly benefits Conv-heavy segments (ORT-GPU/OpenVINO); ORT CPU is
-    #: slower — prefer the fp32 graph there and let TensorRT manage precision.
-    onnx_fp32_op_types = ("MatMul", "Resize")
+    #: known converter dtype gap. ConstantOfShape (the traced GLA causal-mask
+    #: fill) must be pinned too: the ORT float16 converter leaves its fp32
+    #: output unconverted while rewriting the surrounding ops to fp16, which
+    #: produces a mixed-dtype Mul that fails onnx.checker once the token
+    #: count spans more than one GLA chunk (>64 tokens, i.e. inputs larger
+    #: than 128x128 at patch 16 — a 128x128 image traces exactly one chunk
+    #: and never sees it). GTR's compute is GEMM-dominated, so fp16 mainly
+    #: benefits Conv-heavy segments (ORT-GPU/OpenVINO); ORT CPU is slower —
+    #: prefer the fp32 graph there and let TensorRT manage precision.
+    onnx_fp32_op_types = ("MatMul", "Resize", "ConstantOfShape")
 
     def __init__(
         self,

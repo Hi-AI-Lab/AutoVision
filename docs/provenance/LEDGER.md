@@ -22,6 +22,28 @@
 | `visualize/effects.py`、`visualize/skeletons.py`、`geometry/boxes.py`、`geometry/masks.py`、`inference/video.py` | [Roboflow supervision 0.30](https://github.com/roboflow/supervision) | MIT | API/算法参考；AutoVision 实现（Pillow/NumPy 重写，不引入运行时依赖） | 文件头、NOTICE、THIRD_PARTY_LICENSES |
 | `encoders/rfdetr/`、`tasks/detection/rfdetr/` | [Roboflow RF-DETR](https://github.com/roboflow/rf-detr) / HF transformers | Apache-2.0 | wrapper；权重按需下载 | 模型卡、模型库 |
 
+| `export/artifact_metadata.py`、`export/timing.py`、`export/export_onnx.py`（TRT 身份旁路、产物最小尺寸护栏）、`registry/deployment_gates.py`（MetricFloorGate） | [Ultralytics 8.4.177](https://github.com/ultralytics/ultralytics) | AGPL-3.0（上游） | 架构参考；AutoVision 净室实现（D1/D5/D14b） | 设计提案 §4.1/§4.5/§4.14、NOTICE |
+| `tracking/gmc.py`、`tracking/bot_sort.py`、`tracking/byte_track.py`（钩子化重构）、`tracking/analytics.py`（chord 穿越补偿）、`inference/stream.py`（frame/补偿接线） | [Ultralytics 8.4.177](https://github.com/ultralytics/ultralytics)（GMC/钩子/退役通知）；BoT-SORT（arXiv 2206.14651）阶段结构 | AGPL-3.0 / 论文 | 架构参考；AutoVision 净室实现（D2/D6/D7/D13a） | 设计提案 §4.2/§4.6/§4.7/§4.13、NOTICE |
+| `augment/detection/box_candidates.py`（含 mosaic 接线与 args 阈值） | [Ultralytics 8.4.177](https://github.com/ultralytics/ultralytics) `box_candidates` 语义 | AGPL-3.0（上游） | 架构参考；AutoVision 净室实现（D3） | 设计提案 §4.3、NOTICE |
+| `engine/autobatch.py` | [Ultralytics 8.4.177](https://github.com/ultralytics/ultralytics) autobatch 策略（线性拟合 + OOM 回退） | AGPL-3.0（上游） | 架构参考；AutoVision 净室实现（D4；step 闭包按任务面注入） | 设计提案 §4.4、NOTICE |
+| `data/scan_cache.py`、`data/image_cache.py`、`data/downloads.py`（断点续传/重试/磁盘预检）、`data/split_large_images.py`（训练侧切片 + CLI `tile-dataset`） | [Ultralytics 8.4.177](https://github.com/ultralytics/ultralytics) 缓存/续传/split_dota 设计 | AGPL-3.0（上游） | 架构参考；AutoVision 净室实现（D8/D9/D10/D11；sha256 校验为 AutoVision 既有更强机制） | 设计提案 §4.8–§4.11、NOTICE |
+| `serving/app.py`（lifespan 全管线预热）、`docs/framework_design.md` §3.1（引擎/流状态生命周期约定） | [Ultralytics 8.4.177](https://github.com/ultralytics/ultralytics) warmup/预测器复用语义 | AGPL-3.0（上游） | 架构参考；AutoVision 净室实现（D14a/D14d） | 设计提案 §4.14、NOTICE |
+| `cli/model_handle.py`（`_ENGINE_SETUP_KEYS` 引擎缓存二分）、`engine/amp_check.py`（三态 AMP 事前探针）、`runtime/autodevice.py`（`-1` 空闲选卡 + CVD 翻译）、`engine/engine.py`（resume 白名单 `check_resume_fit_args` / 早停状态持久化 / possible_stop）、`geometry/polygons.py`（`is_valid_polygon` / `polygon_from_bbox`）、`data/coco_instance_segmentation_dataset.py`（多边形白名单兜底 + compressed-RLE 修复） | [Ultralytics 8.4.177](https://github.com/ultralytics/ultralytics) `PREDICTOR_SETUP_KEYS`/`check_amp`/`autodevice`/`check_resume`/多边形白名单设计 | AGPL-3.0（上游） | 架构参考；AutoVision 净室实现（D15/D16/D17/D18/D19） | 设计提案 §4.15–§4.19、NOTICE |
+| `engine/engine.py`（save_period 单次序列化多路写 / fp16 克隆钳制 / OOM 降批 / 回调注册接线）、`runtime/checkpoint.py`（`serialize`/`save_serialized`）、`engine/callbacks.py`、`runtime/model_info.py`（thop 惰性）、`runtime/fuse.py`（Sequential Conv+BN 折叠 + parity 门禁）、`augment/core.py`（四目标钩子协议）、`metrics/containers.py`（惰性 stats + 空/空约定）、`data/quality.py`（存储体检）、`metrics/map_evaluator.py`（maxDets 自动抬升）、`cli/common_helpers.py`/`cli/train_helpers.py`（worker 播种） | [Ultralytics 8.4.177](https://github.com/ultralytics/ultralytics) save_model/BytesIO、OOM 降批、回调清单、model_info、fuse、BaseTransform、DetMetrics、check_file_speeds、max_det 抬升设计 | AGPL-3.0（上游） | 架构参考；AutoVision 净室实现（D20/D21/D22/D23/D24/D27/D29；OOM 降批限定单进程、回调隔离严于上游、fuse 只走 Sequential 模式） | 设计提案 §4.20–§4.29、NOTICE |
+
+**净室声明（Ultralytics AGPL 架构参考，2026-11-03）**：上述 D 系列实现依据
+`docs/design_ultralytics_adoption.md` 与上游论文级语义（BoT-SORT、ByteTrack、
+Lucas–Kanade/ECC 等公开算法）在本仓库接口风格内重写；实现者未对照上游源码
+逐行翻译，未复制上游注释、docstring、常量表或测试数据。D15–D19 落地时按
+同一纪律执行：探针不下载外部权重（改用调用方自有模型）、选卡算法以本仓库
+device 语法重设计（`-1` 占位符 + 降级填满而非删占位符）、resume 白名单语义
+反转为"当前调用参数治理 + 漂移告警"。D20–D29 同一纪律：OOM 降批按集合
+通信安全收敛为单进程、回调隔离逐 handler（严于上游的裸循环）、fuse 数学
+重写并加本仓库 parity 门禁、bf16/fp16 探针 dtype 错配备忘在案。`NOTICE`
+的 AGPL 段落（2026-11-03 二次改写，协议式三条款）保留 "must never have
+source or weights copied" 红线原文。商业分发前需按台账头部要求法务复核
+本节。
+
 ## 2. 已处置：DEIMv2（STA 删除）
 
 2026-10-17 的许可审计发现：`ViTDetectionBackbone` 曾包含

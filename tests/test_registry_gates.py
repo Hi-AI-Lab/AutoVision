@@ -177,3 +177,46 @@ def test_cli_registry_register_promote_current(tmp_path):
     )
     assert result.exit_code == 0, result.output
     assert "1.0.0" in result.output
+
+
+# ── MetricFloorGate (design D5, opt-in) ─────────────────────────────────
+
+
+def test_metric_floor_gate_passes_when_metrics_clear_the_floor(tmp_path):
+    """A card recording 50 mAP passes a 40 mAP floor."""
+    from autovision.registry import MetricFloorGate
+
+    model = _model(tmp_path)
+    entry = ModelRegistry(tmp_path / "registry").register(
+        model, name="det", version="1.0.0"
+    )
+
+    assert MetricFloorGate({"coco_map": 40.0}).check(entry) == []
+
+
+def test_metric_floor_gate_fails_below_the_floor(tmp_path):
+    """A regression below the floor fails naming both numbers."""
+    from autovision.registry import MetricFloorGate
+
+    model = _model(tmp_path)
+    entry = ModelRegistry(tmp_path / "registry").register(
+        model, name="det", version="1.0.0"
+    )
+
+    problems = MetricFloorGate({"coco_map": 60.0}).check(entry)
+
+    assert problems and "50.0000" in problems[0] and "60.0000" in problems[0]
+
+
+def test_metric_floor_gate_requires_recorded_metrics(tmp_path):
+    """A metric the card never recorded is itself a gate failure."""
+    from autovision.registry import MetricFloorGate
+
+    model = _model(tmp_path)
+    entry = ModelRegistry(tmp_path / "registry").register(
+        model, name="det", version="1.0.0"
+    )
+
+    problems = MetricFloorGate({"aabb_map": 10.0}).check(entry)
+
+    assert problems == ["model card does not record 'aabb_map'"]

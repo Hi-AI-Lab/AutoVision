@@ -242,6 +242,8 @@ def verify_gtr_asset(asset: GTRAsset, chunk_size: int = 1 << 22) -> None:
     if not asset.path.exists():
         raise GTRAssetError(
             f"GTR asset '{asset.name}' not found at '{asset.path}'. "
+            f"Download it with: python scripts/download_gtr_assets.py "
+            f"--asset {asset.name}. "
             f"Source: {asset.source} (license {asset.license})."
         )
     digest = hashlib.sha256()
@@ -252,7 +254,8 @@ def verify_gtr_asset(asset: GTRAsset, chunk_size: int = 1 << 22) -> None:
         raise GTRAssetError(
             f"GTR asset '{asset.name}' sha256 mismatch — refusing to use "
             f"unverified teacher weights (pinned {asset.sha256[:12]}…, "
-            f"got {digest.hexdigest()[:12]}…)."
+            f"got {digest.hexdigest()[:12]}…). Re-download it with: python "
+            f"scripts/download_gtr_assets.py --asset {asset.name} --force."
         )
 
 

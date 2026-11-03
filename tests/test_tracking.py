@@ -351,3 +351,84 @@ class TestStreamTracking:
         assert len(records) == VIDEO_FRAMES
         assert all("tracks" not in record for record in records)
         assert result.tracks == 0
+
+
+class TestTrackStateLifecycle:
+    """Design D2: det_index join-back, retired-track drain, reset()."""
+
+    def test_det_index_follows_geometry_not_input_order(self):
+        """A track matched to a detection reports THAT detection's index."""
+        tracker = BYTETracker()
+        first = tracker.update(
+            np.array([_box(10.0), _box(200.0)]), np.array([0.9, 0.85]), np.array([0, 0])
+        )
+        assert [track.det_index for track in first] == [0, 1]
+        # Frame 2 swaps the input order: ids stay on their boxes, so the
+        # reported indices swap with them.
+        second = tracker.update(
+            np.array([_box(200.0), _box(11.0)]), np.array([0.9, 0.9]), np.array([0, 0])
+        )
+        by_id = {track.track_id: track.det_index for track in second}
+        assert by_id == {first[0].track_id: 1, first[1].track_id: 0}
+
+    def test_det_index_survives_a_degenerate_drop(self):
+        """A dropped degenerate box must not shift survivors' indices."""
+        tracker = BYTETracker()
+        tracks = tracker.update(
+            np.array([[10.0, 10.0, 10.0, 20.0], [20.0, 20.0, 30.0, 30.0]]),
+            np.array([0.9, 0.9]),
+            np.array([0, 0]),
+        )
+        assert len(tracks) == 1
+        assert tracks[0].det_index == 1  # its position in the INPUT array
+
+    def test_retired_tracks_are_published_once_via_drain(self):
+        """Buffer retirement is observable: drain yields it exactly once."""
+        tracker = BYTETracker(track_buffer=10)
+        first = tracker.update(np.array([_box(10.0)]), np.array([0.9]), np.array([0]))
+        old_id = first[0].track_id
+        for _ in range(12):
+            tracker.update(*_empty())
+
+        removed = tracker.drain_removed_tracks()
+
+        assert len(removed) == 1
+        assert removed[0].track_id == old_id
+        assert removed[0].state == "removed"
+        assert tracker.drain_removed_tracks() == []
+
+    def test_unconfirmed_removals_never_reach_the_drain(self):
+        """A one-frame blip was never published, so its removal is silent."""
+        tracker = BYTETracker()
+        tracker.update(*_empty())
+        tracker.update(np.array([_box(10.0)]), np.array([0.9]), np.array([0]))
+        tracker.update(*_empty())
+
+        assert tracker.drain_removed_tracks() == []
+
+    def test_drain_record_carries_no_detection(self):
+        """A retired track matched nothing on its last frame (det_index -1)."""
+        tracker = BYTETracker(track_buffer=1)
+        tracker.update(np.array([_box(10.0)]), np.array([0.9]), np.array([0]))
+        for _ in range(4):
+            tracker.update(*_empty())
+
+        assert tracker.drain_removed_tracks()[0].det_index == -1
+
+    def test_reset_restarts_ids_and_frame_state(self):
+        """After reset() the next source starts from id 1, frame 1."""
+        tracker = BYTETracker(track_buffer=10)
+        for frame in range(5):
+            tracker.update(np.array([_box(10.0 + frame)]), np.array([0.9]), np.array([0]))
+        tracker.drain_removed_tracks()
+
+        tracker.reset()
+
+        assert tracker.tracks == []
+        assert tracker.drain_removed_tracks() == []
+        # Frame 1 of the new source: the activation exception applies again
+        # (published immediately) and the id counter restarted.
+        fresh = tracker.update(np.array([_box(10.0)]), np.array([0.9]), np.array([0]))
+        assert len(fresh) == 1
+        assert fresh[0].track_id == 1
+        assert fresh[0].age == 0

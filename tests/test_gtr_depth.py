@@ -93,6 +93,34 @@ class TestGtrDepthLoad:
         head_keys = [k for k in net.state_dict() if k.startswith("decoder.")]
         assert len(head_keys) == 39
 
+    @requires_fla
+    def test_default_construction_loads_registered_asset(self):
+        """Bare construction (``load_checkpoint=True``, no ``checkpoint``)
+        must resolve the registered S asset — the old ``checkpoint and
+        load_checkpoint`` guard silently returned a RANDOM model there."""
+        try:
+            resolve_gtr_asset("gtrdepth_s")
+        except Exception:  # noqa: BLE001 - absent local weights keep fresh checkouts green
+            pytest.skip("local GTR depth weights not present")
+        from autovision.tasks.depth_estimation.gtr import GTRDepthEstimation
+
+        net = GTRDepthEstimation(variant="s", image_size=(640, 640))
+        assert net.load_report is not None
+        assert net.load_report["encoder_decoder_coverage"] == 1.0
+        assert net.load_report["transferred"] == 132
+
+    @requires_fla
+    def test_explicit_opt_out_stays_random(self):
+        """``load_checkpoint=False`` keeps the fresh-random contract (the
+        random-init path the export-gate tests rely on)."""
+        from autovision.tasks.depth_estimation.gtr import GTRDepthEstimation
+
+        torch.manual_seed(0)
+        net = GTRDepthEstimation(
+            variant="s", image_size=(64, 64), load_checkpoint=False
+        )
+        assert net.load_report is None
+
 
 class TestSilogAndMetrics:
     def test_silog_zero_on_perfect_prediction(self):

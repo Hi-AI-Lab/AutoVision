@@ -515,16 +515,27 @@ def finish(result: Any, args: argparse.Namespace) -> None:
     print(f"prediction      = {output}")
 
 
-def gtr_requirement() -> None:
-    """Fail early with an actionable message when GTR's CUDA stack is missing."""
+def gtr_requirement(*, need_cuda: bool = True) -> None:
+    """Fail early with an actionable message when GTR's stack is missing.
+
+    ``need_cuda=False`` only checks the ``gtr`` extra: constructing a GTR
+    network and running it through ``backend='onnx'`` never executes the
+    CUDA-only GLA kernels, so a CPU-only machine can serve an exported
+    artifact that way (the eager path still needs CUDA).
+    """
     import torch
 
-    if importlib.util.find_spec("fla") is None or not torch.cuda.is_available():
+    if importlib.util.find_spec("fla") is None:
         raise SystemExit(
-            "This example runs the GTR family and needs the `gtr` extra on a "
-            "CUDA machine:\n"
+            "This example runs the GTR family and needs the `gtr` extra:\n"
             "  pip install -e '.[gtr]'\n"
             "Training examples: re-run with --dry-run to inspect the data "
             "contract. Inference examples: pass --weights exported from a "
             "non-GTR training run."
+        )
+    if need_cuda and not torch.cuda.is_available():
+        raise SystemExit(
+            "This example runs the GTR eager forward, which needs a CUDA "
+            "machine (the GLA kernels are CUDA-only). CPU-only alternative: "
+            "export ONNX on a CUDA machine and re-run with --onnx <artifact>."
         )

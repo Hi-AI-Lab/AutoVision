@@ -11,6 +11,7 @@ detection dataset conventions.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any, Callable
 
@@ -19,6 +20,8 @@ import torch
 from torch.utils.data import Dataset
 
 __all__ = ["COCOInstanceSegmentationDataset"]
+
+logger = logging.getLogger("autovision")
 
 
 class COCOInstanceSegmentationDataset(Dataset):
@@ -50,6 +53,8 @@ class COCOInstanceSegmentationDataset(Dataset):
             for image in payload.get("images", [])
         }
         rows: list[dict[str, Any]] = []
+        malformed_polygons = 0
+        dropped_instances = 0
         for image_id, (file_name, width, height) in image_meta.items():
             boxes: list[list[float]] = []
             classes: list[int] = []
@@ -59,9 +64,16 @@ class COCOInstanceSegmentationDataset(Dataset):
                     continue
                 if int(annotation["category_id"]) not in self._user_to_internal:
                     continue
+                mask, fell_back = self._decode_mask(annotation, height, width)
+                if mask is None:
+                    # Malformed geometry with no usable bbox either — the
+                    # instance cannot be represented, skip it entirely.
+                    dropped_instances += 1
+                    continue
+                malformed_polygons += int(fell_back)
                 boxes.append([float(v) for v in annotation["bbox"]])
                 classes.append(self._user_to_internal[int(annotation["category_id"])])
-                masks.append(self._decode_mask(annotation["segmentation"], height, width))
+                masks.append(mask)
             rows.append(
                 {
                     "image_path": str(images_dir / file_name),
@@ -71,19 +83,80 @@ class COCOInstanceSegmentationDataset(Dataset):
                     "masks": masks,
                 }
             )
+        if malformed_polygons:
+            logger.warning(
+                "%d malformed segmentation polygon(s) in '%s' fell back to "
+                "their bounding boxes (design doc D19).",
+                malformed_polygons,
+                annotations,
+            )
+        if dropped_instances:
+            logger.warning(
+                "%d annotation(s) in '%s' had no usable geometry "
+                "(malformed polygon and no bbox) and were dropped.",
+                dropped_instances,
+                annotations,
+            )
         self._rows = rows
 
     @staticmethod
-    def _decode_mask(segmentation: Any, height: int, width: int) -> np.ndarray:
+    def _decode_mask(
+        annotation: dict[str, Any], height: int, width: int
+    ) -> tuple[np.ndarray | None, bool]:
+        """Binary mask for one annotation, with polygon sanitization (D19).
+
+        Returns ``(mask, fell_back)``; ``mask`` is ``None`` when the
+        annotation has no usable geometry at all. Malformed polygons
+        (odd length, < 3 points, non-finite, non-numeric) are replaced by
+        the annotation's bbox rectangle so the instance survives —
+        ``frPyObjects`` would otherwise raise and abort dataset
+        construction over one bad row.
+        """
         from pycocotools import mask as mask_utils
 
+        from autovision.geometry.polygons import is_valid_polygon, polygon_from_bbox
+
+        segmentation = annotation.get("segmentation")
+        bbox = annotation.get("bbox")
+        # Bbox fallback prepared once; None when the bbox itself is unusable
+        # (a NaN rectangle would only move the crash into the rasterizer).
+        fallback_polygon = (
+            polygon_from_bbox(bbox) if bbox is not None else None
+        )
         if isinstance(segmentation, dict):  # RLE
             rle = segmentation
             if isinstance(rle.get("counts"), str):
-                rle = mask_utils.frPyObjects(rle, height, width)
-            return mask_utils.decode(rle).astype(bool)
-        rles = mask_utils.frPyObjects(segmentation, height, width)
-        return mask_utils.decode(mask_utils.merge(rles)).astype(bool)
+                # Compressed RLE (the json form crowd regions use) decodes
+                # directly; frPyObjects would choke on the string counts.
+                return mask_utils.decode(rle).astype(bool), False
+            return mask_utils.decode(
+                mask_utils.frPyObjects(rle, height, width)
+            ).astype(bool), False
+        if not isinstance(segmentation, (list, tuple)):
+            segmentation = []
+        # Flat single polygon ([x1, y1, ...]) vs nested list of polygons.
+        if segmentation and not isinstance(segmentation[0], (list, tuple)):
+            polygons = [segmentation]
+        else:
+            polygons = list(segmentation)
+        fell_back = False
+        fixed: list[list[float]] = []
+        for polygon in polygons:
+            if is_valid_polygon(polygon):
+                fixed.append([float(v) for v in polygon])
+                continue
+            fell_back = True
+            if fallback_polygon is not None:
+                fixed.append(fallback_polygon.reshape(-1).tolist())
+        if not fixed and fallback_polygon is not None:
+            # Empty or all-malformed polygon list: the bbox rectangle keeps
+            # the instance alive as one polygon.
+            fixed = [fallback_polygon.reshape(-1).tolist()]
+            fell_back = True
+        if not fixed:
+            return None, True
+        rles = mask_utils.frPyObjects(fixed, height, width)
+        return mask_utils.decode(mask_utils.merge(rles)).astype(bool), fell_back
 
     def __len__(self) -> int:
         return len(self._rows)

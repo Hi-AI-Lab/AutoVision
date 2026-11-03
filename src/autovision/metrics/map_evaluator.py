@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 
 import torch
+
+logger = logging.getLogger("autovision")
 
 __all__ = ["COCOMAPEvaluator", "predictions_to_coco"]
 
@@ -61,15 +64,25 @@ class COCOMAPEvaluator:
     accumulate per validation round and ``compute()`` runs ``COCOeval``.
     """
 
-    def __init__(self, categories: dict[int, str], max_dets: int = 100) -> None:
+    def __init__(
+        self, categories: dict[int, str], max_dets: int = 100,
+        *, auto_raise: bool = False,
+    ) -> None:
         """``max_dets`` caps detections per image in the COCO eval.
 
         Default 100 matches pycocotools. Dense benchmarks evaluate higher
         (the VisDrone official protocol uses 500: crowded frames hold
         hundreds of objects, and the cap directly bounds recall).
+        ``auto_raise=True`` (design doc D29b) tracks the densest image
+        seen and lifts the cap at ``compute()`` time with a warning —
+        ``params.maxDets`` is only consumed there, so no retroactive work
+        is needed. Leave it off when the caller pinned an explicit
+        protocol cap (e.g. VisDrone's 500).
         """
         self.categories = categories  # internal id -> name
         self.max_dets = max_dets
+        self.auto_raise = auto_raise
+        self._max_instances_seen = 0
         self._predictions: list[dict] = []
         self._ground_truth: list[dict] = []  # {"boxes","labels","size"} per image
         #: Per-class rows from the last :meth:`compute` (name, ap, ar, f1,
@@ -105,6 +118,9 @@ class COCOMAPEvaluator:
             boxes = (
                 target["boxes"].detach().cpu()
                 if torch.is_tensor(target["boxes"]) else torch.as_tensor(target["boxes"])
+            )
+            self._max_instances_seen = max(
+                self._max_instances_seen, int(boxes.shape[0])
             )
             labels = (
                 target["labels"].detach().cpu()
@@ -151,8 +167,27 @@ class COCOMAPEvaluator:
         from other ranks under DDP)."""
         self._predictions.extend(state["predictions"])
         self._ground_truth.extend(state["ground_truth"])
+        # Re-derive from the merged GT so auto_raise sees the DENSEST image
+        # across ranks, not just this rank's shard.
+        self._max_instances_seen = max(
+            [self._max_instances_seen]
+            + [
+                int(t["boxes"].shape[0])
+                for t in self._ground_truth
+                if torch.is_tensor(t.get("boxes"))
+            ]
+        )
 
     def compute(self) -> dict[str, float]:
+        if self.auto_raise and self._max_instances_seen > self.max_dets:
+            logger.warning(
+                "Dataset holds up to %d instances on one image but maxDets "
+                "caps per-image detections at %d — raising the cap to %d "
+                "(pass max_dets explicitly to pin the protocol).",
+                self._max_instances_seen, self.max_dets,
+                self._max_instances_seen,
+            )
+            self.max_dets = self._max_instances_seen
         from pycocotools.cocoeval import COCOeval
 
         self.last_per_class = []

@@ -50,3 +50,7 @@ src/autovision/tasks/detection/shared/gtr/csrc/build/
 
 # MkDocs build output
 site/
+
+# ZCode session tooling (local)
+.zcode/
+customer_deck/

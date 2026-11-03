@@ -374,6 +374,35 @@ def test_fp16_export_with_gla_fp32_pins(tmp_path):
 
 
 @requires_gtr_extra
+def test_fp16_export_multi_chunk_causal_mask(tmp_path):
+    """fp16 export at a MULTI-CHUNK token count (>64 tokens — the GLA
+    causal-mask ConstantOfShape only poisons the graph there; the 64x64
+    builder above traces exactly one chunk) must pass the gates.
+
+    Regression: the ORT float16 converter left the fp32 ConstantOfShape
+    output unconverted while rewriting surrounding ops to fp16, producing a
+    mixed-dtype Mul that failed onnx.checker from 160x160 up.
+    """
+    pytest.importorskip("onnxruntime")
+    import onnx
+
+    from autovision.tasks.detection.detr.task_model import DETRObjectDetection
+
+    torch.manual_seed(0)
+    model = DETRObjectDetection(
+        num_classes=2, model_name="gtrvit-s", image_size=(160, 160),
+        decoder="dfine_official", num_queries=10, load_weights=False,
+        backbone_pretrained=False,
+    )
+    out = model.export_onnx(tmp_path / "det160_fp16.onnx", precision="fp16", verify=True)
+    assert out.exists()
+    graph = onnx.load(str(out)).graph
+    assert any(node.op_type == "ConstantOfShape" for node in graph.node), (
+        "expected the pinned fp32 ConstantOfShape to survive in the graph"
+    )
+
+
+@requires_gtr_extra
 def test_fp16_smoke_gate_rejects_nonfinite_graph(tmp_path):
     """The no-CUDA-EP fp16 fallback runs the execute-and-finiteness smoke
     gate (regression: verify=True skipped silently on CPU-only onnxruntime
@@ -511,3 +540,64 @@ def test_spatial_swiglu_deploy_static_perm_matches_flip_path():
             flipped = flipped.transpose(1, 2).flatten(1, 2)
         # Both are pure permutations: equality, not allclose.
         assert torch.equal(static, flipped), f"bid_scan layer {i} mismatch"
+
+
+@requires_gtr_extra
+def test_gla_declares_trt_version_advisory():
+    """The GLA module must carry the TensorRT-version advisory flag the
+    export path scans for (the pure graph miscompiles on TensorRT 11.x)."""
+    from autovision.tasks.detection.shared.gtr.vit_adapter import GatedLinearAttention
+
+    assert GatedLinearAttention.trt_version_advisory
+
+
+class _AdvisoryModule(torch.nn.Module):
+    """Minimal stand-in carrying the duck-typed advisory flag."""
+
+    trt_version_advisory = "test advisory: pure-graph miscompile"
+
+
+def test_trt_advisory_warning_fires_on_tensorrt_11(monkeypatch, caplog):
+    """TensorRT >= 11 + a flagged module must warn BEFORE the build; a
+    ``verify=False`` build has no other signal (monkeypatched tensorrt —
+    no TensorRT install needed to test the warning)."""
+    import logging
+    import sys
+    import types
+
+    from autovision.export.export_onnx import _warn_tensorrt_version_advisory
+
+    fake_trt = types.ModuleType("tensorrt")
+    fake_trt.__version__ = "11.4.0.106"
+    monkeypatch.setitem(sys.modules, "tensorrt", fake_trt)
+    net = torch.nn.Sequential(
+        torch.nn.Linear(2, 2),
+        _AdvisoryModule(),
+    )
+    with caplog.at_level(logging.WARNING, logger="autovision"):
+        _warn_tensorrt_version_advisory(net)
+    assert any("miscompile" in record.message for record in caplog.records)
+
+
+def test_trt_advisory_silent_on_tensorrt_10_and_unflagged_models(
+    monkeypatch, caplog
+):
+    """No warning on the upstream-supported TensorRT 10.x line, and none for
+    networks without the flag even on TensorRT 11."""
+    import logging
+    import sys
+    import types
+
+    from autovision.export.export_onnx import _warn_tensorrt_version_advisory
+
+    fake_trt = types.ModuleType("tensorrt")
+    fake_trt.__version__ = "10.14.2.2"
+    monkeypatch.setitem(sys.modules, "tensorrt", fake_trt)
+    with caplog.at_level(logging.WARNING, logger="autovision"):
+        _warn_tensorrt_version_advisory(torch.nn.Sequential(_AdvisoryModule()))
+    assert not caplog.records
+
+    fake_trt.__version__ = "11.4.0.106"
+    with caplog.at_level(logging.WARNING, logger="autovision"):
+        _warn_tensorrt_version_advisory(torch.nn.Sequential(torch.nn.Linear(2, 2)))
+    assert not caplog.records

@@ -320,8 +320,10 @@ TensorBoard, [RT-DETR](https://github.com/lyuwenyu/RT-DETR),
 [ByteTrack](https://github.com/ifzhang/ByteTrack),
 [SAHI](https://github.com/obss/sahi),
 [Roboflow RF-DETR](https://github.com/roboflow/rf-detr), PicoDet and
-supervision. See [NOTICE](NOTICE) and
-[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for legal attribution.
+supervision. The training / tracking / data / export engineering and the
+self-supervised pretraining + model-registry design additionally draw on
+[Ultralytics](https://github.com/ultralytics/ultralytics) and
+[LightlyTrain](https://github.com/lightly-ai/lightly-train) (both AGPL-3.0).
 
 > Translation status: this English README covers the main entry points. The
 > Chinese README is the default/canonical long-form document; deep docs pages

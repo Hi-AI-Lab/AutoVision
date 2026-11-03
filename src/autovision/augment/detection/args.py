@@ -108,6 +108,13 @@ class RTDETRDetectionTransformArgs(TaskTransformArgs):
     random_erase_step_stop: int | None | str = "auto"
     normalize: NormalizeArgs = Field(default_factory=NormalizeArgs)
     min_bbox_size_px: float = 4.0
+    #: Post-affine degradation gate (design D3): a mosaic target must keep
+    #: this much of its pre-transform area, stay above ``box_min_wh_px`` on
+    #: both sides, and below the aspect-ratio bound. Lenient by design —
+    #: the size floor stays owned by ``min_bbox_size_px``.
+    box_min_wh_px: float = Field(default=2.0, gt=0.0)
+    box_max_aspect_ratio: float = Field(default=100.0, gt=1.0)
+    box_min_area_ratio: float = Field(default=0.1, gt=0.0, le=1.0)
 
     # Step windows (auto: resolved from the training schedule).
     photometric_step_start: int | str = "auto"

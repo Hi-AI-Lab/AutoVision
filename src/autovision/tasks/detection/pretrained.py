@@ -12,14 +12,18 @@ dict), while this module is the only place that downloads and loads a
 task-level checkpoint. Model families without registered task weights fail
 with guidance instead of silently building a random head.
 
-GTR needs the flash-linear-attention extra and CUDA (the GLA kernel has no
-CPU fallback). Its loader assembles the official checkpoint through the
-same warm-start + backbone path the training tests use; it is gated so a
-CPU-only machine gets a readable error, never a half-initialized model.
+GTR needs the flash-linear-attention extra (the GLA module constructs fla
+primitives), but NOT a CUDA device at construction time: only the eager
+forward runs the CUDA-only Triton kernels. A CPU-only machine therefore
+builds the network fine and serves an exported artifact through the ONNX
+backend (``InferenceEngine(net, backend="onnx", artifact=...)``) — the
+documented GTR CPU deployment path; the eager CPU forward is refused with
+a readable error by the inference engine's ``cpu_eager_blocker`` scan.
 """
 
 from __future__ import annotations
 
+import logging
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -28,6 +32,8 @@ import torch
 
 from autovision.errors import AutoVisionError
 from autovision.registry.catalog import get_model_entry
+
+logger = logging.getLogger("autovision")
 
 __all__ = [
     "COCO_CLASSES",
@@ -144,15 +150,22 @@ def _build_gtr(model_key: str, device: str | torch.device) -> torch.nn.Module:
 
     if gtr_available is None or not gtr_available():
         raise AutoVisionError(
-            "GTR inference needs the 'gtr' extra (flash-linear-attention) and "
-            "a CUDA device for the GLA kernel. Install "
-            "`pip install 'autovision-framework[gtr]'` on a CUDA machine, or "
-            "use RF-DETR for CPU/portable inference."
+            "GTR inference needs the 'gtr' extra (flash-linear-attention): "
+            "install `pip install 'autovision-framework[gtr]'`. For a "
+            "portable detector without the extra, use RF-DETR."
         )
     if not torch.cuda.is_available():
-        raise AutoVisionError(
-            "GTR GLA inference requires CUDA; this machine has no CUDA device. "
-            "Use RF-DETR for CPU/portable inference."
+        # Construction never runs the GLA kernels — only the eager forward
+        # does, and a CPU eager forward is refused there by the readable
+        # cpu_eager_blocker scan (InferenceEngine torch backend). Blocking
+        # CONSTRUCTION on a CPU-only machine would lock those machines out
+        # of the documented ONNX CPU deployment path (docs/known_limits.md),
+        # so warn instead of raising.
+        logger.warning(
+            "No CUDA device: the GTR eager forward (and .predict) is "
+            "unavailable here. The network still constructs for ONNX "
+            "deployment: export it with .export('model.onnx') and serve it "
+            "through InferenceEngine(net, backend='onnx', artifact=...)."
         )
 
     from autovision.registry.gtr_assets import resolve_gtr_asset

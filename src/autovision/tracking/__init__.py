@@ -13,13 +13,18 @@ from autovision.tracking.analytics import (
     TrackSmoother,
     ZoneCounts,
 )
+from autovision.tracking.bot_sort import BOTSORT
 from autovision.tracking.byte_track import BYTETracker, Track
+from autovision.tracking.gmc import SUPPORTED_GMC_METHODS, GMCEstimator
 
 __all__ = [
+    "BOTSORT",
     "BYTETracker",
+    "GMCEstimator",
     "LineZone",
     "LineZoneCounts",
     "PolygonZone",
+    "SUPPORTED_GMC_METHODS",
     "Track",
     "TrackSmoother",
     "ZoneCounts",

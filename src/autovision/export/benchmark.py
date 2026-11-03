@@ -30,10 +30,12 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+import numpy as np
 import torch
 
 from autovision.config.base import PydanticConfig
 from autovision.export.model_cost import measure_model_cost
+from autovision.export.timing import adaptive_run_count, iterative_sigma_clip
 
 if TYPE_CHECKING:
     from autovision.tasks.task_model import TaskNetwork
@@ -100,11 +102,23 @@ def benchmark_inference(
     backend: str = "torch",
     precision: str = "fp32",
     forward: Any = None,
+    robust: bool = False,
+    min_measure_seconds: float = 10.0,
 ) -> BenchmarkResult:
     """Measure per-step latency and throughput on the current device.
 
     ``forward`` overrides the timed callable (defaults to
     ``model.forward_backend``), e.g. to benchmark a compiled function.
+
+    ``robust=True`` (design D5) applies the reproducibility methodology:
+    a 3-step probe sizes the measurement window to about
+    ``min_measure_seconds`` (:func:`adaptive_run_count`, overriding
+    ``steps``), and the collected samples are cleaned with
+    :func:`iterative_sigma_clip` before the robust statistics are
+    reported. The headline fields keep the fixed-step semantics (and the
+    existing benchmark tables comparable); the robust statistics land in
+    ``extra`` as ``latency_ms_mean_robust`` / ``latency_ms_std`` /
+    ``outliers_dropped``.
     """
     forward_fn = forward if forward is not None else model.forward_backend
     model.eval()
@@ -115,17 +129,34 @@ def benchmark_inference(
         forward_fn(example)
     if device.type == "cuda":
         torch.cuda.synchronize()
-    latencies = []
-    start_total = time.perf_counter()
-    for _ in range(steps):
+
+    def _timed_step() -> float:
         start = time.perf_counter()
         forward_fn(example)
         if device.type == "cuda":
             torch.cuda.synchronize()
-        latencies.append(time.perf_counter() - start)
+        return time.perf_counter() - start
+
+    if robust:
+        probe = [_timed_step() for _ in range(3)]
+        steps = adaptive_run_count(
+            sum(probe) / len(probe), target_seconds=min_measure_seconds
+        )
+
+    latencies = []
+    start_total = time.perf_counter()
+    for _ in range(steps):
+        latencies.append(_timed_step())
     total = time.perf_counter() - start_total
     batch_size = example.shape[0]
     latencies_ms = sorted(latency * 1000 for latency in latencies)
+    extra: dict[str, Any] = {"backend": backend, "precision": precision}
+    if robust:
+        kept = iterative_sigma_clip(latencies)
+        dropped = len(latencies) - len(kept)
+        extra["latency_ms_mean_robust"] = float(np.mean(kept)) * 1000.0
+        extra["latency_ms_std"] = float(np.std(kept)) * 1000.0
+        extra["outliers_dropped"] = int(dropped)
     result = BenchmarkResult(
         model_name=model_name,
         device=str(device),
@@ -136,11 +167,16 @@ def benchmark_inference(
         latency_ms_mean=sum(latencies_ms) / len(latencies_ms),
         latency_ms_p50=latencies_ms[max(0, (len(latencies_ms) + 1) // 2 - 1)],
         latency_ms_p90=latencies_ms[int(len(latencies_ms) * 0.9)],
-        extra={"backend": backend, "precision": precision},
+        extra=extra,
     )
     logger.info(
-        "Benchmark [%s/%s]: %.1f img/s (%.2f ms mean)",
-        backend, precision, result.images_per_sec, result.latency_ms_mean,
+        "Benchmark [%s/%s]: %.1f img/s (%.2f ms mean%s)",
+        backend,
+        precision,
+        result.images_per_sec,
+        result.latency_ms_mean,
+        f", robust {extra['latency_ms_mean_robust']:.2f} ms, "
+        f"{extra['outliers_dropped']} outliers" if robust else "",
     )
     return result
 

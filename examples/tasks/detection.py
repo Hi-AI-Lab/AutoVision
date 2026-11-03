@@ -12,6 +12,14 @@ checkpoint (MIT, COCO AP 53.6) and runs it on the bundled CC0 airport image:
 The GTR forward needs the ``gtr`` extra on a CUDA machine; pass
 ``--model rfdetr/rf-detr-nano`` for a CPU-friendly released checkpoint.
 
+``--onnx`` runs the forward through an exported ONNX artifact instead of
+the eager model — this is the GTR CPU deployment path (the network keeps
+its own pre/post-processing; only the forward is swapped):
+
+    python -c "import autovision; autovision.detection( \
+        'detr/gtrvit-s', pretrained=True).export('gtrvit_s.onnx', precision='fp32')"
+    python examples/tasks/detection.py --onnx gtrvit_s.onnx
+
 ``--effect`` renders through the annotators migrated from supervision
 (``autovision.visualize.effects``): ``corner`` / ``round`` replace the plain
 box with corner brackets or rounded boxes, while ``blur`` / ``pixelate``
@@ -99,6 +107,16 @@ def main() -> None:
         default=None,
         help="exported .pt from training; overrides --model",
     )
+    parser.add_argument(
+        "--onnx",
+        type=Path,
+        default=None,
+        help=(
+            "exported .onnx artifact: run the forward through it "
+            "(backend='onnx') instead of the eager model; works on "
+            "CPU-only machines and overrides --weights"
+        ),
+    )
     parser.add_argument("--threshold", type=float, default=0.3)
     parser.add_argument(
         "--effect",
@@ -130,7 +148,19 @@ def main() -> None:
         else args.device
     )
 
-    if args.weights is not None:
+    if args.onnx is not None:
+        # ONNX forward: construction never runs the GLA kernels, so the
+        # CUDA requirement does not apply here (the `gtr` extra still is —
+        # the GLA module builds fla primitives at construction time). The
+        # network stays CPU-resident: the ONNX session runs on the CPU EP
+        # and the network only supplies pre/post-processing.
+        if not args.onnx.is_file():
+            raise SystemExit(f"ONNX artifact not found: {args.onnx}")
+        if args.model.startswith("detr/gtrvit"):
+            gtr_requirement(need_cuda=False)
+        names = pretrained_class_names(args.model)
+        model = autovision.detection(args.model, pretrained=True)
+    elif args.weights is not None:
         model = autovision.load_model(args.weights, device=device)
         names = None  # custom checkpoints carry their own class ids
     else:
@@ -140,7 +170,13 @@ def main() -> None:
         model = autovision.detection(args.model, pretrained=True)
         model.to(device)
 
-    prediction = model.predict(args.image, threshold=args.threshold)
+    if args.onnx is not None:
+        from autovision.inference import InferenceEngine
+
+        engine = InferenceEngine(model.network, backend="onnx", artifact=args.onnx)
+        prediction = engine.run(args.image, threshold=args.threshold)
+    else:
+        prediction = model.predict(args.image, threshold=args.threshold)
     labels = _tolist(prediction["labels"])
     scores = _tolist(prediction["scores"])
     boxes = _tolist(prediction["bboxes"])
@@ -173,7 +209,10 @@ def main() -> None:
 
     print(f"image       = {args.image} ({rendered.width}x{rendered.height})")
     print(f"weights     = {args.weights or args.model} @ threshold {args.threshold}")
-    print(f"device      = {device}")
+    backend = f"onnx ({args.onnx})" if args.onnx is not None else "eager"
+    print(f"backend     = {backend}")
+    device_shown = "cpu (onnx session)" if args.onnx is not None else device
+    print(f"device      = {device_shown}")
     print(f"effect      = {args.effect}")
     print(f"detections  = {len(records)}")
     print(f"classes     = {dict(Counter(class_names).most_common())}")

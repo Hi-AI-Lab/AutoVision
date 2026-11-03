@@ -110,6 +110,19 @@ NumPy/Pillow。
 检测档位谱系（`detr/n` … `detr/x`）的产品冻结状态与方向决策机器可读地记录在
 `tasks/detection/detr/variants.py` 的 `SPECTRUM` 表（`planned` / `spec-frozen` / `released`）。
 
+### 3.1 推理引擎与流状态生命周期约定
+
+- **引擎参数分两类**（设计提案 D14d）：结构性参数（`backend` / `artifact` /
+  `device` / `providers`）决定引擎构建，变更即重建；阈值类参数
+  （`threshold` 等）是每次调用传入的，服务进程不得因它们重建引擎。
+- **tracker / zone 状态机属于单路流**（设计提案 D2/D6）：`BYTETracker` /
+  `BOTSORT` 与 `LineZone` / `PolygonZone` 实例按 stream 归属，禁止跨流共享
+  或缓存在流循环之外；换源时调用 `tracker.reset()`。退役轨迹经
+  `drain_removed_tracks()` 通知下游清理 per-id 状态。
+- **导出工件自描述**（设计提案 D1）：task / 类别数 / image_size 写入工件
+  元数据（ONNX 图内 / OpenVINO 与 TRT 旁路 JSON），`InferenceEngine`
+  构造时校验 network↔artifact 一致性；旧工件无元数据则跳过校验。
+
 ## 4. 权重与许可模型
 
 仓库**不携带权重二进制**；一切权重经三个注册表钉身份（sha256），许可边界

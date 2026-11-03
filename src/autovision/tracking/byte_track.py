@@ -80,10 +80,20 @@ class Track:
     state: str = _TRACKED
     #: Frames since the track was created (``frame_id - start_frame``).
     age: int = 0
+    #: Index of the detection this track matched in the frame's input
+    #: arrays (design D2); ``-1`` when the track matched nothing this
+    #: frame (predicted position only). Lets callers join tracker output
+    #: back onto their own detection records without re-doing the IoU.
+    det_index: int = -1
 
 
 class _KalmanFilter:
-    """Constant-velocity filter over the ``(x, y, aspect, height)`` state."""
+    """Constant-velocity filter over the ``(x, y, aspect, height)`` state.
+
+    Also owns the box<->state conversion and the camera-motion warp, so a
+    motion-model variant (BoT-SORT's XYWH, design D7) subclasses and swaps
+    only these — the association stages never see the state layout.
+    """
 
     def __init__(self) -> None:
         ndim, dt = 4, 1.0
@@ -92,6 +102,24 @@ class _KalmanFilter:
             self._motion[index, ndim + index] = dt
         self._update_matrix = np.eye(ndim, 2 * ndim, dtype=np.float64)
 
+    # ── state layout contract ───────────────────────────────────────
+    def to_state(self, box: np.ndarray) -> np.ndarray:
+        """xyxy box -> the filter's 4-state measurement."""
+        return _xyxy_to_xyah(box)
+
+    def to_box(self, mean: np.ndarray) -> np.ndarray:
+        """The filter's 4-state mean -> xyxy box."""
+        return _xyah_to_xyxy(mean)
+
+    def warp_state(self, mean: np.ndarray, transform: np.ndarray) -> np.ndarray:
+        """Warp the state's positional components by a 2x3 affine."""
+        warped = mean.copy()
+        x, y = warped[0], warped[1]
+        warped[0] = transform[0, 0] * x + transform[0, 1] * y + transform[0, 2]
+        warped[1] = transform[1, 0] * x + transform[1, 1] * y + transform[1, 2]
+        return warped
+
+    # ── filter dynamics (official ByteTrack parameterization) ───────
     def _std(self, position: float, velocity: float, height: float) -> np.ndarray:
         return np.array(
             [
@@ -184,11 +212,22 @@ def _iou_matrix(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 class _STrack:
     """One Kalman track's bookkeeping (``new`` → ``tracked`` ⇄ ``lost``)."""
 
-    def __init__(self, box: np.ndarray, score: float, class_id: int, *, frame_id: int) -> None:
-        self.mean, self.covariance = _KALMAN.initiate(_xyxy_to_xyah(box))
+    def __init__(
+        self,
+        box: np.ndarray,
+        score: float,
+        class_id: int,
+        *,
+        frame_id: int,
+        kalman: "_KalmanFilter",
+        det_index: int = -1,
+    ) -> None:
+        self._kalman = kalman
+        self.mean, self.covariance = kalman.initiate(kalman.to_state(box))
         self.score = float(score)
         self.class_id = int(class_id)
         self.track_id = 0
+        self.det_index = int(det_index)
         #: Unconfirmed until the first successful match (frame 1 excepted).
         self.state = _NEW
         self.hits = 1
@@ -197,33 +236,45 @@ class _STrack:
 
     @property
     def box(self) -> np.ndarray:
-        return _xyah_to_xyxy(self.mean)
+        return self._kalman.to_box(self.mean)
 
     def activate(self, track_id: int) -> None:
         self.track_id = track_id
         self.state = _TRACKED
 
     def predict(self) -> None:
-        self.mean, self.covariance = _KALMAN.predict(self.mean, self.covariance)
+        self.mean, self.covariance = self._kalman.predict(self.mean, self.covariance)
         self.time_since_update += 1
 
-    def update(self, box: np.ndarray, score: float, class_id: int) -> None:
+    def update(
+        self,
+        box: np.ndarray,
+        score: float,
+        class_id: int,
+        det_index: int = -1,
+    ) -> None:
         """Kalman update from a matched detection.
 
         Carries the state transitions too: a ``new`` track becomes
         ``tracked`` (activation) and a ``lost`` track is re-found.
         """
-        self.mean, self.covariance = _KALMAN.update(
-            self.mean, self.covariance, _xyxy_to_xyah(box)
+        self.mean, self.covariance = self._kalman.update(
+            self.mean, self.covariance, self._kalman.to_state(box)
         )
         self.score = float(score)
         self.class_id = int(class_id)
+        self.det_index = int(det_index)
         self.hits += 1
         self.time_since_update = 0
         self.state = _TRACKED
 
-
-_KALMAN = _KalmanFilter()
+    def warp_affine(self, transform: np.ndarray) -> None:
+        """Warp the state's position by a 2x3 frame-to-frame motion matrix
+        (design D6): the camera moved, so the PREDICTED position must move
+        with it before association. Only the center is warped — camera
+        rotation/scale changes to apparent size are second-order for the
+        sparse-flow estimate and stay on the Kalman process noise."""
+        self.mean = self._kalman.warp_state(self.mean, transform)
 
 
 @dataclass(frozen=True)
@@ -231,10 +282,16 @@ class _FrameDetections:
     boxes: np.ndarray
     scores: np.ndarray
     classes: np.ndarray
+    #: Position of each row in the frame's ORIGINAL detection arrays, so a
+    #: match can be reported as ``Track.det_index`` (design D2).
+    det_indices: np.ndarray
 
     def take(self, indices: list[int]) -> "_FrameDetections":
         return _FrameDetections(
-            self.boxes[indices], self.scores[indices], self.classes[indices]
+            self.boxes[indices],
+            self.scores[indices],
+            self.classes[indices],
+            self.det_indices[indices],
         )
 
 
@@ -249,6 +306,14 @@ class BYTETracker:
     the high/low detection pools, ``match_thresh`` is the stage-1
     similarity ceiling, ``track_buffer`` (in frames at ``frame_rate``)
     bounds how long a lost track survives.
+
+    State lifecycle (design D2): each track reports the index of the
+    detection it matched (``Track.det_index``); tracks retired by the
+    buffer are published once through :meth:`drain_removed_tracks` so
+    per-id downstream state (zone histories, smoothing buffers) can be
+    dropped; :meth:`reset` restarts the tracker for a new source. One
+    tracker instance belongs to one stream — never share it across
+    streams or cache it outside the stream loop.
     """
 
     def __init__(
@@ -259,6 +324,7 @@ class BYTETracker:
         track_buffer: int = 30,
         frame_rate: int = 30,
         class_aware: bool = True,
+        motion_compensation: str = "none",
     ) -> None:
         if not 0.0 <= track_thresh <= 1.0:
             raise AutoVisionError(f"track_thresh must be in [0, 1], got {track_thresh}.")
@@ -275,12 +341,51 @@ class BYTETracker:
         self.frame_rate = int(frame_rate)
         self.class_aware = bool(class_aware)
         self.max_time_lost = int(frame_rate / 30.0 * track_buffer)
+        #: Per-instance (not module-level) so a tracker's matrices can never
+        #: become shared mutable state across streams or resets.
+        self._kalman = self._make_kalman_filter()
+        #: Camera-motion compensation (design D6): ``None`` disables it;
+        #: otherwise a lazily-imported :class:`GMCEstimator` (cv2 lives in
+        #: the ``video`` extra).
+        self._gmc = None
+        if motion_compensation != "none":
+            from autovision.tracking.gmc import GMCEstimator
+
+            self._gmc = GMCEstimator(motion_compensation)
         #: Every live track (the ``state`` field carries new/tracked/lost);
         #: the tracker owns the list so a re-found track cannot linger in a
         #: stale pool.
         self.tracks: list[_STrack] = []
+        #: Tracks retired this frame, published once by
+        #: :meth:`drain_removed_tracks` (tracks removed before their first
+        #: successful match were never published and are NOT queued here).
+        self._removed: list[Track] = []
         self._next_id = 1
         self.frame_id = 0
+
+    def _make_kalman_filter(self) -> "_KalmanFilter":
+        """The motion model (design D7 hook): BoT-SORT swaps in XYWH."""
+        return _KalmanFilter()
+
+    def reset(self) -> None:
+        """Clear all state: ids restart at 1, as for a brand-new source."""
+        self.tracks.clear()
+        self._removed.clear()
+        if self._gmc is not None:
+            self._gmc.reset()
+        self._next_id = 1
+        self.frame_id = 0
+
+    def drain_removed_tracks(self) -> list[Track]:
+        """Return (and clear) the tracks retired so far (design D2).
+
+        Consumers keeping per-track-id state (zone histories, smoothers)
+        call this after each ``update`` to drop state for ids that will
+        never come back. Tracks removed before ever being published
+        (unconfirmed) are not included.
+        """
+        removed, self._removed = self._removed, []
+        return removed
 
     # ── association ─────────────────────────────────────────────────────
     def _match(
@@ -330,61 +435,134 @@ class BYTETracker:
         boxes: np.ndarray,
         scores: np.ndarray,
         classes: np.ndarray | None = None,
+        frame: np.ndarray | None = None,
     ) -> list[Track]:
-        """Associate one frame's detections; returns the activated tracks."""
+        """Associate one frame's detections; returns the activated tracks.
+
+        ``Track.det_index`` on each result indexes the arrays as passed in
+        (degenerate boxes dropped by validation keep their original
+        positions, design D2). ``frame`` (HxW or HxWx3) is optional and
+        only consumed when the tracker was built with
+        ``motion_compensation`` (design D6); the fixed template below is
+        the official ByteTrack schedule, decomposed into overridable
+        hooks (design D7) so variants like BoT-SORT replace stages
+        without copying the orchestration.
+        """
         self.frame_id += 1
-        boxes, scores, classes = self._validate(boxes, scores, classes)
-
-        high_mask = scores > self.track_thresh
-        low_mask = (scores > _LOW_SCORE_FLOOR) & (scores < self.track_thresh)
-        high = _FrameDetections(boxes[high_mask], scores[high_mask], classes[high_mask])
-        low = _FrameDetections(boxes[low_mask], scores[low_mask], classes[low_mask])
-
-        for track in self.tracks:
-            track.predict()
+        boxes, scores, classes, source_index = self._validate(boxes, scores, classes)
+        high, low = self._split_detections(boxes, scores, classes, source_index)
+        self._predict_tracks()
+        self._pre_association(frame, boxes)
         pool = [track for track in self.tracks if track.state in (_TRACKED, _LOST)]
         unconfirmed = [track for track in self.tracks if track.state == _NEW]
+        unmatched_pool, remaining = self._first_association(pool, high)
+        self._second_association(pool, unmatched_pool, low)
+        remaining = self._unconfirmed_association(unconfirmed, remaining)
+        self._spawn_new_tracks(remaining)
+        self._retire_tracks()
+        return self._published()
 
-        # Stage 1: activated tracks (tracked + lost) vs the high-score pool.
+    # ── stage hooks (template methods; overridable, design D7) ─────────
+    def _split_detections(
+        self,
+        boxes: np.ndarray,
+        scores: np.ndarray,
+        classes: np.ndarray,
+        source_index: np.ndarray,
+    ) -> tuple[_FrameDetections, _FrameDetections]:
+        """Split the frame's detections into the HIGH and LOW pools."""
+        high_mask = scores > self.track_thresh
+        low_mask = (scores > _LOW_SCORE_FLOOR) & (scores < self.track_thresh)
+        high = _FrameDetections(
+            boxes[high_mask], scores[high_mask], classes[high_mask],
+            source_index[high_mask],
+        )
+        low = _FrameDetections(
+            boxes[low_mask], scores[low_mask], classes[low_mask],
+            source_index[low_mask],
+        )
+        return high, low
+
+    def _predict_tracks(self) -> None:
+        """Kalman-predict every track; matched detections overwrite the
+        ``det_index`` reset performed here."""
+        for track in self.tracks:
+            track.predict()
+            track.det_index = -1
+
+    def _pre_association(
+        self, frame: np.ndarray | None, det_boxes: np.ndarray
+    ) -> None:
+        """Camera-motion compensation hook (design D6): warp live tracks
+        by the estimated frame-to-frame motion before any association."""
+        if self._gmc is None or frame is None:
+            return
+        transform = self._gmc.apply(frame, det_boxes=det_boxes)
+        if transform is None:
+            return
+        for track in self.tracks:
+            track.warp_affine(transform)
+
+    def _first_association(
+        self, pool: list[_STrack], high: _FrameDetections
+    ) -> tuple[list[int], _FrameDetections]:
+        """Stage 1: activated tracks (tracked + lost) vs the high-score pool.
+
+        Returns ``(unmatched_pool_indices, leftover_high)``.
+        """
         pairs, unmatched_pool, unmatched_high = self._match(
             pool, high, 1.0 - self.match_thresh, fuse_score=True
         )
         for track_index, det_index in pairs:
             pool[track_index].update(
-                high.boxes[det_index], high.scores[det_index], high.classes[det_index]
+                high.boxes[det_index], high.scores[det_index],
+                high.classes[det_index], det_index=int(high.det_indices[det_index]),
             )
+        return unmatched_pool, high.take(unmatched_high)
 
-        # Stage 2: still-tracked leftovers vs the LOW-score pool — ByteTrack's
-        # "associate every detection box".
+    def _second_association(
+        self,
+        pool: list[_STrack],
+        unmatched_pool: list[int],
+        low: _FrameDetections,
+    ) -> None:
+        """Stage 2: still-tracked leftovers vs the LOW pool — ByteTrack's
+        "associate every detection box"; leftovers drop to ``lost``."""
         tracked_left = [pool[i] for i in unmatched_pool if pool[i].state == _TRACKED]
-        pairs2, unmatched_tracked, _ = self._match(
-            tracked_left, low, _SECOND_MATCH_IOU
-        )
-        for track_index, det_index in pairs2:
+        pairs, unmatched_tracked, _ = self._match(tracked_left, low, _SECOND_MATCH_IOU)
+        for track_index, det_index in pairs:
             tracked_left[track_index].update(
-                low.boxes[det_index], low.scores[det_index], low.classes[det_index]
+                low.boxes[det_index], low.scores[det_index],
+                low.classes[det_index], det_index=int(low.det_indices[det_index]),
             )
         for track_index in unmatched_tracked:
             tracked_left[track_index].state = _LOST
 
-        # Stage 3: unconfirmed tracks vs the high detections left over by
-        # stage 1; an unmatched unconfirmed track is removed unpublished.
-        remaining = high.take(unmatched_high)
-        pairs3, unmatched_new, unmatched_remaining = self._match(
+    def _unconfirmed_association(
+        self, unconfirmed: list[_STrack], remaining: _FrameDetections
+    ) -> _FrameDetections:
+        """Stage 3: unconfirmed tracks vs the leftovers of stage 1; an
+        unmatched unconfirmed track is removed WITHOUT ever being
+        published (the confirmation gate). Returns ``remaining``."""
+        pairs, unmatched_new, _ = self._match(
             unconfirmed, remaining, 1.0 - _UNCONFIRMED_DIST_THRESH, fuse_score=True
         )
-        for track_index, det_index in pairs3:
+        for track_index, det_index in pairs:
             unconfirmed[track_index].update(
                 remaining.boxes[det_index],
                 remaining.scores[det_index],
                 remaining.classes[det_index],
+                det_index=int(remaining.det_indices[det_index]),
             )
         for track_index in unmatched_new:
             unconfirmed[track_index].state = _REMOVED
+        return remaining
 
-        # New tracks from the high detections nobody claimed; the reference
-        # gates them on ``det_thresh`` and activates frame-1 tracks at once.
-        for det_index in unmatched_remaining:
+    def _spawn_new_tracks(self, remaining: _FrameDetections) -> None:
+        """New tracks from the high detections nobody claimed; gated on
+        ``det_thresh`` and activated at once on frame 1 (the official
+        exception)."""
+        for det_index in range(len(remaining.boxes)):
             if remaining.scores[det_index] < self.det_thresh:
                 continue
             track = _STrack(
@@ -392,6 +570,8 @@ class BYTETracker:
                 remaining.scores[det_index],
                 remaining.classes[det_index],
                 frame_id=self.frame_id,
+                kalman=self._kalman,
+                det_index=int(remaining.det_indices[det_index]),
             )
             track.track_id = self._next_id
             self._next_id += 1
@@ -399,12 +579,32 @@ class BYTETracker:
                 track.state = _TRACKED
             self.tracks.append(track)
 
-        # Retire tracks that have been missing beyond the buffer.
+    def _retire_tracks(self) -> None:
+        """Retire tracks missing beyond the buffer. A retired track HAS
+        been published before, so it is queued for
+        ``drain_removed_tracks`` (design D2); unconfirmed removals were
+        never published and are dropped silently."""
+        surviving: list[_STrack] = []
         for track in self.tracks:
             if track.state == _LOST and track.time_since_update > self.max_time_lost:
                 track.state = _REMOVED
-        self.tracks = [track for track in self.tracks if track.state != _REMOVED]
+                self._removed.append(
+                    Track(
+                        track_id=track.track_id,
+                        bbox=tuple(float(value) for value in track.box),
+                        score=track.score,
+                        class_id=track.class_id,
+                        state=_REMOVED,
+                        age=self.frame_id - track.start_frame,
+                        det_index=-1,
+                    )
+                )
+            else:
+                surviving.append(track)
+        self.tracks = surviving
 
+    def _published(self) -> list[Track]:
+        """The frame's ACTIVATED tracks as public ``Track`` records."""
         return [
             Track(
                 track_id=track.track_id,
@@ -413,6 +613,7 @@ class BYTETracker:
                 class_id=track.class_id,
                 state=track.state,
                 age=self.frame_id - track.start_frame,
+                det_index=track.det_index,
             )
             for track in self.tracks
             if track.state == _TRACKED
@@ -424,8 +625,14 @@ class BYTETracker:
         boxes: np.ndarray,
         scores: np.ndarray,
         classes: np.ndarray | None,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Strict input checks — bad geometry fails here, not in the Kalman."""
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Strict input checks — bad geometry fails here, not in the Kalman.
+
+        Returns the validated arrays plus each surviving row's index in the
+        ARRAYS AS PASSED (``source_index``), so a match can be reported as
+        ``Track.det_index`` against the caller's own detection records even
+        when degenerate boxes were dropped.
+        """
         boxes_array = np.asarray(boxes, dtype=np.float64)
         if boxes_array.size:
             if boxes_array.ndim == 1:
@@ -461,10 +668,12 @@ class BYTETracker:
                     f"{classes_array.dtype}."
                 )
         # Zero/negative-area boxes make the Kalman innovation covariance
-        # singular. Drop them at the boundary instead of failing mid-stream.
+        # singular. Drop them at the boundary instead of failing mid-stream;
+        # survivors keep their original positions via ``source_index``.
         widths = boxes_array[:, 2] - boxes_array[:, 0]
         heights = boxes_array[:, 3] - boxes_array[:, 1]
         valid = (widths > 0) & (heights > 0)
+        source_index = np.flatnonzero(valid).astype(np.int64)
         if not valid.all():
             logger.warning(
                 "tracker.update: dropped %d degenerate boxes (non-positive "
@@ -474,4 +683,4 @@ class BYTETracker:
             boxes_array = boxes_array[valid]
             scores_array = scores_array[valid]
             classes_array = classes_array[valid]
-        return boxes_array, scores_array, classes_array.astype(np.int64)
+        return boxes_array, scores_array, classes_array.astype(np.int64), source_index

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Protocol
+from typing import Mapping, Protocol
 
 from autovision.registry.model_card import load_model_card
 from autovision.registry.model_registry import RegistryEntry, compute_file_sha256
@@ -20,6 +20,7 @@ __all__ = [
     "DataSnapshotGate",
     "DeploymentGate",
     "LicenseGate",
+    "MetricFloorGate",
     "ModelCardGate",
     "ParityGate",
     "Sha256Gate",
@@ -146,6 +147,40 @@ class DataSnapshotGate:
         if path is None:
             return ["no data_snapshot in registry metadata"]
         return [] if path.is_file() else [f"data snapshot missing: {path}"]
+
+
+class MetricFloorGate:
+    """Metric floors over the model card (design D5; opt-in).
+
+    The CI form of "this model must not regress": each declared metric
+    (``{"coco_map": 0.3}``) becomes a hard floor over the card's recorded
+    metrics — a promotion whose card reports a value below its floor fails
+    with both numbers in the message. Not part of :func:`default_gates`
+    because floors are per-model policy; compose it explicitly for the
+    models you gate.
+    """
+
+    name = "metric_floor"
+
+    def __init__(self, floors: Mapping[str, float]) -> None:
+        self.floors = dict(floors)
+
+    def check(self, entry: RegistryEntry) -> list[str]:
+        try:
+            card = load_model_card(entry.path)
+        except Exception as error:  # noqa: BLE001
+            return [f"cannot read model card: {error}"]
+        problems: list[str] = []
+        for metric, floor in sorted(self.floors.items()):
+            recorded = card.metrics.get(metric)
+            if recorded is None:
+                problems.append(f"model card does not record '{metric}'")
+            elif float(recorded) < float(floor):
+                problems.append(
+                    f"{metric}={float(recorded):.4f} is below the "
+                    f"{float(floor):.4f} floor"
+                )
+        return problems
 
 
 def default_gates() -> list[DeploymentGate]:

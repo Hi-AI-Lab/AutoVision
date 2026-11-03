@@ -194,6 +194,12 @@ class Env:
     STEP_TIMEOUT_SEC = EnvVar[float](
         "AUTOVISION_STEP_TIMEOUT_SEC", _default=0.0, _type=float  # 0 disables the watchdog
     )
+    # Dataset scan cache (design doc §4.8 D8): per-file manifest verdicts
+    # are cached next to the dataset so repeated startups skip the full
+    # verification pass. Set to 0 to disable globally (dataset construction
+    # then skips the scan layer entirely; ``data_check --no-cache`` and the
+    # per-dataset ``use_scan_cache=False`` override this too).
+    SCAN_CACHE = EnvVar[bool]("AUTOVISION_SCAN_CACHE", _default=True, _type=_parse_bool)
 
     @staticmethod
     def values() -> dict[str, Any]:

@@ -17,12 +17,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
+import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
 
 from PIL import Image
+
+logger = logging.getLogger("autovision")
 
 __all__ = [
     "AuditIssue",
@@ -257,6 +262,77 @@ def _add_issue(
     key = f"{severity}s"
     if key in per_split[split]:
         per_split[split][key] += 1
+
+
+#: D29a thresholds: a stat ping slower than this (ms) suggests non-local
+#: storage; sustained read throughput below this (MB/s) for files big
+#: enough to measure does the same.
+_STAT_PING_WARN_MS = 10.0
+_THROUGHPUT_WARN_MB_S = 50.0
+#: Files smaller than this are exempt from the throughput check (open
+#: latency dominates, not bandwidth).
+_MIN_PROBE_BYTES = 16 * 1024
+
+
+def probe_storage_speed(
+    paths: Sequence[Path], *, samples: int = 5
+) -> dict[str, float] | None:
+    """Sample a few dataset files and warn on slow storage (design D29a).
+
+    Stat ping and full-file read throughput are measured on up to
+    ``samples`` evenly-spaced readable paths; files under
+    ``_MIN_PROBE_BYTES`` contribute to the ping statistic but not the
+    throughput one (open latency dominates them). Read-only diagnostics:
+    warnings only, never an audit failure.
+    """
+    candidates = [Path(pth) for pth in paths]
+    if not candidates:
+        return None
+    if len(candidates) > samples:
+        stride = len(candidates) / samples
+        candidates = [candidates[int(i * stride)] for i in range(samples)]
+    ping_ms: list[float] = []
+    throughput: list[float] = []
+    for path in candidates:
+        try:
+            start = time.perf_counter()
+            size = os.stat(path).st_size
+            ping_ms.append((time.perf_counter() - start) * 1000.0)
+            if size >= _MIN_PROBE_BYTES:
+                start = time.perf_counter()
+                with path.open("rb") as handle:
+                    while handle.read(1 << 20):
+                        pass
+                seconds = time.perf_counter() - start
+                if seconds > 0:
+                    throughput.append(size / seconds / (1024.0 * 1024.0))
+        except OSError:
+            continue  # unreadable files are the audit's business, not ours
+    if not ping_ms:
+        return None
+    stats = {
+        "files_sampled": float(len(ping_ms)),
+        "stat_ms_mean": sum(ping_ms) / len(ping_ms),
+    }
+    if throughput:
+        stats["throughput_mb_s_mean"] = sum(throughput) / len(throughput)
+    if stats["stat_ms_mean"] > _STAT_PING_WARN_MS:
+        logger.warning(
+            "Dataset stat ping averages %.1f ms (> %.0f ms) — the data "
+            "likely lives on non-local storage; training throughput and "
+            "worker startup will suffer. Consider a local copy.",
+            stats["stat_ms_mean"], _STAT_PING_WARN_MS,
+        )
+    if throughput and stats["throughput_mb_s_mean"] < _THROUGHPUT_WARN_MB_S:
+        logger.warning(
+            "Dataset read throughput averages %.0f MB/s (< %.0f MB/s) — "
+            "slow storage will bottleneck dataloader workers. Consider a "
+            "local copy.",
+            stats["throughput_mb_s_mean"], _THROUGHPUT_WARN_MB_S,
+        )
+    return stats
+
+
 
 
 def audit_detection_dataset(

@@ -13,6 +13,11 @@ from __future__ import annotations
 import torch
 from torchvision.ops import nms
 
+# Downward import (tasks -> data): the window enumerator lives in the data
+# layer so the training-side slicer (autovision.data.split_large_images) can
+# share it without an upward import.
+from autovision.data.split_large_images import tile_window_starts
+
 __all__ = ["combine_object_detection_tiles", "tile_image"]
 
 
@@ -26,6 +31,8 @@ def tile_image(
 
     Returns ``(tiles, tiles_coordinates)`` with coordinates (x_start,
     y_start). Images smaller than the tile are returned as a single tile.
+    Window origins come from the shared ``tile_window_starts`` enumerator
+    (same sliding-window contract as the training-side slicer).
     """
     if not 0.0 <= overlap < 1.0:
         raise ValueError(f"overlap must be in [0, 1), got {overlap}")
@@ -45,19 +52,10 @@ def tile_image(
                 )[0].to(image.dtype)
         return image[None], torch.zeros(1, 2, dtype=torch.int64)
 
-    step = max(1, int((1.0 - overlap) * tile_size))
-    max_y = max(height - tile_size, 0)
-    max_x = max(width - tile_size, 0)
-    y_starts = list(range(0, max_y + 1, step)) or [0]
-    x_starts = list(range(0, max_x + 1, step)) or [0]
-    if y_starts[-1] != max_y:
-        y_starts.append(max_y)
-    if x_starts[-1] != max_x:
-        x_starts.append(max_x)
+    starts = tile_window_starts(height, width, tile_size, overlap)
 
     tiles, coordinates = [], []
-    for y in y_starts:
-        for x in x_starts:
+    for x, y in starts:
             tile = image[:, y : y + tile_size, x : x + tile_size]
             _, tile_h, tile_w = tile.shape
             if tile_h < tile_size or tile_w < tile_size:

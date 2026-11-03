@@ -234,7 +234,7 @@ def train_from_config(config: PretrainConfig) -> PretrainResult:
         )
         dataloader = train_helpers.get_dataloader(
             dataset, batch_size_per_device=global_batch_size // num_devices,
-            num_workers=num_workers,
+            num_workers=num_workers, seed=config.seed,
         )
 
         # 9. method

@@ -137,8 +137,13 @@ def _track_record(
     record: dict[str, Any],
     tracker: Any,
     class_names: dict[int, str] | None,
+    frame: np.ndarray | None = None,
 ) -> tuple[list[Any] | None, dict[int, str] | None]:
-    """Feed one detection record to ByteTrack; return tracks and label map."""
+    """Feed one detection record to ByteTrack; return tracks and label map.
+
+    ``frame`` is only consumed by trackers built with motion compensation
+    (design D6); plain trackers ignore it.
+    """
     if tracker is None or "bboxes" not in record:
         return None, class_names
     boxes = _as_numpy(record["bboxes"]).reshape(-1, 4)
@@ -150,7 +155,7 @@ def _track_record(
         else _as_numpy(scores).reshape(-1)
     )
     label_array = None if labels is None else _as_numpy(labels).reshape(-1)
-    tracks = tracker.update(boxes, score_array, label_array)
+    tracks = tracker.update(boxes, score_array, label_array, frame=frame)
     if label_array is None:
         # ByteTrack defaults to class 0 when no labels are supplied; expose
         # "unknown" (-1) instead of fabricating a real class id.
@@ -211,6 +216,7 @@ def run_stream(
     track: bool = False,
     track_thresh: float = 0.5,
     track_buffer: int = 30,
+    motion_compensation: str = "none",
 ) -> StreamRunResult:
     """Run inference over a video file / RTSP stream and persist artifacts.
 
@@ -285,6 +291,7 @@ def run_stream(
             track_thresh=track_thresh,
             track_buffer=track_buffer,
             frame_rate=max(1, int(round(fps))),
+            motion_compensation=motion_compensation,
         )
 
     line_zone_list = list(line_zones or ())
@@ -421,7 +428,7 @@ def run_stream(
             entry["predictions"] = InferenceResult.from_record(record).to_json(
                 masks=mask_format, max_elements=max_json_elements
             )
-            tracks, track_names = _track_record(record, tracker, class_names)
+            tracks, track_names = _track_record(record, tracker, class_names, frame=frame)
             render_tracks = tracks
             if tracks is not None:
                 track_ids.update(track.track_id for track in tracks)

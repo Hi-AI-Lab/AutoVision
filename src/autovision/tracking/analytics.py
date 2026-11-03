@@ -118,6 +118,8 @@ class LineZone:
         self.counts = LineZoneCounts()
         self._side: dict[int, int] = {}
         self._last_seen: dict[int, int] = {}
+        #: Previous-frame anchor per id (design D13a chord detector).
+        self._prev_anchor: dict[int, tuple[float, float]] = {}
         self._frame = 0
 
     def _side_of(self, track: Track) -> int:
@@ -131,8 +133,32 @@ class LineZone:
             return -1
         return 0
 
+    def _count_crossing(self, track: Track, from_side: int) -> None:
+        """Record one crossing leaving ``from_side`` (-1 -> in, +1 -> out)."""
+        key = int(track.class_id)
+        if from_side < 0:
+            self.counts.in_count += 1
+            self.counts.in_per_class[key] = (
+                self.counts.in_per_class.get(key, 0) + 1
+            )
+        else:
+            self.counts.out_count += 1
+            self.counts.out_per_class[key] = (
+                self.counts.out_per_class.get(key, 0) + 1
+            )
+
     def update(self, tracks: Sequence[Track]) -> LineZoneCounts:
-        """Update crossing history with one frame's tracks."""
+        """Update crossing history with one frame's tracks.
+
+        Two crossing detectors run per track (design D13a): the classic
+        infinite-line side flip, plus a chord check — the straight segment
+        from the track's previous anchor to its current anchor properly
+        intersecting THIS line segment. The chord path catches crossings
+        the flip path misses (a track that reappears after going missing
+        on the far side, or an anchor that lands exactly on the line and
+        would otherwise stick at side 0); a track contributes at most one
+        crossing per frame.
+        """
         self._frame += 1
         # A track absent for more than max_age frames starts a fresh life.
         # Check the gap before matching so a reappearing id cannot produce a
@@ -145,34 +171,50 @@ class LineZone:
             ):
                 self._side.pop(track_id, None)
                 self._last_seen.pop(track_id, None)
+                self._prev_anchor.pop(track_id, None)
         for track in tracks:
             track_id = int(track.track_id)
             self._last_seen[track_id] = self._frame
+            anchor = _anchor(track, self.anchor)
             side = self._side_of(track)
             if side == 0:
+                # Exactly on the line: keep the stored side, but the chord
+                # check below still counts a crossing that happened now.
+                previous = self._side.get(track_id)
+                chord = self._prev_anchor.get(track_id)
+                if chord is not None and _segments_intersect(
+                    chord, anchor, self.start, self.end
+                ):
+                    self._count_crossing(
+                        track, previous if previous is not None else 1
+                    )
+                self._prev_anchor[track_id] = anchor
                 continue
             previous = self._side.get(track_id)
             self._side[track_id] = side
-            if previous is None or previous == side:
-                continue
-            if previous < 0 and side > 0:
-                self.counts.in_count += 1
-                key = int(track.class_id)
-                self.counts.in_per_class[key] = (
-                    self.counts.in_per_class.get(key, 0) + 1
-                )
-            elif previous > 0 and side < 0:
-                self.counts.out_count += 1
-                key = int(track.class_id)
-                self.counts.out_per_class[key] = (
-                    self.counts.out_per_class.get(key, 0) + 1
-                )
+            if previous is not None and previous != side:
+                self._count_crossing(track, previous)
+            else:
+                chord = self._prev_anchor.get(track_id)
+                if chord is not None and _segments_intersect(
+                    chord, anchor, self.start, self.end
+                ):
+                    # Same-side sign with a proper chord intersection is
+                    # impossible against a straight segment EXCEPT when the
+                    # stored side was 0 (on the line) — that chord crossed.
+                    direction = _chord_direction(
+                        chord, anchor, self.start, self.end
+                    )
+                    if direction != 0:
+                        self._count_crossing(track, -direction)
+            self._prev_anchor[track_id] = anchor
         # Evict tracks that were absent for max_age frames; current tracks
         # were refreshed above, so a gap of exactly max_age is still allowed.
         for track_id in list(self._side):
             if self._frame - self._last_seen.get(track_id, 0) >= self.max_age:
                 self._side.pop(track_id, None)
                 self._last_seen.pop(track_id, None)
+                self._prev_anchor.pop(track_id, None)
         return self.counts
 
     def reset(self) -> None:
@@ -180,7 +222,59 @@ class LineZone:
         self.counts = LineZoneCounts()
         self._side.clear()
         self._last_seen.clear()
+        self._prev_anchor.clear()
         self._frame = 0
+
+
+def _segments_intersect(
+    p1: tuple[float, float],
+    p2: tuple[float, float],
+    q1: tuple[float, float],
+    q2: tuple[float, float],
+) -> bool:
+    """Proper intersection of segment p1-p2 with segment q1-q2.
+
+    Orientation test only: endpoint touches (an anchor exactly ON the
+    line) are NOT intersections — the side-flip path owns those.
+    """
+
+    def orientation(a: tuple[float, float], b: tuple[float, float], c: tuple[float, float]) -> int:
+        value = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+        return 0 if value == 0 else (1 if value > 0 else -1)
+
+    d1 = orientation(q1, q2, p1)
+    d2 = orientation(q1, q2, p2)
+    d3 = orientation(p1, p2, q1)
+    d4 = orientation(p1, p2, q2)
+    # Any zero orientation means an endpoint lies ON the other segment:
+    # a touch, not a crossing (the side-flip path owns those frames).
+    if 0 in (d1, d2, d3, d4):
+        return False
+    return d1 != d2 and d3 != d4
+
+
+def _chord_direction(
+    chord_start: tuple[float, float],
+    chord_end: tuple[float, float],
+    line_start: tuple[float, float],
+    line_end: tuple[float, float],
+) -> int:
+    """Crossing direction of a chord against the directed line.
+
+    ``+1`` when the chord moves toward the line's positive side (the
+    ``in`` direction of ``_side_of``), ``-1`` for the reverse, ``0`` when
+    parallel (no directional information).
+    """
+    line_dx = line_end[0] - line_start[0]
+    line_dy = line_end[1] - line_start[1]
+    chord_dx = chord_end[0] - chord_start[0]
+    chord_dy = chord_end[1] - chord_start[1]
+    cross = line_dx * chord_dy - line_dy * chord_dx
+    if cross > 0:
+        return 1
+    if cross < 0:
+        return -1
+    return 0
 
 
 def _points_in_polygon(

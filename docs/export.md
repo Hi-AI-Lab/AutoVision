@@ -148,9 +148,12 @@ FP32 黑名单继续保护溢出敏感算子）。
   （640² 约 6 分钟、1024² 约 25 分钟，dynamo 展开为主因），fp32 图
   84–124 MB。
 - fp16 导出可用：GLA 的 fp32 状态段经 `onnx_fp32_op_types` 钉住 MatMul/
-  Resize 以保持图一致；因 GTR 计算以 GEMM 为主，fp16 主要加速 Conv 段
-  （ORT-GPU/OpenVINO），ORT CPU 上反而更慢——CPU 用 fp32 图，TensorRT
-  从 fp32 图自行管精度。
+  Resize/ConstantOfShape 以保持图一致（ConstantOfShape 是 GLA causal 掩码
+  的 trace 产物，ORT float16 转换器不转换它而把周围算子改成 fp16，token
+  数超过一个 chunk（>64 token，即输入大于 128²，640² 实际导出必中）后
+  产生混合 dtype 的 Mul 并被 onnx.checker 拒绝）；因 GTR 计算以 GEMM 为主，
+  fp16 主要加速 Conv 段（ORT-GPU/OpenVINO），ORT CPU 上反而更慢——CPU 用
+  fp32 图，TensorRT 从 fp32 图自行管精度。
 - eager GLA 仍是 fla Triton / CUDA 核：CPU 上构造 `backend='torch'` 引擎
   会被可读报错拒绝（用 `backend='onnx'` 或 `device='cuda'`）。Triton 核已
   迁移（2× 提速）；`torch.compile` 对 GLA 段负收益；官方自研核 +
@@ -165,6 +168,15 @@ FP32 黑名单继续保护溢出敏感算子）。
   读数 det S fp16 batch1 ≈ 2.3 ms（4090 级），纯图引擎应预期明显更高的
   延迟——要贴上游延迟需自行编译上游 `tensorrt_plugin/libgla_plugin.so`
   并走其导出脚本。
+- **TensorRT 版本边界**：展开纯图在 TensorRT 11.4（11.4.0.106，RTX 4090D
+  实测）上构建成功但引擎数值错误（det logits / depth 输出系统性偏离
+  torch 与 onnxruntime 参考，cos 级漂移而非平局噪声）——疑似 Myelin 对
+  万节点级 CumSum/Exp/MatMul 展开链的 miscompile；上游受支持环境是
+  TensorRT 10.14（DRIVE Thor）。`export_tensorrt` 在 TensorRT ≥ 11 上构建
+  前会主动告警（`verify=False` 的构建也有此信号）；`verify=True` 的引擎
+  对拍门禁会拒绝并删除这类引擎（fail-closed），不会静默产出坏引擎；在该
+  版本上请勿对 GTR 关闭 verify，并在受支持的 TensorRT 版本（或上游
+  plugin 路线）上部署。
 - parity 门禁按精度与 decode 形态分治（`export/parity_checks.py`）：pose
   / depth / semseg 的 fp32 导出做逐元素对拍（贪心行匹配，行重排放行、
   局部漂移必失败）；fp16 的这三类与任意精度的 det / obb 保持行求和不变

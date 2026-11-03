@@ -121,8 +121,22 @@ class GTRPoseEstimation(ONNXExportMixin, TaskNetwork):
             reg_scale=4,
         )
         self.load_report: dict[str, Any] | None = None
-        if checkpoint and load_checkpoint:
+        if load_checkpoint:
+            # Official weights by default: an explicit ``checkpoint`` (path
+            # or asset name) wins, else this variant's pinned asset. The old
+            # ``checkpoint and load_checkpoint`` guard silently returned a
+            # RANDOM model on the default ``checkpoint=None``.
+            checkpoint = checkpoint or self.default_checkpoint_name(variant)
             self.load_report = self.load_official_checkpoint(checkpoint)
+
+    @classmethod
+    def default_checkpoint_name(cls, variant: str) -> str:
+        """Registered asset loaded when ``checkpoint=None`` (official weights).
+
+        Exposed so tests can pin the mapping against the asset registry
+        without the weights on disk.
+        """
+        return f"gtrpose_{variant}_coco"
 
     # ── official checkpoint loading ─────────────────────────────────────
     def load_official_checkpoint(self, checkpoint: str | pathlib.Path) -> dict[str, Any]:

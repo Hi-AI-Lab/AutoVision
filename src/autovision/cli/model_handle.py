@@ -23,9 +23,11 @@ with). Two entry points:
 from __future__ import annotations
 
 import json
+import logging
 import shutil
+import threading
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Sequence
 
 import torch
 from PIL import Image
@@ -36,6 +38,9 @@ from autovision.metrics.map_evaluator import COCOMAPEvaluator
 from autovision.tasks.task_model_helpers import load_task_model
 from autovision.types import PathLike
 
+if TYPE_CHECKING:
+    from autovision.inference.engine import InferenceEngine
+
 __all__ = [
     "DetectionModel",
     "detection",
@@ -43,6 +48,24 @@ __all__ = [
     "load_model",
     "predict_to_files",
 ]
+
+# Setup keys of the handle-cached InferenceEngine: any change rebuilds the
+# engine, everything else (threshold, ...) is a per-call runtime parameter.
+# Design doc D15 (docs/design_ultralytics_adoption.md §4.15).
+_ENGINE_SETUP_KEYS: tuple[str, ...] = (
+    "backend",
+    "artifact",
+    "device",
+    "providers",
+    "openvino_device",
+)
+#: LRU slot count of the engine cache. Two covers the alternating-two-setup
+#: pattern (empirically observed to thrash a single slot, stress probe 2026-11-03);
+#: more slots would pin more compiled sessions in memory.
+_ENGINE_CACHE_SIZE = 2
+
+
+logger = logging.getLogger("autovision")
 
 
 def _resolve_data_args(data: PathLike | dict[str, Any]) -> Any:
@@ -83,6 +106,7 @@ def evaluate_object_detection(
     split: str = "val",
     threshold: float = 0.0,
     max_images: int | None = None,
+    max_det: int | None = None,
 ) -> dict[str, float]:
     """COCO-style evaluation of a detection model on a data config.
 
@@ -91,6 +115,9 @@ def evaluate_object_detection(
     (boxes land in original-frame pixels) and ground truth from the data
     config's normalized cxcywh annotations — exactly the contract
     :class:`~autovision.metrics.map_evaluator.COCOMAPEvaluator` expects.
+    ``max_det=None`` (default) auto-raises the per-image detection cap to
+    the densest ground-truth image with a warning (design doc D29b);
+    pass an explicit ``max_det`` to pin the protocol.
     """
     from autovision.data.file_helpers import open_image
 
@@ -100,7 +127,13 @@ def evaluate_object_detection(
         network = model
     data_args = _resolve_data_args(data)
 
-    evaluator = COCOMAPEvaluator(categories=dict(data_args.classes()))
+    if max_det is not None and max_det < 1:
+        raise AutoVisionError(f"max_det must be >= 1, got {max_det}.")
+    evaluator = COCOMAPEvaluator(
+        categories=dict(data_args.classes()),
+        max_dets=max_det if max_det is not None else 100,
+        auto_raise=max_det is None,
+    )
     for index, item in enumerate(data_args.list_image_info(split)):
         if max_images is not None and index >= max_images:
             break
@@ -144,6 +177,11 @@ class DetectionModel:
         self._classes: dict[int, str] | None = None
         self._pretrained_requested = bool(pretrained)
         self._device = device
+        # Compiled-backend engine cache (D15): LRU over setup-key
+        # signatures, invalidated when training replaces the network,
+        # never pickled.
+        self._engine_cache: dict[tuple[Any, ...], InferenceEngine] = {}
+        self._engine_lock = threading.Lock()
 
     # ── construction ─────────────────────────────────────────────────
     @classmethod
@@ -214,6 +252,80 @@ class DetectionModel:
             )
         return self._network
 
+    # ── compiled-backend engine cache (D15) ──────────────────────────
+    def _resolve_engine(
+        self,
+        *,
+        backend: str,
+        artifact: PathLike | None,
+        device: str | None,
+        providers: Sequence[str] | None,
+        openvino_device: str,
+    ) -> InferenceEngine:
+        """Return the handle-cached engine, rebuilding only on setup changes.
+
+        The signature covers exactly ``_ENGINE_SETUP_KEYS``; a mismatch (or
+        an invalidated cache) rebuilds the :class:`~autovision.inference.
+        engine.InferenceEngine` around the handle's current network. The
+        lock spans the check-and-build so concurrent callers cannot race
+        two engines into the cache.
+        """
+        from autovision.inference.engine import InferenceEngine
+
+        artifact_path = Path(artifact) if artifact is not None else None
+        setup_values = {
+            "backend": backend,
+            "artifact": str(artifact_path) if artifact_path is not None else None,
+            "device": str(device) if device is not None else None,
+            "providers": tuple(providers) if providers is not None else None,
+            "openvino_device": openvino_device,
+        }
+        signature = tuple(setup_values[key] for key in _ENGINE_SETUP_KEYS)
+        with self._engine_lock:
+            # pop + re-insert moves the entry to the most-recent end: plain
+            # dict assignment on an existing key does NOT reorder, so a
+            # get()-based "LRU" would silently be FIFO (evicting the engine
+            # the caller just used).
+            cached = self._engine_cache.pop(signature, None)
+            if cached is not None:
+                self._engine_cache[signature] = cached
+                return cached
+            # Inside the lock so a concurrent train() cannot swap the
+            # network between the cache check and the build — otherwise a
+            # stale-weights engine could be cached under a valid signature.
+            network = self._ensure_network()
+            engine = InferenceEngine(
+                network,
+                backend=backend,
+                artifact=artifact_path,
+                device=device,
+                providers=providers,
+                openvino_device=openvino_device,
+            )
+            self._engine_cache[signature] = engine
+            while len(self._engine_cache) > _ENGINE_CACHE_SIZE:
+                self._engine_cache.pop(next(iter(self._engine_cache)))
+            return engine
+
+    def invalidate_engine(self) -> None:
+        """Drop every cached compiled-backend engine (network changed)."""
+        with self._engine_lock:
+            self._engine_cache.clear()
+
+    def __getstate__(self) -> dict[str, Any]:
+        """Drop the process-local engine cache (runners/locks) for pickling."""
+        state = self.__dict__.copy()
+        state.pop("_engine_cache", None)  # pre-D15 pickles may lack it too
+        state["_engine_lock"] = None
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        # Handles pickled before the engine cache existed lack BOTH keys.
+        if getattr(self, "_engine_lock", None) is None:
+            self._engine_lock = threading.Lock()
+        self.__dict__.setdefault("_engine_cache", {})
+
     # ── train ────────────────────────────────────────────────────────
     def train(
         self, out: PathLike, data: PathLike | dict[str, Any], **kwargs: Any
@@ -240,7 +352,13 @@ class DetectionModel:
             result.best_exported_model_path or result.exported_model_path
         )
         self._classes = dict(result.classes)
-        self._network = load_task_model(self._exported_path, device="cpu")
+        # Swap the network and drop the stale cache under the same lock the
+        # resolver holds: a concurrent predict must never hit the cache in
+        # the window where the new network is set but the cache is not yet
+        # cleared.
+        with self._engine_lock:
+            self._network = load_task_model(self._exported_path, device="cpu")
+            self._engine_cache.clear()
         return self
 
     def to(self, device: str) -> "DetectionModel":
@@ -271,9 +389,63 @@ class DetectionModel:
             max_images=max_images,
         )
 
-    def predict(self, image: Any, **kwargs: Any) -> Any:
-        """Single-image inference (path / PIL / tensor) -> detection dict."""
-        return self._ensure_network().predict(image, **kwargs)
+    def predict(
+        self,
+        image: Any,
+        *,
+        backend: str = "torch",
+        artifact: PathLike | None = None,
+        device: str | None = None,
+        providers: Sequence[str] | None = None,
+        openvino_device: str = "CPU",
+        **kwargs: Any,
+    ) -> Any:
+        """Single-image inference (path / PIL / tensor) -> detection dict.
+
+        ``backend="torch"`` (default) runs the cached network's own forward.
+        Compiled backends (``"onnx" | "openvino" | "tensorrt"``) require
+        ``artifact=...`` and route through :meth:`_resolve_engine`: the
+        engine is rebuilt only when a setup key (``backend`` / ``artifact``
+        / ``device`` / ``providers`` / ``openvino_device``) changes, while
+        runtime parameters stay per-call (the compiled path accepts
+        ``threshold`` only) — same lifecycle split as the design-doc D15
+        contract. The cache keeps the two most recent setup signatures:
+        alternate between at most two configurations per handle; cycling
+        through more evicts and rebuilds every call.
+        """
+        if backend == "torch":
+            if artifact is not None:
+                raise AutoVisionError(
+                    "backend='torch' runs the network's own forward and "
+                    "takes no artifact; pass artifact= only with a "
+                    "compiled backend ('onnx' / 'openvino' / 'tensorrt')."
+                )
+            if device is not None or providers is not None:
+                # Setup keys other than backend are engine-only: the torch
+                # path runs wherever the network already lives (use .to()).
+                logger.warning(
+                    "predict(backend='torch') ignores device=/providers= — "
+                    "move the network with .to(device) instead."
+                )
+            return self._ensure_network().predict(image, **kwargs)
+        engine = self._resolve_engine(
+            backend=backend,
+            artifact=artifact,
+            device=device,
+            providers=providers,
+            openvino_device=openvino_device,
+        )
+        return engine.run(image, **kwargs)
+
+    @property
+    def network(self) -> Any:
+        """The underlying task network (loaded on first access).
+
+        Public read for flows that drive the network directly — e.g.
+        ``InferenceEngine(model.network, backend="onnx", artifact=...)``
+        keeps the network's pre/post-processing and swaps only the forward.
+        """
+        return self._ensure_network()
 
     def predict_sahi(self, image: Any, **kwargs: Any) -> dict[str, torch.Tensor]:
         """Tiled inference for large images (delegates to the network)."""

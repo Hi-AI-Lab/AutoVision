@@ -35,14 +35,20 @@ def resolve_num_devices(devices: int | str) -> int:
     ``"auto"`` follows ``WORLD_SIZE`` (torchrun); an int (or digit string)
     is the process count; any other device spec (``"cpu"``, ``"cuda:1"``,
     ``"npu:0"``) is a SINGLE device — the spec itself is resolved by
-    ``engine.resolve_device``, so it contributes one process here.
+    ``engine.resolve_device``, so it contributes one process here. A
+    comma-separated id list (``"0,-1"``, ``"cuda:0,cuda:3"`` — design doc
+    D18) contributes one process per token; expand ``-1`` placeholders
+    with ``runtime.autodevice.resolve_device_spec`` before launching.
     """
     if devices == "auto":
         return int(os.getenv("WORLD_SIZE", "1"))
     if isinstance(devices, int):
         return devices
     text = str(devices)
-    return int(text) if text.isdigit() else 1
+    if text.isdigit():
+        return int(text)
+    tokens = [token for token in text.split(",") if token.strip()]
+    return len(tokens) if len(tokens) > 1 else 1
 
 
 def resolve_gradient_checkpointing(trainer_args: dict | None) -> bool:
@@ -208,6 +214,7 @@ def build_task_dataloader(
     train: bool,
     persistent_workers: bool | None = None,
     sampler=None,
+    seed: int | None = None,
 ):
     """Train/val task dataloaders (global batch already split per device).
 
@@ -246,6 +253,16 @@ def build_task_dataloader(
     num_batches = math.ceil(len(dataset) / batch_size) if batch_size else 0
     if num_workers > 0:
         num_workers = 0 if num_batches <= 1 else min(num_workers, num_batches)
+    # Worker seeding (D23a): without worker_init_fn, numpy/random inherit
+    # FORK-identical state in every worker — all workers would replay the
+    # same numpy-driven augmentation sequence each epoch.
+    worker_init_fn = None
+    generator = None
+    if seed is not None:
+        from autovision.engine.engine import make_dataloader_generator, seed_worker
+
+        worker_init_fn = seed_worker
+        generator = make_dataloader_generator(seed)
     return DataLoader(
         dataset,
         batch_size=batch_size,
@@ -253,6 +270,8 @@ def build_task_dataloader(
         sampler=sampler,
         drop_last=train,
         num_workers=num_workers,
+        worker_init_fn=worker_init_fn,
+        generator=generator,
         timeout=Env.DATALOADER_TIMEOUT_SEC.value if num_workers > 0 else 0.0,
         pin_memory=torch.cuda.is_available(),
         # See the signature note: step-scheduled transforms pass

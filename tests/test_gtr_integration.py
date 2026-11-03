@@ -243,3 +243,52 @@ class TestTeacherModelCard:
         )
         path = card.save(tmp_path / "teacher.pt")
         assert path.exists()
+
+
+class TestGtrCpuOnnxDeployment:
+    """CPU-only machines deploy GTR through the ONNX backend: construction
+    must NOT require CUDA (only the eager forward runs the GLA kernels), so
+    a CPU-only build loads the official weights, warns, and serves an
+    exported artifact — while a CPU eager engine stays refused readably
+    (regression: build_pretrained_detection hard-raised without CUDA, which
+    locked CPU-only machines out of the documented ONNX deployment path)."""
+
+    @staticmethod
+    def _fla_available() -> bool:
+        try:
+            from autovision.tasks.detection.shared.gtr import gtr_available
+
+            return gtr_available()
+        except Exception:  # noqa: BLE001 - fla missing entirely counts as unavailable
+            return False
+
+    def test_cpu_only_construction_warns_and_succeeds(
+        self, monkeypatch, caplog, gtr_s_checkpoint
+    ):
+        """No CUDA + fla present: the builder warns (does not raise) and the
+        loaded network is a CPU-resident DETRObjectDetection."""
+        if not self._fla_available():
+            pytest.skip("GTR construction needs flash-linear-attention")
+        import logging
+
+        from autovision.tasks.detection.pretrained import build_pretrained_detection
+
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        with caplog.at_level(logging.WARNING, logger="autovision"):
+            network = build_pretrained_detection("detr/gtrvit-s", device="cpu")
+        assert type(network).__name__ == "DETRObjectDetection"
+        assert next(network.parameters()).device.type == "cpu"
+        assert any("onnx" in record.message.lower() for record in caplog.records)
+
+    def test_cpu_eager_engine_refused_readable(self, monkeypatch, gtr_s_checkpoint):
+        """The same CPU network through the torch-backend engine keeps the
+        readable refusal (the eager GLA forward is the CUDA-only part)."""
+        if not self._fla_available():
+            pytest.skip("GTR construction needs flash-linear-attention")
+        from autovision.inference import InferenceEngine
+        from autovision.tasks.detection.pretrained import build_pretrained_detection
+
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        network = build_pretrained_detection("detr/gtrvit-s", device="cpu")
+        with pytest.raises(AutoVisionError, match="backend='onnx'"):
+            InferenceEngine(network, backend="torch")

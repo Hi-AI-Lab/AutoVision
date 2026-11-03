@@ -27,6 +27,7 @@ from torchvision.transforms.v2 import functional as TF
 from autovision.augment.detection.box_aware_eraser import (
     erase_background,
 )
+from autovision.augment.detection.box_candidates import box_candidates
 from autovision.augment.mosaic_geometry import (
     apply_affine_to_boxes as _apply_affine_to_boxes,
 )
@@ -274,6 +275,7 @@ class RTDETRDetectionTransform:
         merged = _mosaic_canvas_box_clamp(
             merged, (2 * max_h, 2 * max_w)
         )
+        before_affine = merged
 
         # One whole-canvas affine (baseline _sample_affine_params +
         # _apply_affine_to_image/_to_boxes on the pasted canvas).
@@ -293,10 +295,18 @@ class RTDETRDetectionTransform:
         merged = _apply_affine_to_boxes(
             merged, (canvas.shape[1], canvas.shape[2]), angle, (tx, ty), scale_factor
         )
-        # Torchvision clips affine boxes to the canvas but keeps
-        # degenerate ones — drop them here (the pipeline's sanitize
-        # filters any remainder).
-        keep = (merged[:, 2] > merged[:, 0]) & (merged[:, 3] > merged[:, 1])
+        # Degradation gate (design D3): torchvision clips affine boxes to
+        # the canvas but keeps slivers — drop targets the affine turned
+        # into garbage (sub-2px, extreme aspect, area collapse). Stricter
+        # than the positive-area rule it replaces; degenerate inputs fail
+        # via the aspect-ratio clause.
+        keep = box_candidates(
+            before_affine,
+            merged,
+            min_wh=self.transform_args.box_min_wh_px,
+            max_aspect_ratio=self.transform_args.box_max_aspect_ratio,
+            min_area_ratio=self.transform_args.box_min_area_ratio,
+        )
         merged = merged[keep]
         merged_classes = merged_classes[keep]
 

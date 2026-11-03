@@ -27,11 +27,12 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 
+from autovision.engine.amp_check import resolve_amp_precision
+from autovision.engine.callbacks import CallbackRegistry
 from autovision.observability.otel import end_span, otel_span, start_span
 from autovision.runtime.accelerator import (
     ddp_backend_for,
     npu_available,
-    supports_amp,
 )
 from autovision.runtime.checkpoint import Checkpoint, CheckpointMetadata
 from autovision.runtime.distributed import get_local_rank
@@ -233,6 +234,124 @@ def _build_grad_scaler(precision: str, device_type: str) -> Any | None:
         return None
 
 
+#: Substrings that identify an allocator OOM (message matching catches the
+#: driver-level variants torch.OutOfMemoryError does not cover).
+_OOM_MESSAGE_MARKERS: tuple[str, ...] = (
+    "out of memory",
+    "cublas_status_alloc_failed",
+    "cudnn_status_internal_error",
+    "unable to find an engine",
+)
+#: D21: how many automatic batch halvings one run may attempt.
+_OOM_MAX_ATTEMPTS = 3
+#: D20: rolling retention count for ``epoch{N}.ckpt`` archives.
+_EPOCH_ARCHIVE_KEEP = 3
+
+
+def _is_oom_error(error: BaseException) -> bool:
+    """True for CUDA/NPU allocator exhaustion (typed or message-matched)."""
+    if isinstance(error, torch.OutOfMemoryError):
+        return True
+    if isinstance(error, RuntimeError):
+        message = str(error).lower()
+        return any(marker in message for marker in _OOM_MESSAGE_MARKERS)
+    return False
+
+
+def make_dataloader_generator(seed: int, rank: int = 0) -> torch.Generator:
+    """Per-dataloader torch generator seeded from the run seed (D23a).
+
+    ``rank`` offsets the stream so DDP ranks shuffle differently; callers
+    without a rank context use the default. The offset must live here and
+    not at call sites, so every builder path shares one derivation.
+    """
+    generator = torch.Generator()
+    generator.manual_seed((int(seed) + int(rank)) % (2**63))
+    return generator
+
+
+def seed_worker(worker_id: int) -> None:  # pragma: no cover - runs in workers
+    """``worker_init_fn`` that derives numpy/random seeds per worker (D23a).
+
+    torch seeds its own RNG in every worker from the dataloader generator,
+    but numpy/random would otherwise be inherited FORK-identical across
+    workers — every worker would apply the same numpy-driven augmentation
+    sequence. This is the DataLoader-side counterpart of ``seed_everything``.
+    """
+    base = torch.initial_seed() % (2**32)
+    np.random.seed(base)
+    random.seed(base)
+
+
+def _sanitize_state_dict_for_serialization(state: dict) -> dict:
+    """Serialization hygiene (D20): clamp fp16 overflow, normalize NCHW.
+
+    Returns a dict whose fp16 tensors with non-finite values are replaced
+    by ``nan_to_num`` clones (live weights are never mutated — a NaN EMA
+    must not be silently fixed in place, only kept out of the file) and
+    whose 4-d float tensors are standard-contiguous (channels-last strides
+    would break ``.view()`` in downstream fuse/export paths).
+    """
+    out: dict = {}
+    for key, value in state.items():
+        if not torch.is_tensor(value):
+            out[key] = value
+            continue
+        if value.dtype == torch.float16 and not bool(torch.isfinite(value).all()):
+            logger.warning(
+                "Clamping non-finite fp16 tensor '%s' before checkpoint "
+                "serialization.", key,
+            )
+            out[key] = torch.nan_to_num(value.detach()).contiguous()
+            continue
+        if value.ndim == 4 and value.is_floating_point() and not value.is_contiguous():
+            out[key] = value.contiguous()
+            continue
+        out[key] = value
+    return out
+
+
+def _prune_epoch_archives(checkpoints_dir: Path, keep: int) -> None:
+    """Keep only the newest ``keep`` ``epoch<N>.ckpt`` archives (D20)."""
+    archives = []
+    for path in checkpoints_dir.glob("epoch*.ckpt"):
+        digits = path.stem.removeprefix("epoch")
+        if digits.isdigit():
+            archives.append((int(digits), path))
+    archives.sort(reverse=True)
+    for _, path in archives[keep:]:
+        try:
+            path.unlink()
+        except OSError:
+            logger.debug("Could not remove stale archive '%s'.", path)
+
+
+def _clone_loader_with_batch_size(loader: DataLoader, batch_size: int) -> DataLoader:
+    """Re-materialize a DataLoader with a smaller per-device batch (D21).
+
+    The sampler instance is carried over (epoch continuity), as are the
+    worker/collate/pinning settings. Used only on the single-process OOM
+    recovery path — under DDP a mid-run batch change must be synchronized
+    across ranks, which this helper deliberately does not attempt.
+    """
+    num_workers = loader.num_workers
+    return DataLoader(
+        loader.dataset,
+        batch_size=batch_size,
+        sampler=loader.sampler,
+        shuffle=False,
+        num_workers=num_workers,
+        worker_init_fn=loader.worker_init_fn,
+        generator=loader.generator,
+        collate_fn=loader.collate_fn,
+        timeout=loader.timeout,
+        pin_memory=loader.pin_memory,
+        drop_last=loader.drop_last,
+        prefetch_factor=loader.prefetch_factor if num_workers > 0 else None,
+        persistent_workers=loader.persistent_workers if num_workers > 0 else False,
+    )
+
+
 class _TrainWindow:
     """On-device running sums of the training ``log_dict`` between log points.
 
@@ -289,6 +408,11 @@ def _log_fit_banner(
         "Model: %s params (%s trainable, %s frozen)",
         f"{total:,}", f"{trainable:,}", f"{total - trainable:,}",
     )
+    from autovision.runtime.model_info import estimate_gflops
+
+    gflops = estimate_gflops(train_model)
+    if gflops is not None:
+        logger.info("Model: %.2f GFLOPs (thop, batch-1 forward)", gflops)
     group_summary = " | ".join(
         f"{group.get('name', f'group{index}')} lr {group['lr']:.2e}"
         for index, group in enumerate(optimizer.param_groups)
@@ -345,8 +469,13 @@ def resolve_device(devices: int | str = "auto") -> torch.device:
 
     ``"auto"`` picks CUDA > Ascend NPU (torch_npu) > MPS > CPU (honoring
     LOCAL_RANK under torchrun); explicit specs (``"cpu"``, ``"cuda:1"``,
-    ``"npu:0"``, ``int`` indices) pass through. NPU is software-side
-    support only (design §12.4) — real-hardware validation is M4+.
+    ``"npu:0"``, ``int`` indices) pass through. ``"-1"`` / ``"cuda:-1"``
+    are idle-GPU placeholders (design doc D18, see
+    :func:`autovision.runtime.autodevice.resolve_device_spec`) resolving
+    to the most-idle visible card, degrading to sequential picks when
+    NVML is unavailable and raising when the host cannot satisfy the
+    placeholders. NPU is software-side support only
+    (design §12.4) — real-hardware validation is M4+.
     """
     if isinstance(devices, int):
         if torch.cuda.is_available():
@@ -355,7 +484,21 @@ def resolve_device(devices: int | str = "auto") -> torch.device:
             return torch.device("npu", devices % torch.npu.device_count())
         return torch.device("cpu")
     if isinstance(devices, str) and devices != "auto":
-        return torch.device(devices)
+        from autovision.runtime.autodevice import resolve_device_spec
+
+        spec = resolve_device_spec(devices)
+        tokens = [token.strip() for token in spec.split(",") if token.strip()]
+        if len(tokens) > 1:
+            logger.warning(
+                "Device spec '%s' lists %d devices but this is a "
+                "single-device context: resolving to the primary '%s'. "
+                "Multi-process runs must expand the spec (and constrain "
+                "CUDA_VISIBLE_DEVICES) before launching.",
+                devices,
+                len(tokens),
+                tokens[0],
+            )
+        return torch.device(tokens[0])
     if torch.cuda.is_available():
         local_rank = get_local_rank()
         if local_rank is not None and torch.cuda.device_count() > 0:
@@ -399,9 +542,16 @@ class Engine:
         logger_fn: Any = None,
         log_every_n_steps: int = 50,
         normalize_args: dict | None = None,
+        amp_check: bool = True,
+        save_period_num_epochs: int = 0,
+        callbacks: list[Any] | None = None,
     ) -> FitResult:
         if max_epochs < 1:
             raise ValueError(f"max_epochs must be >= 1, got {max_epochs}")
+        if save_period_num_epochs < 0:
+            raise ValueError(
+                f"save_period_num_epochs must be >= 0, got {save_period_num_epochs}"
+            )
         if len(dataloader) == 0:
             raise ValueError(
                 "Training dataloader is empty; check the dataset root, filters, "
@@ -454,9 +604,11 @@ class Engine:
         )
         method.total_steps = max_epochs * steps_per_epoch
 
-        if precision in ("bf16-mixed", "16-mixed") and not supports_amp(device.type):
-            logger.warning("Mixed precision requested without CUDA/NPU; using fp32.")
-            precision = "32-true"
+        # AMP gates (D16): device support first, then the numeric probe —
+        # both fail closed to fp32 and never abort the run.
+        precision = resolve_amp_precision(
+            method, device=device, precision=precision, amp_check=amp_check
+        )
         autocast_dtype = {
             "bf16-mixed": torch.bfloat16,
             "16-mixed": torch.float16,
@@ -483,6 +635,11 @@ class Engine:
 
         epochs_run = 0
         run_metrics: dict[str, float] = {}
+        callback_registry = CallbackRegistry()
+        callback_registry.adapt(callbacks or [])
+        self.callbacks = callback_registry
+        if world_size == 1 or torch.distributed.get_rank() == 0:
+            callback_registry.run("on_train_start", max_epochs, out_dir)
         fit_span = start_span(
             "pretrain.fit",
             {
@@ -596,19 +753,49 @@ class Engine:
                 # rank instead of leaving peers in the next collective.
                 write_ok = True
                 write_error: Exception | None = None
+                archive_epoch = (
+                    save_period_num_epochs > 0
+                    and (epoch + 1) % save_period_num_epochs == 0
+                )
                 if world_size == 1 or torch.distributed.get_rank() == 0:
                     try:
                         with otel_span("engine.checkpoint", {"epoch": epoch}):
-                            self.save_checkpoint(
-                                out_dir / "checkpoints" / "last.ckpt",
-                                method=method,
-                                optimizer=optimizer,
-                                scheduler=scheduler,
-                                epoch=epoch,
-                                global_step=global_step,
-                                normalize_args=normalize_args,
-                                scaler=scaler,
-                            )
+                            if archive_epoch:
+                                # D20: serialize ONCE, write last + epochN
+                                # from the same payload.
+                                archive = self._build_checkpoint(
+                                    method=method,
+                                    optimizer=optimizer,
+                                    scheduler=scheduler,
+                                    # 1-based to match the epoch{N}.ckpt name.
+                                    epoch=epoch + 1,
+                                    global_step=global_step,
+                                    normalize_args=normalize_args,
+                                    scaler=scaler,
+                                )
+                                payload = archive.serialize()
+                                checkpoints_dir = out_dir / "checkpoints"
+                                archive.save_serialized(
+                                    checkpoints_dir / "last.ckpt", payload
+                                )
+                                archive.save_serialized(
+                                    checkpoints_dir / f"epoch{epoch + 1}.ckpt",
+                                    payload,
+                                )
+                                _prune_epoch_archives(
+                                    checkpoints_dir, keep=_EPOCH_ARCHIVE_KEEP
+                                )
+                            else:
+                                self.save_checkpoint(
+                                    out_dir / "checkpoints" / "last.ckpt",
+                                    method=method,
+                                    optimizer=optimizer,
+                                    scheduler=scheduler,
+                                    epoch=epoch,
+                                    global_step=global_step,
+                                    normalize_args=normalize_args,
+                                    scaler=scaler,
+                                )
                     except Exception as error:  # noqa: BLE001 - propagated below
                         write_ok = False
                         write_error = error
@@ -621,13 +808,17 @@ class Engine:
             if world_size > 1 and torch.distributed.is_initialized():
                 torch.distributed.destroy_process_group()
 
-        return FitResult(
+        fit_result = FitResult(
             out_dir=out_dir,
             epochs_run=epochs_run,
             global_step=global_step,
             checkpoint_path=out_dir / "checkpoints" / "last.ckpt",
             metrics=run_metrics,
         )
+        if world_size == 1 or torch.distributed.get_rank() == 0:
+            # Same payload contract as fit_task: the result object itself.
+            callback_registry.run("on_train_end", fit_result)
+        return fit_result
 
     # ── helpers ─────────────────────────────────────────────────────────
     @staticmethod
@@ -679,8 +870,7 @@ class Engine:
         logger.info("Loaded weights from '%s' (training state discarded).", path)
 
     @staticmethod
-    def save_checkpoint(
-        path: Path,
+    def _build_checkpoint(
         method: nn.Module,
         optimizer,
         scheduler,
@@ -688,7 +878,8 @@ class Engine:
         global_step: int,
         normalize_args: dict | None = None,
         scaler: Any | None = None,
-    ) -> None:
+    ) -> Checkpoint:
+        """Assemble the Checkpoint object with D20 serialization hygiene."""
         checkpoint = {"state_dict": method.state_dict()}
         method.on_save_checkpoint(checkpoint)
         engine_state = {
@@ -704,7 +895,34 @@ class Engine:
             normalize_args=normalize_args,
             engine_state=engine_state,
         )
-        Checkpoint(state_dict=checkpoint["state_dict"], autovision=metadata).save(path)
+        return Checkpoint(
+            state_dict=_sanitize_state_dict_for_serialization(
+                checkpoint["state_dict"]
+            ),
+            autovision=metadata,
+        )
+
+    @classmethod
+    def save_checkpoint(
+        cls,
+        path: Path,
+        method: nn.Module,
+        optimizer,
+        scheduler,
+        epoch: int,
+        global_step: int,
+        normalize_args: dict | None = None,
+        scaler: Any | None = None,
+    ) -> None:
+        cls._build_checkpoint(
+            method=method,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            epoch=epoch,
+            global_step=global_step,
+            normalize_args=normalize_args,
+            scaler=scaler,
+        ).save(path)
 
 
 @dataclass
@@ -718,6 +936,57 @@ class TaskFitResult:
     best_metrics: dict[str, float] = field(default_factory=dict)
     stopped_early: bool = False
     stop_step: int | None = None
+
+
+#: Fit knobs a resumed run may legitimately change without a warning
+#: (schedule tuning mid-run); any other drift against the checkpoint is
+#: reported loudly (design doc D17).
+RESUME_OVERRIDABLE_KEYS: frozenset[str] = frozenset(
+    {
+        "steps",
+        "early_stopping_patience",
+        "early_stopping_min_delta",
+        "val_every_num_steps",
+        "save_every_num_steps",
+        "log_every_n_steps",
+    }
+)
+
+
+def check_resume_fit_args(
+    checkpoint_args: dict[str, Any] | None, **current: Any
+) -> None:
+    """Report drift between a resumed checkpoint and the current call (D17).
+
+    The current call's values always govern (resume never silently adopts
+    checkpoint hyperparameters); the check exists so a drifted resume is a
+    loud event instead of a silent one: whitelisted
+    :data:`RESUME_OVERRIDABLE_KEYS` differences log at info, everything
+    else (precision, accumulation, ...) logs a warning with both values.
+    """
+    if not checkpoint_args:
+        return
+    for key in sorted(checkpoint_args):
+        checkpoint_value = checkpoint_args[key]
+        current_value = current.get(key)
+        if current_value == checkpoint_value:
+            continue
+        if key in RESUME_OVERRIDABLE_KEYS:
+            logger.info(
+                "Resuming with %s=%s (checkpoint was trained with %s).",
+                key,
+                current_value,
+                checkpoint_value,
+            )
+        else:
+            logger.warning(
+                "Resume drift: %s=%s but the resumed checkpoint was trained "
+                "with %s — the current call's value governs; verify this "
+                "is intended.",
+                key,
+                current_value,
+                checkpoint_value,
+            )
 
 
 class _InfiniteCycleIterator:
@@ -796,6 +1065,7 @@ class TaskEngine(Engine):
         callbacks: list[Any] | None = None,
         gradient_checkpointing: bool = False,
         parallel: str = "ddp",
+        amp_check: bool = True,
     ) -> TaskFitResult:
         """Run the step loop and return the fitted artifacts.
 
@@ -970,6 +1240,13 @@ class TaskEngine(Engine):
             train_num_batches=len(train_dataloader),
             gradient_accumulation_steps=gradient_accumulation_steps,
         )
+        # AMP gates (D16) run BEFORE the banner so it prints the precision
+        # actually trained with (the probe may downgrade the request).
+        precision = resolve_amp_precision(
+            train_model, device=device, precision=precision, amp_check=amp_check
+        )
+        autocast_dtype = {"bf16-mixed": torch.bfloat16, "16-mixed": torch.float16}.get(precision)
+        scaler = _build_grad_scaler(precision, device.type)
         if world_size == 1 or _is_rank_zero_internal():
             _log_fit_banner(
                 train_model, optimizer, scheduler, steps,
@@ -977,13 +1254,9 @@ class TaskEngine(Engine):
                 val_dataloader, precision, world_size,
             )
 
-        if precision in ("bf16-mixed", "16-mixed") and not supports_amp(device.type):
-            precision = "32-true"
-        autocast_dtype = {"bf16-mixed": torch.bfloat16, "16-mixed": torch.float16}.get(precision)
-        scaler = _build_grad_scaler(precision, device.type)
-
         start_step = 0
         restored_best_metric: float | None = None
+        restored_no_improve = 0
         if resume_interrupted:
             last_path = out_dir / "checkpoints" / "last.ckpt"
             if last_path.exists():
@@ -1030,6 +1303,23 @@ class TaskEngine(Engine):
                         or sidecar_value > restored_best_metric
                     ):
                         restored_best_metric = sidecar_value
+                # Early-stopping state (D17): continue the patience counter
+                # instead of resetting it. Old checkpoints without the key
+                # fall back to fresh counting.
+                restored_no_improve = int(engine_state.get("no_improve", 0))
+                # Fit-args drift check (D17): loud, never blocking — the
+                # current call's values govern.
+                check_resume_fit_args(
+                    engine_state.get("fit_args"),
+                    steps=steps,
+                    precision=precision,
+                    gradient_accumulation_steps=gradient_accumulation_steps,
+                    early_stopping_patience=early_stopping_patience,
+                    early_stopping_min_delta=early_stopping_min_delta,
+                    val_every_num_steps=val_every_num_steps,
+                    save_every_num_steps=save_every_num_steps,
+                    log_every_n_steps=log_every_n_steps,
+                )
                 if hasattr(train_model, "on_load_checkpoint"):
                     train_model.on_load_checkpoint(
                         {"ema": engine_state.get("ema")}
@@ -1052,7 +1342,8 @@ class TaskEngine(Engine):
         step_hooks = step_hooks or []
         infinite_loader = _InfiniteCycleIterator(train_dataloader, sampler=train_sampler)
         train_window = _TrainWindow()
-        no_improve = 0
+        no_improve = restored_no_improve
+        oom_attempts = 0
         stopped_early = False
         last_completed_step = start_step - 1
         best_metric: float | None = restored_best_metric
@@ -1061,18 +1352,14 @@ class TaskEngine(Engine):
         result = TaskFitResult(out_dir=out_dir, steps_run=0)
         callbacks = list(callbacks or [])
 
+        callback_registry = CallbackRegistry()
+        callback_registry.adapt(callbacks or [])
+        self.callbacks = callback_registry  # post-construction add_callback use
+
         def _invoke(name: str, *args: Any) -> None:
-            for callback in callbacks:
-                hook = getattr(callback, name, None)
-                if not callable(hook):
-                    continue
-                try:
-                    hook(*args)
-                except Exception:  # noqa: BLE001 - callbacks are non-fatal
-                    logger.warning(
-                        "callback %s.%s failed; continuing training.",
-                        type(callback).__name__, name, exc_info=True,
-                    )
+            # The registry keeps the duck contract and isolates failures
+            # per handler (design doc D22).
+            callback_registry.run(name, *args)
 
         is_rank_zero_run = world_size == 1 or _is_rank_zero_internal()
         if is_rank_zero_run:
@@ -1120,6 +1407,26 @@ class TaskEngine(Engine):
                             # rides in every checkpoint so a resume can
                             # restore it.
                             "best_metric": best_metric,
+                            # Early-stopping state (D17): resuming with a
+                            # zeroed patience counter would let a model that
+                            # already exhausted its patience survive many
+                            # more validations.
+                            "no_improve": no_improve,
+                            # Fit-args snapshot (D17): the resume path warns
+                            # on out-of-whitelist drift against this.
+                            "fit_args": {
+                                "steps": steps,
+                                "precision": precision,
+                                "gradient_accumulation_steps":
+                                    gradient_accumulation_steps,
+                                "early_stopping_patience":
+                                    early_stopping_patience,
+                                "early_stopping_min_delta":
+                                    early_stopping_min_delta,
+                                "val_every_num_steps": val_every_num_steps,
+                                "save_every_num_steps": save_every_num_steps,
+                                "log_every_n_steps": log_every_n_steps,
+                            },
                         }
                         if "ema" in checkpoint_dict:
                             engine_state["ema"] = checkpoint_dict["ema"]
@@ -1132,9 +1439,12 @@ class TaskEngine(Engine):
                             engine_state=engine_state,
                         )
                         Checkpoint(
-                            state_dict=checkpoint_dict["state_dict"],
+                            state_dict=_sanitize_state_dict_for_serialization(
+                                checkpoint_dict["state_dict"]
+                            ),
                             autovision=metadata,
                         ).save(out_dir / "checkpoints" / f"{best_or_last}.ckpt")
+                        _invoke("on_checkpoint_save", step + 1, best_or_last)
                     except Exception as error:  # noqa: BLE001 - propagate via barrier
                         write_ok = False
                         write_error = error
@@ -1214,89 +1524,129 @@ class TaskEngine(Engine):
                             if hasattr(hook, "mark_dataloader_as_reinitialized"):
                                 hook.mark_dataloader_as_reinitialized()
 
-                    with otel_span("engine.dataload", {"step": step}):
-                        batch = self._to_device(next(infinite_loader), device)
-                    if nan_monitor is not None:
-                        nan_monitor.capture_batch(batch)
-                        nan_monitor.set_optimizer_state(optimizer.state_dict())
-                    if (
-                        visualize_examples
-                        and step < 3
-                        and _is_rank_zero_internal()
-                        and "bboxes" in batch  # detection-specific visualization
-                    ):
-                        from autovision.visualize import save_detection_examples
+                    # OOM recovery (D21): allocator exhaustion on the compute region
+                    # halves the per-device batch and rebuilds the loader — single-process
+                    # only (a mid-run batch change under DDP must be synchronized across
+                    # ranks, which asymmetric catches cannot do safely). The OOMed step
+                    # is skipped; optimizer/scheduler state is preserved.
+                    try:
+                        with otel_span("engine.dataload", {"step": step}):
+                            batch = self._to_device(next(infinite_loader), device)
+                        if nan_monitor is not None:
+                            nan_monitor.capture_batch(batch)
+                            nan_monitor.set_optimizer_state(optimizer.state_dict())
+                        if (
+                            visualize_examples
+                            and step < 3
+                            and _is_rank_zero_internal()
+                            and "bboxes" in batch  # detection-specific visualization
+                        ):
+                            from autovision.visualize import save_detection_examples
 
-                        save_detection_examples(
-                        out_dir, batch, step,
-                        normalize_args=(
-                            normalize_args if isinstance(normalize_args, dict) else None
-                        ),
-                    )
-                    if underflow_monitor is not None:
-                        underflow_monitor.set_batch_number(step)
-                        if underflow_monitor.aborted:
-                            break
-                    autocast = (
-                        torch.autocast(device_type=device.type, dtype=autocast_dtype)
-                        if autocast_dtype is not None
-                        else nullcontext()
-                    )
-                    optimizer.zero_grad(set_to_none=True)
-                    accumulated_loss = 0.0
-                    for accumulation_index in range(gradient_accumulation_steps):
-                        batch_i = (
-                            self._to_device(next(infinite_loader), device)
-                            if accumulation_index > 0
-                            else batch
+                            save_detection_examples(
+                            out_dir, batch, step,
+                            normalize_args=(
+                                normalize_args if isinstance(normalize_args, dict) else None
+                            ),
                         )
-                        # Skip gradient synchronization for all but the last
-                        # microbatch of an accumulation window.
-                        sync_context = (
-                            ddp_train_model.no_sync()  # type: ignore[union-attr]
-                            if world_size > 1
-                            and accumulation_index < gradient_accumulation_steps - 1
+                        if underflow_monitor is not None:
+                            underflow_monitor.set_batch_number(step)
+                            if underflow_monitor.aborted:
+                                break
+                        autocast = (
+                            torch.autocast(device_type=device.type, dtype=autocast_dtype)
+                            if autocast_dtype is not None
                             else nullcontext()
                         )
-                        with sync_context:
-                            with autocast:
-                                # forward == training_step; DDP syncs through it.
-                                step_result = ddp_train_model(batch_i, step)
-                        loss = step_result.loss / gradient_accumulation_steps
-                        if not torch.isfinite(loss):
-                            if nan_monitor is not None:
-                                nan_monitor.check_loss(step_result.loss)
-                            raise RuntimeError(
-                                f"Non-finite loss at step {step}. Check data or lower lr."
+                        optimizer.zero_grad(set_to_none=True)
+                        accumulated_loss = 0.0
+                        for accumulation_index in range(gradient_accumulation_steps):
+                            batch_i = (
+                                self._to_device(next(infinite_loader), device)
+                                if accumulation_index > 0
+                                else batch
                             )
+                            # Skip gradient synchronization for all but the last
+                            # microbatch of an accumulation window.
+                            sync_context = (
+                                ddp_train_model.no_sync()  # type: ignore[union-attr]
+                                if world_size > 1
+                                and accumulation_index < gradient_accumulation_steps - 1
+                                else nullcontext()
+                            )
+                            with sync_context:
+                                with autocast:
+                                    # forward == training_step; DDP syncs through it.
+                                    step_result = ddp_train_model(batch_i, step)
+                            loss = step_result.loss / gradient_accumulation_steps
+                            if not torch.isfinite(loss):
+                                if nan_monitor is not None:
+                                    nan_monitor.check_loss(step_result.loss)
+                                raise RuntimeError(
+                                    f"Non-finite loss at step {step}. Check data or lower lr."
+                                )
+                            if scaler is not None:
+                                scaler.scale(loss).backward()
+                            else:
+                                loss.backward()
+                            # Kept on-device: one sync at logging time instead
+                            # of one per microbatch.
+                            accumulated_loss = accumulated_loss + step_result.loss.detach()
                         if scaler is not None:
-                            scaler.scale(loss).backward()
+                            # Unscale once after the accumulation window so the
+                            # gradient checks and clip see real magnitudes.
+                            scaler.unscale_(optimizer)
+                        if nan_monitor is not None:
+                            nan_monitor.check_gradients(train_model)
+                        clip_norm = train_model.clip_gradients(optimizer)
+                        # AMP overflow is handled by GradScaler (skip + scale
+                        # backoff); only the non-AMP path treats it as fatal.
+                        if scaler is None:
+                            _assert_finite_gradients(optimizer, clip_norm)
+                        if scaler is not None:
+                            scale_before = scaler.get_scale()
+                            scaler.step(optimizer)
+                            scaler.update()
+                            stepped = scaler.get_scale() >= scale_before
                         else:
-                            loss.backward()
-                        # Kept on-device: one sync at logging time instead
-                        # of one per microbatch.
-                        accumulated_loss = accumulated_loss + step_result.loss.detach()
-                    if scaler is not None:
-                        # Unscale once after the accumulation window so the
-                        # gradient checks and clip see real magnitudes.
-                        scaler.unscale_(optimizer)
-                    if nan_monitor is not None:
-                        nan_monitor.check_gradients(train_model)
-                    clip_norm = train_model.clip_gradients(optimizer)
-                    # AMP overflow is handled by GradScaler (skip + scale
-                    # backoff); only the non-AMP path treats it as fatal.
-                    if scaler is None:
-                        _assert_finite_gradients(optimizer, clip_norm)
-                if scaler is not None:
-                    scale_before = scaler.get_scale()
-                    scaler.step(optimizer)
-                    scaler.update()
-                    stepped = scaler.get_scale() >= scale_before
-                else:
-                    optimizer.step()
-                    stepped = True
-                if stepped:
-                    scheduler.step()
+                            optimizer.step()
+                            stepped = True
+                        if stepped:
+                            scheduler.step()
+                    except (torch.OutOfMemoryError, RuntimeError) as error:
+                        if (
+                            not _is_oom_error(error)
+                            or oom_attempts >= _OOM_MAX_ATTEMPTS
+                            or world_size > 1
+                            or fsdp_train_model is not None
+                            or not train_dataloader.batch_size
+                            or train_dataloader.batch_size <= 1
+                        ):
+                            raise
+                        oom_attempts += 1
+                        if torch.cuda.is_available():
+                            # Release cached segments so the halved-batch
+                            # retry gets maximal allocator headroom; cheap
+                            # when there is nothing cached.
+                            torch.cuda.empty_cache()
+                        halved = train_dataloader.batch_size // 2
+                        logger.warning(
+                            "OOM at step %d (attempt %d/%d); halving the "
+                            "per-device batch to %d and rebuilding the "
+                            "dataloader. The OOMed step is skipped; "
+                            "optimizer/scheduler state kept. Set batch_size "
+                            "explicitly or use batch_size='auto' to size "
+                            "this before the run next time.",
+                            step + 1, oom_attempts, _OOM_MAX_ATTEMPTS, halved,
+                        )
+                        train_dataloader = _clone_loader_with_batch_size(
+                            train_dataloader, halved
+                        )
+                        infinite_loader = _InfiniteCycleIterator(
+                            train_dataloader, sampler=train_sampler
+                        )
+                        optimizer.zero_grad(set_to_none=True)
+                        continue
                 if (
                     fsdp_train_model is not None
                     and getattr(train_model, "ema_model", None) is not None
@@ -1374,11 +1724,24 @@ class TaskEngine(Engine):
                         )
                         logger.info("Saved last checkpoint at step %d.", step + 1)
 
+                # One validation ahead of schedule (D17 possible_stop): when
+                # exactly one non-improving validation short of the patience
+                # threshold, validating now instead of waiting for the next
+                # scheduled point gives early stopping a timely decision.
+                possible_stop = (
+                    early_stopping_patience is not None
+                    and early_stopping_patience >= 2
+                    and no_improve == early_stopping_patience - 1
+                )
                 do_validation = (
                     val_dataloader is not None
                     and (
                         is_last_step
-                        or (val_every_num_steps and (step + 1) % val_every_num_steps == 0)
+                        or possible_stop
+                        or (
+                            val_every_num_steps
+                            and (step + 1) % val_every_num_steps == 0
+                        )
                     )
                 )
                 if do_validation:
@@ -1577,6 +1940,8 @@ class TaskEngine(Engine):
             sampler=sampler,
             shuffle=False,
             num_workers=loader.num_workers,
+            worker_init_fn=loader.worker_init_fn,
+            generator=loader.generator,
             drop_last=loader.drop_last,
             collate_fn=loader.collate_fn,
             timeout=loader.timeout,

@@ -111,6 +111,56 @@ class Checkpoint:
         finally:
             tmp_path.unlink(missing_ok=True)
 
+    def serialize(self) -> bytes:
+        """Full checkpoint payload as bytes (single ``torch.save``, D20).
+
+        The archive path (``save_period`` epochs) serializes ONCE and
+        writes several destinations from the same payload instead of
+        running ``torch.save`` per path. Note this holds the whole
+        checkpoint in memory; the regular single-path :meth:`save` keeps
+        streaming to disk precisely to avoid that spike.
+        """
+        import io
+
+        buffer = io.BytesIO()
+        torch.save(
+            {
+                "state_dict": self.state_dict,
+                CHECKPOINT_AUTOVISION_KEY: self.autovision.to_dict(),
+            },
+            buffer,
+        )
+        return buffer.getvalue()
+
+    def save_serialized(self, path: Path | str, payload: bytes) -> None:
+        """Atomically write a payload produced by :meth:`serialize`.
+
+        Same durability discipline as :meth:`save` (stale-tmp sweep, temp
+        file, fsync, rename, directory fsync) so archives written from a
+        shared payload are exactly as crash-safe as streamed saves.
+        """
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        sweep_stale_temp_files(path.parent, f".{glob.escape(path.name)}.*.tmp")
+        descriptor, temp_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+        )
+        os.close(descriptor)
+        tmp_path = Path(temp_name)
+        try:
+            with tmp_path.open("wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, path)
+            _fsync_directory(path.parent)
+        except OSError as error:
+            raise CheckpointError(
+                f"Failed to save checkpoint '{path}': {error}"
+            ) from error
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
     @classmethod
     def from_path(cls, path: Path | str, map_location: Any = "cpu") -> "Checkpoint":
         path = Path(path)

@@ -8,6 +8,116 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **周期存档与 checkpoint 序列化卫生（设计提案 D20）**：预训练
+  `Engine.fit` 新增 `save_period_num_epochs`——命中周期时单次序列化、
+  原子写 last + `epoch{N}.ckpt` 双份并滚动保留最近 3 份；所有 checkpoint
+  写盘前做 fp16 溢出钳制（克隆上，不动 live 权重）与 4-d 权重
+  contiguous 归一。
+- **首轮 OOM 自动降批（D21，单进程）**：训练循环捕获分配器类 OOM
+  （类型 + 四类驱动错误串），per-device batch 减半并重建 dataloader
+  （sampler 保续、optimizer/scheduler 保留），OOMed step 跳过、至多 3 次；
+  batch=1 或 DDP/FSDP 下不降级（DDP 的非对称 OOM 无法安全同步）直接
+  报错并给出人工建议。
+- **引擎级回调注册表（D22）**：`engine/callbacks.py::CallbackRegistry`
+  （6 个命名事件 + add/set/clear/adapt），旧 `callbacks=` 鸭子列表继续
+  接受；逐 handler 异常隔离（回调失败告警不中断）；新事件
+  `on_checkpoint_save`；预训练 `Engine.fit` 新增 `callbacks` 参数。
+- **训练基建杂项（D23）**：dataloader 级 worker 播种
+  （`build_task_dataloader`/`get_dataloader` 新增 `seed=`，修复 numpy/
+  random 在 fork worker 中同源的静默复现陷阱；object_detection 与预训练
+  CLI 已接线）；`runtime/model_info.py`（参数分层 + thop 惰性 GFLOPs，
+  fit 横幅新增 GFLOPs 行）；`runtime/fuse.py`（通用 Sequential
+  Conv+BN 折叠 + `assert_fused_parity` 数值门禁，QAT 出范围）。
+- **增广四目标协议（D24，架构前置）**：`augment/core.py::GeoTransform`——
+  一次采样、四目标钩子（image/instances/semantic_mask/depth）共享同一
+  冻结参数；值约定入协议（语义最近邻+255、深度最近邻+0、关键点出界
+  visibility 置零）；mosaic/mixup 移植时的实现层，方法制公开面不变。
+- **指标聚合容器（D27，容器部分）**：`metrics/containers.py::TaskMetrics`
+  ——逐 batch 只 append 原始行、`process()` 期末归并、
+  `export_state/merge_state` 保持既有 DDP 鸭子协议；
+  `empty_empty_score` 固化"无 GT + 无预测 = 满分"约定；现有
+  Collector/Evaluator 行为不变。
+- **数据与评估小件（D29a/b）**：`data_check` 新增存储体检（抽样 ≤5 文件
+  测 stat ping 与读吞吐，10ms/50MB/s 阈值告警建议本地存储，只告警不判罚）；
+  `COCOMAPEvaluator` 新增 `auto_raise`（跟踪最密图实例数、compute 期自动
+  抬升 maxDets 并告警，零额外 IO），`evaluate_object_detection` 的
+  `max_det=None` 默认启用。
+- **handle 级编译后端引擎缓存与参数二分（设计提案 D15）**：
+  `detection(...).predict(image, backend="onnx", artifact=...)` 现已可用；
+  引擎按构建期键（backend/artifact/device/providers/openvino_device）缓存
+  复用（LRU-2 槽，交替双配置不重建），阈值类运行期参数每次调用传入；
+  `train()` 后缓存失效，handle 反序列化时丢弃进程级缓存。
+- **AMP 事前数值探针（D16）**：混合精度训练启动前用调用方自有模型跑
+  FP32 vs autocast 对照（不下载任何外部权重），输出漂移即 fail-closed
+  降级 fp32；探测不可判（模型无探针输入）时保持请求精度；DDP 下 rank0
+  决策 int8 广播。`trainer_args.amp_check=false` 可关（object_detection
+  面已接线，其余任务面随后跟进）；`Engine.fit` / `TaskEngine.fit_task`
+  新增 `amp_check` 参数。
+- **resume 加固与早停状态持久化（D17）**：task checkpoint 现在携带
+  早停耐心计数（resume 续接而非清零）与 fit-args 快照；resume 时白名单外
+  的超参漂移逐键告警（现值治理），调度类键（steps/patience 等）仅 info；
+  接近早停阈值时提前一次验证（possible_stop），早停决策不再被动等下一
+  个调度点。
+- **空闲 GPU 自动选卡（D18）**：device 语法新增 `-1` 占位符——
+  `resolve_device("-1")` 选最空闲卡，`runtime.autodevice.resolve_device_spec`
+  展开任意 spec（`"0,-1"` → `"cuda:0,cuda:3"`）；排序键
+  （利用率, -空闲显存, 随机 tiebreak），`CUDA_VISIBLE_DEVICES` 物理 id
+  双向翻译；逗号 spec 在 `resolve_num_devices` 计入进程数。降级两段式：
+  空闲阈值筛光时回退最不忙的可见卡（告警）；可见卡数少于占位符数时
+  **报错**（配置不可满足）——不再静默产出 `cpu` 混搭 rank；NVML 缺失
+  降级顺序取卡并告警。
+- **COCO 导入健壮性（D19）**：实例分割数据集对畸形 segmentation 多边形
+  白名单校验（长度/偶数/有限数值），不合格退 bbox 矩形（每文件聚合一条
+  告警），无 bbox 可退时丢弃实例并告警；修复 compressed RLE（string
+  counts，真实 COCO crowd 标注形态）被误送 `frPyObjects` 而崩溃的既有
+  缺陷；`geometry/polygons.py` 新增 `is_valid_polygon` / `polygon_from_bbox`。
+- **导出工件自描述与加载端一致性校验（设计提案 D1）**：ONNX 图内
+  `metadata_props` 与 OpenVINO / TensorRT 旁路 JSON 现在携带完整身份
+  （task、类别数、`image_size`、类别名、输入布局、schema 版本）；
+  `InferenceEngine` 构造时校验 network↔artifact 一致，跨任务面误配在加载
+  期报出两侧实际值而非首帧形状错误；旧的无元数据工件照常加载。TensorRT
+  引擎新增 `<stem>.meta.json` 身份旁路，导出完成日志回显身份摘要。
+- **导出产物最小尺寸护栏**：`export_onnx` 在 parity 门禁后断言产物
+  > 4 KiB，"只写出了头部的成功导出"直接失败（D14b）。
+- **追踪器生命周期 API（D2）**：`Track.det_index` 回写检测索引（跨验证
+  丢框保持原位）、`BYTETracker.drain_removed_tracks()` 发布退役轨迹一次、
+  `reset()` 换源重置（id 从 1 重新计数）；Kalman 状态改为实例私有。
+- **追踪器钩子化与 BoT-SORT（D7）**：`update()` 重构为固定模板 +
+  可覆写阶段钩子（golden 生命周期快照逐位锚定），`BOTSORT` 以 XYWH 运动模型
+  子类落地（默认开启相机运动补偿）；ReID 外观匹配按设计提案明确出范围。
+- **相机运动补偿 GMC（D6）**：`tracking/gmc.py` 提供
+  sparse_opt_flow / ORB / SIFT / ECC 五种估计（`cv2` 惰性导入，属 `video`
+  extra），检测框前景剔除、失败回退不补偿并告警一次；
+  `run_stream(..., motion_compensation=...)` 接线，平移量按降采样比例
+  还原到全分辨率坐标。
+- **`LineZone` chord 穿越补偿（D13a）**：在既有无限线符号翻转之外增加
+  前后锚点连线与线段的真交点判定（端点触碰不算），补计"丢失期间跨线"
+  与"锚点正落在线上"两类漏计；每 track 每帧至多计一次。
+- **`box_candidates` 增广劣化门（D3）**：mosaic 整画布仿射后按
+  最小宽高 / 长宽比上限 / 变换前后面积比过滤劣化目标并同步标签
+  （阈值进 `RTDETRDetectionTransformArgs`，默认宽松：2 px / 100 / 0.1）；
+  `geometry/polygons.py` 提供纯 numpy 多边形画布裁剪（Sutherland–Hodgman）。
+- **autobatch 训练批量探测（D4）**：`engine/autobatch.py` 以真实训练 step
+  闭包逐候选剖析峰值显存、线性拟合外推到可用显存的目标比例、实测 OOM 回退
+  上一安全档；纯拟合策略与 mock CUDA 探测循环均可离线测试（CLI
+  `batch_size="auto"` 按任务面逐个接线，见模块 docstring）。
+- **基准计时方法论与指标下限门禁（D5）**：`export/timing.py` 提供 2σ 迭代
+  剔离群与按目标测量窗自适应步数；`benchmark_inference(..., robust=True)`
+  在 `extra` 输出稳健统计（默认关闭，基准表可比性不变）；registry 新增
+  opt-in `MetricFloorGate`，模型卡指标低于声明下限即 promotion 失败。
+- **数据面四件（D8–D11）**：数据集扫描缓存（`.autovision_scan_cache.json`
+  + `AUTOVISION_SCAN_CACHE=0` 旁路 + `data_check no_cache=true`）；图像
+  读取缓存（`.npy` 边车 staleness 协议 / 单张量 RAM 共享池，
+  `ImageDataset(image_cache=...)` 选择性启用）；数据集下载断点续传
+  （Range 续传 + 5xx 指数退避 + 4xx fail-fast + 磁盘预检，sha256 校验与
+  原子发布不变）；训练侧大图切片 `tile-dataset`（IoF≥0.7 窗口-目标分配、
+  窗口保留率剪枝、`tiles.jsonl` 溯源清单，推理侧 SAHI 的 complement）。
+- **serving lifespan 全管线预热（D14a）**：服务启动时对每个引擎跑一次
+  完整 `run_batch`（解码 + forward + 后处理），首个请求不再承担惰性导入与
+  会话预热；预热失败仅告警，readiness 探针仍为流量准入依据。
+
 ### 修复
 
 - **GTR 路线的 OpenVINO 导出不再在 parity 门禁崩溃**：OpenVINO 参考被强制
@@ -35,6 +145,43 @@
   顺带移除从未被读取的 per-layer 置换 buffer 注册。
 - **修正 `docs/export.md` 动态 H/W 支持面表**：GTR 全线此前被误标为
   「支持」，实际 `dynamic_spatial=True` 被 `dynamic_spatial_blocker` 可读拒绝。
+- **GTR 五条任务路线（depth / instance seg / obb / pose / semseg）默认构造
+  不再静默返回随机权重**：`load_checkpoint=True`（默认）+ `checkpoint=None`
+  （默认）时旧的 `if checkpoint and load_checkpoint:` 守卫什么都不加载、
+  不告警——随机权重模型可以跑出看似合理的预测。现在默认解析该变体的
+  sha256 固定官方资产（`resolve_gtr_asset`，缺文件/sha 不符时报错并给出
+  路径、来源与下载命令）；显式 `checkpoint` 路径仍优先，`load_checkpoint=False`
+  保持随机初始化契约（导出门禁测试依赖）。新增默认加载与显式退出的回归测试。
+- **GTR 全线真实尺寸（多 chunk）下的 fp16 ONNX 导出修复**：GLA causal 掩码
+  trace 出的 `ConstantOfShape` 保持 fp32，而 ORT float16 转换器把周围算子
+  改成 fp16——token 数超过一个 GLA chunk（>64 token，即输入大于 128²，
+  640² 实际导出必中）后产生混合 dtype 的 `Mul`，`onnx.checker` 拒绝导出。
+  `ConstantOfShape` 现在随 MatMul/Resize 一起钉在 fp32；既有 fp16 测试的
+  64² 输入恰好单 chunk 所以从未触发。新增 160²（最小失败尺寸）多 chunk
+  回归测试。
+- **TensorRT 引擎构建前的版本预警**：GTR 路线在检测到 TensorRT ≥ 11 时，
+  `export_tensorrt` 现在会在构建前主动告警（上述 Myelin miscompile 已知
+  问题）——`verify=False` 的构建不再静默；`verify=True` 的对拍门禁行为
+  不变（仍然 fail-closed 拒绝并删除数值错误的引擎）。
+- **GTR 预训练句柄 CPU-only 机器可构造**：`build_pretrained_detection
+  ("detr/gtrvit-*")` 不再在无 CUDA 时硬拒绝（构造不执行 GLA 核，只有
+  eager 前向需要 CUDA），改为告警并正常装配官方权重——CPU-only 机器经
+  `InferenceEngine(model.network, backend='onnx', artifact=...)` 走文档
+  写明的 ONNX CPU 部署路径（640² det S 实测：ONNX CPU 13/13 检测与
+  eager CUDA 一致，score Δ≤0.004，~0.3 s/张）；CPU eager 前向仍被
+  `cpu_eager_blocker` 可读拒绝。`DetectionModel` 新增公开只读属性
+  `.network`；`examples/tasks/detection.py` 新增 `--onnx <artifact>`
+  直跑导出工件（`gtr_requirement` 相应增加 `need_cuda` 开关）。
+
+### 已知边界（文档）
+
+- **TensorRT 版本边界**：GTR 展开纯图的 fp32 引擎在 TensorRT 11.4
+  （11.4.0.106，RTX 4090D 实测，det 与 depth 双路线确认）构建成功但引擎
+  数值错误（输出系统性偏离 torch/onnxruntime 参考）——疑似 Myelin 对
+  万节点级 CumSum/Exp/MatMul 展开链的 miscompile；上游受支持环境为
+  TensorRT 10.14。`verify=True` 引擎对拍门禁会拒绝并删除此类引擎
+  （fail-closed，不会静默产出坏引擎）；该 TRT 版本上勿对 GTR 关闭
+  verify。见 `docs/export.md` / `docs/known_limits.md`。
 
 ## [0.4.0] - 2026-11-02
 

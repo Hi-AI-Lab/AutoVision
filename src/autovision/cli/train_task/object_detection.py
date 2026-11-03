@@ -46,6 +46,17 @@ logger = logging.getLogger("autovision")
 _DATA_FORMATS = {"coco": COCOObjectDetectionDataArgs, "yolo": YOLOObjectDetectionDataArgs}
 
 
+
+def _resolve_amp_check(trainer_args: dict[str, Any]) -> bool:
+    """Strict bool read of ``trainer_args.amp_check`` (YAML strings fail)."""
+    value = (trainer_args or {}).get("amp_check", True)
+    if not isinstance(value, bool):
+        raise ValueError(
+            f"trainer_args.amp_check must be a bool, got {type(value).__name__}."
+        )
+    return value
+
+
 def _load_data_config(data: PathLike | dict[str, Any]) -> dict[str, Any]:
     if isinstance(data, str) and data == "coco8":
         from autovision.data.coco8 import ensure_coco8
@@ -134,6 +145,7 @@ def train_object_detection(
             "early_stopping_min_delta",
             "gradient_checkpointing",
             "parallel",
+            "amp_check",
         },
     )
     trainer_args_resolved = dict(trainer_args or {})
@@ -355,10 +367,12 @@ def train_object_detection(
             # Step-windowed augmentation: see build_task_dataloader's note.
             persistent_workers=False,
             sampler=train_sampler,
+            seed=seed,
         )
         val_loader = common_helpers.build_task_dataloader(
             val_dataset, batch_size=per_device_batch,
             num_workers=num_workers_resolved, train=False,
+            seed=seed,
         )
         if len(train_dataset) == 0:
             raise ValueError("The training dataset is empty.")
@@ -470,6 +484,7 @@ def train_object_detection(
                 trainer_args_resolved
             ),
             parallel=common_helpers.resolve_parallel(trainer_args_resolved),
+            amp_check=_resolve_amp_check(trainer_args_resolved),
             save_every_num_steps=save_args.save_every_num_steps,
             save_last=save_args.save_last,
             save_best=save_args.save_best,

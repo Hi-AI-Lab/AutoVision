@@ -36,6 +36,8 @@ _EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 class _EmptyResponse:
     """Minimal urlopen response: one EOF read, no Content-Length."""
 
+    status = 200
+
     def __enter__(self):
         return self
 
@@ -51,6 +53,8 @@ class _EmptyResponse:
 
 class _PayloadResponse:
     """Minimal urlopen response serving ``payload`` in chunks."""
+
+    status = 200
 
     def __init__(self, payload: bytes, *, send_content_length: bool = True):
         self._payload = payload
@@ -128,7 +132,8 @@ def test_dataset_download_passes_a_timeout(monkeypatch, tmp_path):
     seen = {}
 
     def _fake_urlopen(url, timeout=None):
-        seen["url"] = url
+        # _download_file always opens a urllib Request (Range-capable).
+        seen["url"] = getattr(url, "full_url", url)
         seen["timeout"] = timeout
         return _EmptyResponse()
 
@@ -150,7 +155,16 @@ def _patch_urlopen(monkeypatch, response_factory):
     )
 
 
-def test_failed_download_leaves_no_final_file_and_cleans_temp(monkeypatch, tmp_path):
+def test_failed_download_keeps_a_resumable_part_without_publishing(
+    monkeypatch, tmp_path
+):
+    """Exhausted retries keep the resumable *.part prefix (D11 resume) and
+    never publish the final file; backoff backs off once, then a Range
+    reset restarts the transfer from zero."""
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        "autovision.data.downloads._sleep", lambda seconds: sleeps.append(seconds)
+    )
     payload = b"partial payload"
     spec = DatasetFile(
         url="https://example.invalid/data.bin",
@@ -161,7 +175,10 @@ def test_failed_download_leaves_no_final_file_and_cleans_temp(monkeypatch, tmp_p
     with pytest.raises(AutoVisionError, match="Failed to download"):
         _download_file(spec, target)
     assert not target.exists()
-    assert list(tmp_path.iterdir()) == []
+    parts = list(tmp_path.glob("*.part"))
+    assert len(parts) == 1
+    assert parts[0].read_bytes() == payload
+    assert sleeps == [5.0]
 
 
 def test_download_sha_mismatch_leaves_no_final_file(monkeypatch, tmp_path):

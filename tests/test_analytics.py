@@ -141,3 +141,74 @@ class TestDrawZones:
         original = image.copy()
         rendered = draw_zones(image, [line], [polygon])
         assert not np.array_equal(np.asarray(original), np.asarray(rendered))
+
+
+# ── D13a: chord-based fast-cross compensation ───────────────────────────
+
+
+class TestChordCrossing:
+    """The chord detector: crossings the side-flip path cannot see."""
+
+    def test_anchor_landing_on_the_line_does_not_double_count(self):
+        """Above -> exactly-on -> below counts exactly once."""
+        zone = LineZone((10.0, 0.0), (110.0, 0.0))
+        zone.update([_track(1, (0.0, 20.0, 20.0, 40.0))])  # below the line? y=40
+        # Anchor bottom_center = (10, 40): cross = dx*(40-0) > 0 → side +1.
+        assert zone.counts.in_count == 0
+
+        # Frame 2: anchor exactly ON the line (bottom_center y = 0).
+        zone.update([_track(1, (0.0, -20.0, 20.0, 0.0))])
+        assert zone.counts.in_count == 0  # touch, not a crossing
+
+        # Frame 3: fully on the other side — the flip fires once.
+        zone.update([_track(1, (0.0, -40.0, 20.0, -20.0))])
+        assert zone.counts.in_count == 0
+        assert zone.counts.out_count == 1
+
+    def test_flip_path_still_counts_a_fast_transit(self):
+        """Above -> far below in one frame (fast object) counts once."""
+        zone = LineZone((10.0, 0.0), (110.0, 0.0))
+        zone.update([_track(1, (0.0, 20.0, 20.0, 40.0))])
+        zone.update([_track(1, (0.0, -40.0, 20.0, -20.0))])
+
+        assert zone.counts.in_count == 0
+        assert zone.counts.out_count == 1
+
+    def test_crossing_while_lost_then_fresh_life_counts_nothing(self):
+        """A track absent past max_age reappears as a fresh life: the
+        stale chord state must not fabricate a crossing."""
+        zone = LineZone((10.0, 0.0), (110.0, 0.0), max_age=2)
+        zone.update([_track(1, (0.0, 20.0, 20.0, 40.0))])
+        for _ in range(4):
+            zone.update([])
+        # Reappears on the other side, beyond max_age: fresh life.
+        zone.update([_track(1, (0.0, -40.0, 20.0, -20.0))])
+
+        assert zone.counts.in_count == 0
+        assert zone.counts.out_count == 0
+
+    def test_reset_clears_the_chord_state(self):
+        """reset() must clear the per-id anchors too."""
+        zone = LineZone((10.0, 0.0), (110.0, 0.0))
+        zone.update([_track(1, (0.0, 20.0, 20.0, 40.0))])
+        zone.reset()
+
+        assert zone._prev_anchor == {}
+
+    def test_chord_direction_matches_the_side_convention(self):
+        """An upward chord against a +x line reads as the 'in' direction."""
+        from autovision.tracking.analytics import _chord_direction, _segments_intersect
+
+        assert _chord_direction(
+            (50.0, -10.0), (50.0, 10.0), (0.0, 0.0), (100.0, 0.0)
+        ) == 1
+        assert _chord_direction(
+            (50.0, 10.0), (50.0, -10.0), (0.0, 0.0), (100.0, 0.0)
+        ) == -1
+        assert _segments_intersect(
+            (50.0, -10.0), (50.0, 10.0), (0.0, 0.0), (100.0, 0.0)
+        )
+        # Endpoint touch is NOT a proper intersection.
+        assert not _segments_intersect(
+            (50.0, -10.0), (50.0, 0.0), (0.0, 0.0), (100.0, 0.0)
+        )

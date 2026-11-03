@@ -171,6 +171,26 @@ def extract_video_frames_command(arguments: list[str] = typer.Argument(None)) ->
     _run(extract_video_frames, list(arguments or []))
 
 
+@app.command("tile-dataset")
+def tile_dataset_command(arguments: list[str] = typer.Argument(None)) -> None:
+    """Slice a large-image dataset into YOLO training tiles (D9).
+
+        autovision-cli tile-dataset images_dir=big/ labels_dir=labels/ out=tiled/ crop=1024 gap=0.2
+        autovision-cli tile-dataset images_dir=big/ labels_dir=null out=tiles/ label_format=obb
+        autovision-cli tile-dataset images_dir=big/ labels_dir=labels/ out=tiled/ \\
+            iof_thr=0.7 min_window_rate=0.6
+    """
+    from autovision.data.split_large_images import split_large_image_dataset
+    from autovision.errors import AutoVisionError
+
+    kwargs = _parse_kwargs(list(arguments or []))
+    try:
+        out_dir = split_large_image_dataset(**kwargs)
+    except AutoVisionError as error:
+        raise typer.BadParameter(str(error)) from None
+    typer.echo(f"tiles: {out_dir}")
+
+
 @app.command("list-models")
 def list_models_command(
     task: str | None = typer.Option(

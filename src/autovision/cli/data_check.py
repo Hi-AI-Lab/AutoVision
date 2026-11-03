@@ -21,6 +21,7 @@ from autovision.data.quality import (
     ImageRecord,
     audit_detection_dataset,
 )
+from autovision.data.scan_cache import scan_manifest
 from autovision.errors import AutoVisionError
 
 __all__ = ["data_check"]
@@ -76,11 +77,19 @@ def data_check(
     splits: Any = None,
     near_duplicate: bool = False,
     max_examples: int = 20,
+    no_cache: bool = False,
 ) -> DataAuditReport:
     """Audit a detection dataset and write ``out/report.{json,md}``.
 
     ``data`` is the same COCO/YOLO config accepted by
     ``train_object_detection`` (dict, YAML path, or ``"coco8"``).
+
+    The audit itself always re-opens every image at full fidelity (its
+    verdicts are never cache-served). By default the run also seeds the
+    dataset scan cache (design doc §4.8 D8) from the file-manifest
+    validation layer, so QA doubles as a cache warm-up; ``no_cache=True``
+    (CLI ``no_cache=true``) bypasses that layer entirely — no cached
+    verdicts are read or written.
     """
     from autovision.cli.train_task.object_detection import (
         _DATA_FORMATS,
@@ -106,6 +115,7 @@ def data_check(
 
     records: list[ImageRecord] = []
     raw_categories: dict[int, str] = {}
+    rows_by_split: dict[str, list[dict[str, Any]]] = {}
     for split in names:
         raw_index: dict[str, tuple[int | None, int | None, list[dict[str, Any]]]] = {}
         if isinstance(data_args, COCOObjectDetectionDataArgs):
@@ -120,6 +130,7 @@ def data_check(
                 raw_categories.setdefault(category_id, name)
         for row in data_args.list_image_info(split):
             path = Path(row["image_path"]).resolve()
+            rows_by_split.setdefault(split, []).append(row)
             raw = raw_index.get(str(path))
             raw_category_ids = None
             raw_bboxes = None
@@ -148,6 +159,37 @@ def data_check(
                     raw_bboxes=raw_bboxes,
                 )
             )
+
+    # IO health probe (design doc D29a): informational, never fails the
+    # audit — slow storage surfaces as a warning, not a verdict.
+    from autovision.data.quality import probe_storage_speed
+
+    probe_storage_speed([record.path for record in records])
+
+    # File-manifest validation layer (design doc §4.8 D8). The audit below
+    # always re-opens every image, so its verdicts are never cache-served;
+    # this pass only seeds/reuses the shared scan cache so a QA run doubles
+    # as a warm-up for training startup. --no-cache bypasses it entirely.
+    # Grouping is per split with the first row's parent as root, mirroring
+    # ObjectDetectionDataset so the fingerprints match what the trainer
+    # will look up (task_params must match its _scan_cache_params too).
+    if not no_cache:
+        task_params = {
+            "task": "object_detection",
+            "num_channels": 3,
+            "skip_if_annotations_missing": bool(
+                getattr(data_args, "skip_if_annotations_missing", False)
+            ),
+            "ignore_classes": sorted(
+                getattr(data_args, "ignore_classes", None) or []
+            ),
+        }
+        for split in names:
+            rows = rows_by_split.get(split, [])
+            if not rows:
+                continue
+            root = Path(str(rows[0]["image_path"])).parent
+            scan_manifest(root, rows, task_params=task_params, num_channels=3)
 
     report = audit_detection_dataset(
         records,

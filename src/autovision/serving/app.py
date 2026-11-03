@@ -47,6 +47,8 @@ import secrets
 import threading
 import time
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -399,8 +401,32 @@ def create_app(
         if docs_enabled
         else {"docs_url": None, "redoc_url": None, "openapi_url": None}
     )
+    def _warmup(engine: Any) -> None:
+        """One full-pipeline call (decode + forward + postprocess) per
+        engine (design D14a): the first real request otherwise pays the
+        allocator/session warm-up AND the lazy postprocessing imports.
+        Failures are warnings, never fatal: the readiness probe remains
+        the source of truth for serving traffic."""
+        try:
+            import torch
+
+            engine.run_batch([torch.zeros(3, 64, 64)], threshold=threshold)
+            logger.info("Serving warmup complete (%s).", type(engine).__name__)
+        except Exception as error:  # noqa: BLE001 - warmup must not kill boot
+            logger.warning(
+                "Serving warmup skipped (%s: %s); the first request will "
+                "pay the warm-up cost instead.", type(error).__name__, error,
+            )
+
+    @asynccontextmanager
+    async def _lifespan(_app: Any) -> AsyncIterator[None]:
+        for warmup_engine in engines.values():
+            await asyncio.to_thread(_warmup, warmup_engine)
+        yield
+
     app = FastAPI(
-        title="AutoVision reference serving", version="0.3", **docs_kwargs
+        title="AutoVision reference serving", version="0.3", **docs_kwargs,
+        lifespan=_lifespan,
     )
 
     @app.middleware("http")
