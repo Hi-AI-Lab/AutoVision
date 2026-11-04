@@ -112,6 +112,9 @@ class TestResolveDeviceSpec:
             "autovision.runtime.autodevice._load_gpu_stats",
             lambda: [_stat(0, 0.9, 0.9), _stat(1, 0.05, 0.8), _stat(2, 0.2, 0.7)],
         )
+        # Match the injected topology: the visibility gate counts real
+        # CUDA slots when CVD is unset, and a GPU-less CI host has none.
+        monkeypatch.setattr(torch.cuda, "device_count", lambda: 3)
         assert resolve_device_spec("-1") == "cuda:1"
         assert resolve_device_spec("cuda:-1") == "cuda:1"
 
@@ -123,6 +126,7 @@ class TestResolveDeviceSpec:
             "autovision.runtime.autodevice._load_gpu_stats",
             lambda: [_stat(0, 0.01, 0.9), _stat(1, 0.05, 0.95)],
         )
+        monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
         assert resolve_device_spec("0,-1") == "cuda:0,cuda:1"
 
     def test_nvml_missing_degrades_sequentially(
@@ -153,6 +157,7 @@ class TestResolveDeviceSpec:
         monkeypatch.setattr(
             "autovision.runtime.autodevice._load_gpu_stats", lambda: [busy]
         )
+        monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
         assert resolve_device_spec("-1") == "cuda:0"
 
     def test_stage2_ranks_rescued_cards_by_busyness(
@@ -166,6 +171,7 @@ class TestResolveDeviceSpec:
         monkeypatch.setattr(
             "autovision.runtime.autodevice._load_gpu_stats", lambda: cards
         )
+        monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
         # Both fail the idle-time threshold (70%/30% < ... wait: 0.7 and 0.3
         # idle: card 1 (70% idle) passes stage-1; card 0 needs stage-2.
         assert resolve_device_spec("-1,-1") == "cuda:1,cuda:0"
@@ -194,6 +200,9 @@ class TestResolveDeviceSpec:
         monkeypatch.setattr(
             "autovision.runtime.autodevice._load_gpu_stats", lambda: [busy]
         )
+        # Two visible slots clear the visibility gate so the selection
+        # core (1 usable card) is what raises, not the slot counter.
+        monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
         with pytest.raises(AutoVisionError, match="only 1 usable CUDA GPU"):
             resolve_device_spec("-1,-1")
 

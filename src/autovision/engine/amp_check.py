@@ -120,6 +120,17 @@ def check_amp_support(
         )
         return None
 
+    if device.type == "cuda" and not torch.cuda.is_available():
+        # torch silently disables autocast("cuda") on hosts without CUDA,
+        # so the probe below would compare fp32 against fp32 and report
+        # "supported" from a vacuous tie. Fail closed instead: a cuda-like
+        # device on a CUDA-less host has no autocast training path.
+        logger.warning(
+            "AMP probe skipped: device is cuda-like but CUDA is "
+            "unavailable on this host; autocast support is False."
+        )
+        return False
+
     was_training = model.training
     model.eval()
     try:

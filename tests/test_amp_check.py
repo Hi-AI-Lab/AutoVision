@@ -72,17 +72,26 @@ class TestCheckAmpSupport:
         assert "no autocast support" in caplog.text
 
     def test_divergent_autocast_outputs_fail(
-        self, caplog: pytest.LogCaptureFixture
+        self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Output divergence beyond atol degrades the decision to False."""
+        # torch disables autocast("cuda") on CUDA-less hosts, which would
+        # void the probe into a vacuous fp32-vs-fp32 tie; claim CUDA
+        # availability so the comparison logic itself is exercised here.
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
         batch = torch.randn(2, 4)
         assert (
             check_amp_support(_AmpBroken(), device=CUDA_LIKE, batch=batch) is False
         )
         assert "divergence" in caplog.text
 
-    def test_agreeing_outputs_pass(self) -> None:
+    def test_agreeing_outputs_pass(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A well-behaved module passes the fp32-vs-autocast comparison."""
+        # Keep the probe honest on CUDA-less hosts (the fail-closed guard
+        # would otherwise short-circuit it before the comparison runs).
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
         batch = torch.randn(2, 4)
         assert check_amp_support(Linear(4, 2), device=CUDA_LIKE, batch=batch) is True
 
@@ -92,8 +101,11 @@ class TestCheckAmpSupport:
             check_amp_support(Linear(4, 2), device=CUDA_LIKE, batch=None) is None
         )
 
-    def test_model_input_spec_supplies_the_probe_input(self) -> None:
+    def test_model_input_spec_supplies_the_probe_input(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """The declared input spec is used when no batch is passed."""
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
         assert check_amp_support(_SpecModel(), device=CUDA_LIKE) is True
 
     def test_forward_exception_fails_closed(self) -> None:
@@ -149,15 +161,38 @@ class TestResolveAmpPrecision:
         )
         assert result == "16-mixed"
 
-    def test_failed_probe_degrades_to_fp32(self) -> None:
+    def test_failed_probe_degrades_to_fp32(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A failing numeric probe forces fp32."""
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
         result = resolve_amp_precision(
             _AmpBroken(), device=CUDA_LIKE, precision="16-mixed"
         )
         assert result == "32-true"
 
-    def test_passing_probe_keeps_mixed(self) -> None:
+    def test_cuda_device_without_cuda_fails_closed(
+        self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A cuda-like device on a CUDA-less host has no autocast path.
+
+        torch disables autocast("cuda") there, which would otherwise turn
+        the probe into a vacuous fp32-vs-fp32 tie reporting "supported"."""
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        with caplog.at_level(logging.WARNING):
+            assert (
+                check_amp_support(
+                    Linear(4, 2), device=CUDA_LIKE, batch=torch.randn(2, 4)
+                )
+                is False
+            )
+        assert "CUDA is unavailable" in caplog.text
+
+    def test_passing_probe_keeps_mixed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A passing probe keeps the requested mixed precision."""
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
         result = resolve_amp_precision(
             _SpecModel(), device=CUDA_LIKE, precision="16-mixed"
         )

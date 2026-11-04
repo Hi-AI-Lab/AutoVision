@@ -126,8 +126,13 @@ def test_detection_rejects_cpu_for_gtr_eager() -> None:
     result = _run("detection", "--device", "cpu")
     assert result.returncode == 1
     assert "Traceback" not in result.stderr
-    assert "device='cuda'" in result.stderr
-    assert "--onnx" in result.stderr
+    if importlib.util.find_spec("fla") is None:
+        # The gtr-extra check fires first on machines without fla; the
+        # CUDA/onnx guidance only appears once the dependency is present.
+        assert "gtr` extra" in result.stderr
+    else:
+        assert "device='cuda'" in result.stderr
+        assert "--onnx" in result.stderr
 
 
 def test_detection_train_out_dir_collision_is_clean(tmp_path: Path) -> None:

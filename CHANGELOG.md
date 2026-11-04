@@ -171,6 +171,25 @@
 
 ### 修复
 
+- **CI 首曝修复（v0.5.0 tag 门禁）**：dev 线近两个大提交新增的测试此前从未
+  在 CI 上运行过（私有仓库只对发布快照触发 CI），首次曝光暴露四处问题。
+  - **`Engine.fit` 成功路径销毁进程组后再调 `get_rank()`**（真实回归）：
+    finally 的 destroy 对成功路径同样生效，随后 `on_train_end` 的
+    rank 判定在 torchrun 多进程下直接
+    `ValueError: Default process group has not been initialized`——rank
+    门冻结在进程组存活期（`is_rank_zero`），与 `fit_task` 既有做法对齐；
+    `AUTOVISION_DDP_TESTS=1` 门控使其在本机全量中被跳过，仅 CI 曝光。
+  - **AMP 数值探测在无 CUDA 主机上虚假通过**（实现缺陷）：torch 会静默
+    禁用 `autocast("cuda")`，探测退化为 fp32-vs-fp32 的空转平局并误报
+    "supported"——cuda 类设备在无 CUDA 主机上改为 fail-closed 返回
+    False，并发探测用例补 `is_available` patch 使比较逻辑在 CPU-only
+    CI 上真实可达。
+  - **`test_autodevice` 五测漏了 GPU 可见性 patch**：只注入了 NVML
+    统计，未注入 `torch.cuda.device_count`，GPU-less CI 上可见性门
+    先行拒绝；按注入拓扑补齐（文件自身契约即"不依赖硬件"）。
+  - **`test_detection_rejects_cpu_for_gtr_eager` 假定 fla 已装**：无
+    `gtr` extra 的机器上依赖检查先于 CUDA 检查触发，断言按 fla 可用性
+    分支。
 - **评审加固（D32–D36 收尾）**：自审查发现的六处边界收口。
   - **回滚读侧校验扩展到 engine_state**：`_assert_state_dict_finite` 改为
     递归遍历整个载荷——NaN 藏在 optimizer moments / EMA sidecar /

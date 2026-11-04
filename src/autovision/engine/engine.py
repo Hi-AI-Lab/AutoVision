@@ -772,6 +772,12 @@ class Engine:
             ) // dataloader.batch_size
         else:
             steps_per_epoch = len(dataloader)
+        # Rank gate frozen while the process group is alive: the fit
+        # finally-block destroys the group on every exit path (success
+        # included), and a post-training get_rank() on the dead group
+        # raises "Default process group has not been initialized" (the
+        # torchrun e2e regression).
+        is_rank_zero = world_size == 1 or torch.distributed.get_rank() == 0
         optimizer, scheduler = method.configure_optimizers(
             total_steps=max_epochs * steps_per_epoch, num_epochs=max_epochs
         )
@@ -811,7 +817,7 @@ class Engine:
         callback_registry = CallbackRegistry()
         callback_registry.adapt(callbacks or [])
         self.callbacks = callback_registry
-        if world_size == 1 or torch.distributed.get_rank() == 0:
+        if is_rank_zero:
             callback_registry.run("on_train_start", max_epochs, out_dir)
         fit_span = start_span(
             "pretrain.fit",
@@ -1063,7 +1069,7 @@ class Engine:
             checkpoint_path=out_dir / "checkpoints" / "last.ckpt",
             metrics=run_metrics,
         )
-        if world_size == 1 or torch.distributed.get_rank() == 0:
+        if is_rank_zero:
             # Same payload contract as fit_task: the result object itself.
             callback_registry.run("on_train_end", fit_result)
         return fit_result
