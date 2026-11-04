@@ -372,6 +372,22 @@ class TestRelease:
             f"package version is {autovision.__version__}"
         )
 
+    def test_readme_version_line_matches_package(self):
+        """The READMEs' 「当前版本 / Current version」 line tracks releases.
+
+        Both missed v0.4.0 (the line still said 0.3.2 when 0.4.0 shipped and
+        again rode stale into the v0.5.0 snapshot), so the guard is
+        unconditional on every commit, not just tagged ones.
+        """
+        import autovision
+
+        for name in ("README.md", "README.en.md"):
+            text = (ROOT / name).read_text()
+            assert f"**{autovision.__version__}**" in text, (
+                f"{name} advertises a stale version; update the "
+                f"「当前版本 / Current version」 line to {autovision.__version__}"
+            )
+
     def test_release_tag_filters_exclude_legacy_tags(self):
         """Only vX.Y.Z tags may enter the release pipeline.
 
