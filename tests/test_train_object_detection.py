@@ -91,6 +91,30 @@ class TestTrainObjectDetection:
         assert result.best_checkpoint_path and result.best_checkpoint_path.exists()
         assert "val_metric/map" in result.best_metrics
 
+    def test_default_validation_cadence_without_trainer_args(self, tmp_path, coco):
+        """A bare run validates at a bounded default cadence, not never.
+
+        Without trainer_args the run used to finish with zero intermediate
+        metrics (best == last). The API now resolves min(500, steps) so a
+        default-length run validates every 500 steps and a short run still
+        validates once at the end.
+        """
+        train_json, val_json, images_dir = coco
+        result = train_object_detection(
+            out=tmp_path / "det_val_default",
+            data=data_config(train_json, val_json, images_dir),
+            steps=3,
+            batch_size=4,
+            num_workers=0,
+            model_args=model_args(),
+            transform_args=transform_args(),
+        )
+        assert result.steps_run == 3
+        # The default cadence produced real validation metrics and a best
+        # checkpoint picked from them.
+        assert "val_metric/map" in result.best_metrics
+        assert result.best_checkpoint_path and result.best_checkpoint_path.exists()
+
     def test_early_stopping_trainer_args_are_accepted(self, tmp_path, coco):
         train_json, val_json, images_dir = coco
         result = train_object_detection(

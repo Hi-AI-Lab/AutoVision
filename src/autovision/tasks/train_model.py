@@ -68,6 +68,17 @@ class TrainModel(nn.Module):
     def get_task_model(self):
         return self.model
 
+    @property
+    def model_input_spec(self):
+        """The task network's declared input spec (None when undeclared).
+
+        The AMP pre-flight probe, model-info, and export-cost helpers all
+        receive this wrapper rather than the inner TaskNetwork, so the
+        spec must forward — without it the probe silently degrades to
+        "inconclusive" on every family that declares one.
+        """
+        return getattr(self.model, "model_input_spec", None)
+
     def _apply(self, fn, recurse: bool = True):  # type: ignore[override]
         # Keep the EMA copy on the same device as the training model.
         if getattr(self, "ema_model", None) is not None:

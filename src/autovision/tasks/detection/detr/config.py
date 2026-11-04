@@ -651,6 +651,32 @@ class DETRObjectDetectionTrainArgs(TrainModelArgs, PydanticConfig):
     #: float summation order (< 1e-6 fp32 in tests); off by default for
     #: the same run-comparability reason as ``fused_optimizer``.
     criterion_flat_losses: bool = False
+    #: Region-scoped torch.compile of the training criterion. REAL-DATA
+    #: VERDICT (2026-11-05 in-situ A/B, gtrvit-s @ 640px batch 16, live
+    #: 512-image run): eager ``criterion_flat_losses + fused_optimizer``
+    #: holds 0.40-0.45 s/step while compile_regions storms on recompiles
+    #: (step-32 window 17.8 s/step) — on live data this flag is DOMINATED
+    #: by the two eager flags and a startup warning is logged. Real-data
+    #: caveat (measured 2026-11-05, deterministic-shape bench):
+    #: with per-image box counts varying per batch, matched-pair shapes
+    #: change every step. A static compile recompiles per distinct
+    #: signature until the dynamo cache limit trips, then the frame falls
+    #: back to eager — 309 ms/step vs 289 eager (a net LOSS). The wiring
+    #: uses ``dynamic=True``: 275 ms/step (~+5% over eager), but inner
+    #: frames over the data-dependent pair lists (flatten_match_indices)
+    #: still specialize and hit recompile_limit — dynamic marks do not
+    #: survive the eager-matcher tensor boundary. The large region-compile
+    #: gains require STATIC pair shapes: pad targets/matched pairs to a
+    #: dataset-max capacity, then static criterion compile 195 (240 with
+    #: real-like varying content padded to a fixed capacity) / +decoder
+    #: 164 / +encoder 151 / GPU floor 89 ms/step (deterministic-shape
+    #: bench). Matcher stays eager in every configuration (its Triton
+    #: LSAP solve and data-dependent match indices fragment dynamo).
+    #: Criterion and matcher are parameterless and never exported, so
+    #: checkpoint keys and exported weights are unchanged. Compiles
+    #: lazily at the first step; early steps pay dynamo/inductor warmup
+    #: (minutes). Off by default: eager runs stay bit-comparable.
+    compile_regions: bool = False
     #: Instance-segmentation mask branch (GTR seg lineage, design doc 31
     #: §11 S2): point-sampled mask CE + Dice losses and the matcher's
     #: point-sampled mask costs. Requires the task model built with

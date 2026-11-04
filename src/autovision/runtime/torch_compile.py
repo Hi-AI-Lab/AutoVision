@@ -5,6 +5,13 @@ Only ``forward``/``forward_backend`` should be compiled — compiling the
 training step breaks metrics and batch-metadata handling (baseline
 finding). Compilation is disabled by default; enable per run via
 ``torch_compile_args={"disable": False, ...}``.
+
+Wiring note (measured 2026-11-04, RTX 4090, detr/gtrvit-s @ 640px):
+compiling the task network's train forward ran ~10% SLOWER than eager
+(1.40 vs 1.25 s/step) — the eager stack is launch-bound (~64k kernels
+per step) but dynamo graph breaks around the stream-fork encoder and
+guard overhead eat the fusion gain. Keep this helper out of the training
+path until a full-step CUDA-graph capture lands; do not "just enable it".
 """
 
 from __future__ import annotations

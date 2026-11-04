@@ -8,6 +8,74 @@
 
 ## [Unreleased]
 
+### 修复
+
+- **AMP 预检探针（D16）此前从未真正运行**：引擎把 `TrainModel` 包装器传给
+  探针，而 `model_input_spec` 只在内部 TaskNetwork 上（包装器未转发）——
+  所有任务面的探针都以 "inconclusive" 收场且从不给出真判定。修复两层：
+  `TrainModel.model_input_spec` 转发内部网络的声明；探针经
+  `get_task_model()` 解包到真正的网络再前向（包装器的 `forward` 是
+  training_step 契约，喂张量会崩）。探针 autocast dtype 现随请求精度
+  （bf16-mixed 探 bf16，16-mixed 探 fp16），判定对齐实际训练精度。
+- **探针可声明弃权（`amp_probe = "skip"`）**：GTR（GLA 双向扫描）栈的
+  跨路径 logit 方差在随机初始化下已达 ~1.0（CPU 参考与 CUDA Triton 的
+  纯 fp32 对比实测 0.57/0.96，与 autocast "发散"同量级），绝对 atol 探针
+  在该家族上结构性无判别力——连它建议回退的 fp32 路径都"不过关"。DETR
+  （含 gtrvit-* 变体）任务网络声明 `amp_probe = "skip"`，探针返回
+  inconclusive 并保持请求精度，不再据此强制 2 倍慢的 fp32。
+
+### 变更
+
+- **目标检测训练默认开启中间验证**：`trainer_args.val_every_num_steps`
+  未设置时解析为 `min(500, steps)`（显式 0 仍为关闭）。此前裸跑默认
+  12000 步全程零验证、"best" checkpoint 静默等于 "last"；内置 recipe
+  （finetune/coco-finetune/low-data）显式设置不受影响。
+- **非 deterministic CUDA 训练开启 cudnn autotune**：`fit_task` 在
+  CUDA 上且未设 `AUTOVISION_DETERMINISTIC=1` 时启用
+  `cudnn.benchmark`（新增 `engine.enable_cuda_math_modes`，与既有 TF32
+  开关同域）。检测器的固定/少档输入形状下 conv 族受 kernel 发射瓶颈
+  限制，autotune 按 shape 缓存挑选更快的 conv 算法；
+  `AUTOVISION_DETERMINISTIC=1` 保持关闭。
+
+### 性能
+
+- **DETR 家族训练吞吐开关三件套（gtrvit-s @640px batch16 RTX 4090，真机
+  ~1.25 s/step → ~0.54 s/step）**：既有 `criterion_flat_losses`（W2 扁平
+  匹配索引路径）与 `fused_optimizer`（W1）此前默认关闭；新增 opt-in
+  `compile_regions`——matcher 固定 eager（Triton LSAP + 数据依赖索引会
+  碎裂 dynamo），criterion 经 `try_compile` 走 inductor（AOTAutograd
+  连带融合其 backward；criterion/matcher 无参数且不进导出，checkpoint
+  键与导出权重不变）。
+- **真机 A/B 定论（2026-11-05，512 张活数据 120 步）**：纯 eager
+  `criterion_flat_losses + fused_optimizer` 稳态 0.40-0.45 s/step；开启
+  `compile_regions` 触发重编译风暴（step-32 窗口 17.8 s/step），真实数据
+  上被 eager 双 flag 完全压制——`compile_regions` 保持 opt-in 并在启用时
+  打印真实数据警告，冠军真机配置就是两个 eager flag（~2.9x vs 基线
+  1.25 s/step）。静态填充天花板探针（targets 统一填充到 8 框 + 静态
+  编译，内容逐批变化）实测 240 ms/step，比 dynamic 275 好 ~12%——
+  「入口填充 targets + inf 代价 pad 行 matcher + dn/主损失全掩码」的
+  生产改造预估再 +10-15%，之后的墙是 eager backbone（fla/HF）与
+  引擎侧固定开销；0.1 s/step 需要整步 CUDA-graph 级工程。
+- **compile_regions 以 `dynamic=True` 编译（真实数据必要性，实测）**：
+  真实数据每图框数逐批变化 → 匹配对形状逐批变化 → 静态编译图按签名
+  反复重编译，触顶 dynamo cache 后整帧回退 eager——实测 309 ms/step，
+  比 289 的纯 eager 还差；`dynamic=True` 实测 275 ms/step（约 +5%），
+  但 eager matcher 边界传回的匹配对是具体张量，内层
+  flatten_match_indices 帧仍按具体尺寸特化并触顶 recompile_limit——
+  dynamic 标记无法穿越该边界，故真机收益约持平偏正。确定性形状管线（目标填充到固定容量）下静态编译
+  才有大头：criterion 195 / +decoder 164 / +encoder 151 / GPU 下限
+  89 ms/step——真机兑现路线是「目标填充到数据集级最大对容量」（涉及
+  matcher/loss 契约，未在本轮实施）。
+- **真机 vs 台架差距归因（各假设逐一实测排除）**：scale-jitter 形状
+  方差（固定形状真机仍 ~0.50s，排除）；worker 每 epoch 重启（512 张
+  数据集重启频率减半仍 ~0.51s，排除）；增广吞吐（单样本实测 5.7ms，
+  8 worker 下每批 ~12ms，排除）；剩余主因为**逐批目标形状方差**（见上）
+  加上 harness 未覆盖的项（num_classes 2 vs 真实 80 的 criterion 宽度、
+  denoising 组形状随批变化、EMA/引擎侧每步开销）。整网 torch.compile
+  因 fla GLA / HF 外壳 / denoising nonzero 等 graph break 碎裂而无收益
+  （whole/per_module/reduce-overhead 实测 1111/1149/2706 vs eager
+  1169，已记录在 torch_compile.py docstring）。
+
 ## [0.5.0] - 2026-11-04
 
 ### 新增

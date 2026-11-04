@@ -17,10 +17,12 @@ from torch.nn import Linear, Module
 
 from autovision.engine.amp_check import (
     _flatten_outputs,
+    _probe_batch,
     check_amp_support,
     resolve_amp_precision,
 )
 from autovision.tasks.task_model_io import ModelInputSpec, TensorSpec
+from autovision.tasks.train_model import TrainModel
 
 CUDA_LIKE = SimpleNamespace(type="cuda")
 CPU = torch.device("cpu")
@@ -259,3 +261,100 @@ class TestFlattenOutputs:
             {"a": (torch.randn(2), torch.arange(4)), "b": _Out(), "c": None}, out
         )
         assert len(out) == 2
+
+
+class TestTrainModelSpecForwarding:
+    """The TrainModel wrapper must forward ``model_input_spec`` upstream.
+
+    The engine hands the probe the wrapper, not the inner TaskNetwork;
+    without forwarding, every family that declares a spec degrades to an
+    inconclusive probe (observed on detection runs, 2026-11-04).
+    """
+
+    def test_wrapper_forwards_spec_to_the_probe(self) -> None:
+        """A spec'd task model surfaces its spec through the wrapper."""
+        wrapper = TrainModel(task_model=_SpecModel())
+        assert wrapper.model_input_spec is not None
+        assert _probe_batch(wrapper, None) is not None
+
+    def test_wrapper_without_inner_spec_stays_none(self) -> None:
+        """A bare task model keeps the probe-input path unavailable."""
+        wrapper = TrainModel(task_model=Linear(4, 2))
+        assert wrapper.model_input_spec is None
+        assert _probe_batch(wrapper, None) is None
+
+
+class TestProbeUnwrapsTaskModel:
+    """Engine call sites pass the TrainModel wrapper; the probe must
+    forward the inner TaskNetwork, whose ``forward(x: Tensor)`` is the
+    contract the probe actually exercises."""
+
+    def test_wrapper_probe_never_hits_the_training_step(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A tensor input routed to the wrapper forward would crash and
+        fail the probe closed to False; unwrapping keeps the verdict True."""
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        wrapper = TrainModel(task_model=_SpecModel())
+
+        def _must_not_be_called(batch, step):
+            raise AssertionError("probe must not call the wrapper forward")
+
+        wrapper.forward = _must_not_be_called  # type: ignore[assignment]
+        assert check_amp_support(wrapper, device=CUDA_LIKE, batch=None) is True
+
+    def test_bare_network_behavior_is_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Modules without get_task_model keep the previous probe path."""
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        assert (
+            check_amp_support(_SpecModel(), device=CUDA_LIKE, batch=None) is True
+        )
+
+
+class TestAmpProbeAbstentionAndDtype:
+    """Declared probe abstention (amp_probe='skip') and dtype threading."""
+
+    def test_skip_declaration_is_inconclusive_not_unsafe(
+        self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """amp_probe='skip' abstains (None), never downgrades to False."""
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        model = Linear(4, 2)
+        model.amp_probe = "skip"
+        with caplog.at_level(logging.INFO):
+            result = check_amp_support(model, device=CUDA_LIKE, batch=torch.randn(2, 4))
+        assert result is None
+        assert "declined by model declaration" in caplog.text
+
+    def test_skip_declaration_reaches_resolution_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An abstaining probe keeps the requested precision end to end."""
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        model = Linear(4, 2)
+        model.amp_probe = "skip"
+        assert (
+            resolve_amp_precision(model, device=CUDA_LIKE, precision="bf16-mixed")
+            == "bf16-mixed"
+        )
+
+    def test_resolve_threads_the_requested_autocast_dtype(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """bf16-mixed runs probe the bf16 path, not the fp16 default."""
+        captured: list[torch.dtype | None] = []
+        real = check_amp_support
+
+        def _spy(model, **kwargs):
+            captured.append(kwargs.get("dtype"))
+            return real(model, **kwargs)
+
+        monkeypatch.setattr(
+            "autovision.engine.amp_check.check_amp_support", _spy
+        )
+        resolve_amp_precision(
+            Linear(4, 2), device=CUDA_LIKE, precision="bf16-mixed"
+        )
+        assert captured == [torch.bfloat16]

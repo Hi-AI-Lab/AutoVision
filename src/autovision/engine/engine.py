@@ -368,6 +368,23 @@ def seed_everything(seed: int) -> None:
         torch.backends.cudnn.benchmark = False
 
 
+def enable_cuda_math_modes(device: torch.device) -> None:
+    """TF32 tensor cores + cudnn autotuning for non-deterministic CUDA runs.
+
+    Fixed-size detector inputs (scale jitter enumerates a handful of
+    shapes, then the cudnn cache is warm) leave conv-heavy families
+    launch-bound; the autotuner picks faster conv algos per shape.
+    ``AUTOVISION_DETERMINISTIC=1`` keeps the deterministic/safe defaults.
+    """
+    if device.type != "cuda" or Env.DETERMINISTIC.value:
+        return
+    # Ampere+ tensor cores for the fp32 remainder (EMA, optimizer,
+    # non-autocast ops); autocast-covered bf16 ops are unaffected.
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cudnn.benchmark = True
+
+
 def _build_grad_scaler(precision: str, device_type: str) -> Any | None:
     """Loss scaler for ``16-mixed``; bf16/fp32 do not need one.
 
@@ -1445,11 +1462,8 @@ class TaskEngine(Engine):
                     "gradient_checkpointing=True but no checkpointable "
                     "blocks were found; continuing without it."
                 )
-        if device.type == "cuda" and not Env.DETERMINISTIC.value:
-            # Ampere+ tensor cores for the fp32 remainder (EMA, optimizer,
-            # non-autocast ops); autocast-covered bf16 ops are unaffected.
-            torch.backends.cuda.matmul.allow_tf32 = True
-            torch.backends.cudnn.allow_tf32 = True
+        if device.type == "cuda":
+            enable_cuda_math_modes(device)
 
         # ── distributed setup (torchrun) ──
         ddp_train_model: nn.Module = train_model

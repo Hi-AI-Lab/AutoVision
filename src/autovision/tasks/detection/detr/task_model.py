@@ -121,6 +121,13 @@ class DETRObjectDetection(ONNXExportMixin, TaskNetwork):
     )
     #: Export-side postprocess contract marker (see export/postprocess.py).
     postprocess_spec_family = "detr"
+    #: The GLA backbone's Triton bidirectional scan has ~1.0 cross-pathway
+    #: logit variance at init (CPU fallback vs CUDA Triton, fp32-vs-fp32),
+    #: which already exceeds the AMP probe's absolute atol — the probe
+    #: cannot separate autocast breakage from that variance here, so it
+    #: abstains (inconclusive → keep the requested precision) instead of
+    #: forcing a spurious fp32 downgrade. Measured 2026-11-04, gtrvit-s.
+    amp_probe = "skip"
 
     def __init__(
         self,

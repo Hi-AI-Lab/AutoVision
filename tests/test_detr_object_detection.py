@@ -1609,3 +1609,42 @@ class TestFamilyKeyAlias:
 
         names = list_detr_model_names()
         assert names and all(name.startswith("detr/") for name in names)
+
+
+class TestCompileRegions:
+    """Region-scoped criterion compile (opt-in throughput flag)."""
+
+    def test_flag_is_off_by_default(self):
+        from autovision.tasks.detection.detr import (
+            DETRObjectDetectionTrainArgs,
+        )
+
+        args = DETRObjectDetectionTrainArgs(num_classes=2)
+        assert args.compile_regions is False
+
+    def test_compile_regions_train_run(self, tmp_path):
+        """compile_regions=True completes training and pins the matcher
+        eager (its Triton LSAP indices fragment dynamo)."""
+        train_json, val_json, images_dir = make_coco_dataset(tmp_path, num_images=8)
+        result = train_object_detection(
+            out=tmp_path / "detr_compiled",
+            data=data_config(train_json, val_json, images_dir),
+            model="detr/dinov2-vittest-notpretrained",
+            steps=2,
+            batch_size=2,
+            num_workers=0,
+            model_args={
+                "image_size": (56, 56),
+                "num_queries": 10,
+                "num_top_queries": 10,
+                "hidden_dim": 64,
+                "dec_layers": 2,
+                "criterion_flat_losses": True,
+                "fused_optimizer": True,
+                "compile_regions": True,
+            },
+            transform_args=transform_args(),
+            trainer_args={"val_every_num_steps": 2},
+        )
+        assert result.steps_run == 2
+        assert "val_metric/map" in result.best_metrics

@@ -263,6 +263,17 @@ def train_object_detection(
     default_steps = args_cls.default_steps
     steps_resolved = default_steps if steps == "auto" else int(steps)
 
+    # Default intermediate validation (a bare run must not finish with
+    # zero metrics: without a cadence the engine never validates and the
+    # "best" checkpoint silently equals "last"). Explicit values win, and
+    # 0 stays a deliberate opt-out.
+    if trainer_args_resolved.get("val_every_num_steps") is None:
+        trainer_args_resolved["val_every_num_steps"] = min(500, max(1, steps_resolved))
+        logger.info(
+            "trainer_args.val_every_num_steps unset; validating every %d steps.",
+            trainer_args_resolved["val_every_num_steps"],
+        )
+
     # 5. datasets (mmap-managed) — built without transforms first so the
     # loader length is known for the step-window resolution.
     num_devices = common_helpers.resolve_num_devices(devices)

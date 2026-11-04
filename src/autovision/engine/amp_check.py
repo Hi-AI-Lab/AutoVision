@@ -52,6 +52,20 @@ def _model_device(model: Module) -> torch.device:
     return parameter.device if parameter is not None else torch.device("cpu")
 
 
+def _unwrap_task_model(model: Module) -> Module:
+    """The network the probe must actually forward.
+
+    Engine call sites pass the TrainModel wrapper, whose ``forward`` is
+    the training_step contract (batch dict + step index). The probe feeds
+    a plain ``forward(x: Tensor)`` — only the inner TaskNetwork accepts
+    that, so probing the wrapper directly would crash and fail the run
+    closed into fp32 on every family.
+    """
+    getter = getattr(model, "get_task_model", None)
+    task_model = getter() if callable(getter) else model
+    return task_model if isinstance(task_model, Module) else model
+
+
 def _probe_batch(
     model: Module, batch: torch.Tensor | None
 ) -> torch.Tensor | None:
@@ -81,25 +95,33 @@ def check_amp_support(
     device: torch.device,
     batch: torch.Tensor | None = None,
     atol: float = 0.5,
+    dtype: torch.dtype | None = None,
 ) -> bool | None:
     """Probe whether autocast outputs track fp32 on this device/model.
 
     Args:
-        model: The module that will actually train (probe its own weights).
+        model: The module that will actually train — the TrainModel
+            wrapper or the bare TaskNetwork (the probe unwraps via
+            ``get_task_model`` when present).
         device: Target training device; non-CUDA/NPU devices return False.
             The forward itself runs on the model's current weights device.
         batch: Optional probe input; defaults to the model's declared
             ``model_input_spec`` example tensor.
         atol: Absolute tolerance of the fp32-vs-autocast comparison.
+        dtype: Autocast dtype under test; defaults to float16. Callers
+            training in bf16-mixed must pass bfloat16 so the verdict is
+            made about the dtype actually trained with.
 
     Returns:
         True when autocast is safe, False when it is demonstrably unsafe
         (CPU/MPS, divergent outputs, probe exceptions), and ``None`` when
-        the probe is INCONCLUSIVE — no probe inputs available, in which
-        case the caller should keep the requested precision instead of
-        silently downgrading. The probe runs in eval mode (previous mode
-        restored); train-mode dropout noise would otherwise fail the
-        comparison spuriously.
+        the probe is INCONCLUSIVE — no probe inputs available, or the
+        model declared itself probe-incompatible (``amp_probe = "skip"``;
+        a stack whose cross-pathway variance already exceeds ``atol``
+        makes the comparison uninformative) — in which case the caller
+        keeps the requested precision instead of silently downgrading.
+        The probe runs in eval mode (previous mode restored); train-mode
+        dropout noise would otherwise fail the comparison spuriously.
     """
     if device.type not in ("cuda", "npu"):
         logger.info(
@@ -112,7 +134,14 @@ def check_amp_support(
         device = torch.device(device.type)
     if not any(p.is_floating_point() for p in model.parameters()):
         return False
-    inputs = _probe_batch(model, batch)
+    probe_model = _unwrap_task_model(model)
+    if getattr(probe_model, "amp_probe", None) == "skip":
+        logger.info(
+            "AMP probe declined by model declaration (amp_probe='skip'); "
+            "keeping the requested precision."
+        )
+        return None
+    inputs = _probe_batch(probe_model, batch)
     if inputs is None:
         logger.warning(
             "AMP probe inconclusive: no probe inputs (pass batch= or give "
@@ -131,13 +160,14 @@ def check_amp_support(
         )
         return False
 
-    was_training = model.training
-    model.eval()
+    was_training = probe_model.training
+    probe_model.eval()
+    autocast_dtype = dtype if dtype is not None else torch.float16
     try:
         with torch.no_grad():
-            fp32_outputs = model(inputs)
-            with torch.autocast(device_type=device.type, dtype=torch.float16):
-                amp_outputs = model(inputs)
+            fp32_outputs = probe_model(inputs)
+            with torch.autocast(device_type=device.type, dtype=autocast_dtype):
+                amp_outputs = probe_model(inputs)
     except Exception as exc:  # noqa: BLE001 - any probe failure is soft
         logger.warning(
             "AMP probe raised %s: %s; falling back to fp32.",
@@ -146,7 +176,7 @@ def check_amp_support(
         )
         return False
     finally:
-        model.train(was_training)
+        probe_model.train(was_training)
 
     fp32_tensors: list[torch.Tensor] = []
     amp_tensors: list[torch.Tensor] = []
@@ -211,7 +241,11 @@ def resolve_amp_precision(
         return "32-true"
     if not amp_check:
         return precision
-    supported = check_amp_support(model, device=device)
+    supported = check_amp_support(
+        model,
+        device=device,
+        dtype=torch.bfloat16 if precision == "bf16-mixed" else torch.float16,
+    )
     if (
         torch.distributed.is_available()
         and torch.distributed.is_initialized()

@@ -374,6 +374,41 @@ class DETRObjectDetectionTrain(TrainModel):
             )
         else:
             self.criterion = RTDETRCriterionV2(self.matcher)
+        if model_args.compile_regions:
+            # Real-data guard (2026-11-05 A/B): on live data with varying
+            # per-image box counts this flag is a net loss — dynamo
+            # recompiles per shape signature until the cache limit trips
+            # (recompile storms: step-32 window at 17.8 s/step vs 0.40-0.45
+            # eager flat+fused). It pays only on deterministic-shape
+            # pipelines. Config docstring carries the full ladder.
+            logger.warning(
+                "compile_regions=True on live data is dominated by eager "
+                "criterion_flat_losses+fused_optimizer (recompile storms); "
+                "it is intended for deterministic-shape pipelines (targets "
+                "padded to a fixed per-image capacity)."
+            )
+            # Region-scoped torch.compile (config docstring has the
+            # measurements): fuse the criterion and its backward under
+            # inductor; the matcher is pinned eager because its Triton
+            # LSAP solve and data-dependent match indices fragment dynamo.
+            # dynamic=True keeps real-data runs at ~break-even (275 vs
+            # 289 ms/step) instead of the static-compile fallback (309);
+            # inner frames over the data-dependent pair lists still hit
+            # recompile_limit — see the config docstring for the static
+            # padding roadmap that unlocks the large compile gains.
+            # Scope note: only the criterion is wired here — the decoder
+            # and encoder are trainable submodules whose compiled wrappers
+            # would shift checkpoint keys and trace under export; their
+            # recipe lives in the config docstring until an export-safe
+            # un-compile story exists.
+            from autovision.runtime.torch_compile import TorchCompileArgs, try_compile
+
+            self.matcher.forward = torch._dynamo.disable(self.matcher.forward)
+            self.criterion.forward = try_compile(
+                self.criterion.forward,
+                "detr_criterion",
+                TorchCompileArgs(disable=False, dynamic=True),
+            )
         self.categories: dict[int, str] = {}
         self._max_dets = model_args.eval_max_dets
         self._evaluators: dict[str, COCOMAPEvaluator] = {}
