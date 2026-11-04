@@ -8,8 +8,59 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-04
+
 ### 新增
 
+- **任务示例的 ONNX 导出与推理闭环**：全部 8 个训练示例新增
+  `--export-onnx PATH`（走 `autovision-cli export` 同一 parity 门禁管线，
+  分类/全景在 CPU 即可，GTR 族经导出安全 GLA 降级无需 CUDA），训练结束
+  自动导出并在摘要打印工件路径；全部 8 个推理示例新增 `--onnx PATH`——
+  前向换 ONNX session（任意设备可用）、前/后处理留在 torch 网络，
+  工件元数据（几何/类别数）与构造网络不一致时一行干净退出；`--onnx`
+  同时跳过发布 checkpoint 下载与 eager-only CUDA 要求（网络仅作
+  前/后处理，随机初始化即可）。examples README 记录完整
+  训练→导出→ONNX 推理走查；工件与网络几何不匹配属 fail-closed 设计
+  （导出 demo 是 128px、发布网络是 640px 时会明确报错并给出指引）。
+  实测八族全部闭环（detection/OBB/instance/pose/depth/semantic GTR +
+  panoptic EOMT + classification），eager vs ONNX 对拍一致（检测框
+  IoU>0.5 全匹配、分数差 ~1e-5；近平局候选的 top-k 行序互换与
+  `docs/known_limits.md` 记录的 decode 行为一致）。
+
+- **训练自愈：NaN/Inf 回滚恢复（第三轮 D32）**：预训练 `Engine.fit` 与
+  `TaskEngine.fit_task` 遇非有限 loss（或非 AMP 路径的非有限梯度范数）不再
+  直接失败——回滚到 `last.ckpt`（model/optimizer/scheduler/scaler/RNG，
+  task 面另含 EMA/best_metric/早停计数）并从中断处重跑；DDP 下 step 级
+  4 字节判定 all_reduce / epoch 末判定屏障使全体 rank 一致进入恢复；
+  连续 3 次失败硬失败并附 last.ckpt 路径与次数，预算在干净窗口后复位；
+  回滚加载前逐张量校验 checkpoint 有限性（中毒文件拒载）。恢复默认开启；
+  数据性 NaN 在恢复的 RNG 下必然复现并按预算失败，瞬时毛刺则恢复成功。
+- **EMA 中毒修复（D33）**：`ModelEMA.repair_from` 在写 checkpoint 前把
+  非有限 EMA 张量从 live 权重重同步（EMA 是滑动平均，单点 NaN 永久污染，
+  此前会原样进入 fp32 checkpoint）；经 `get_task_model()` 解析对齐键空间；
+  FSDP 下跳过（live 分片不可逐张量对照，记录偏差）。
+- **条件性显存清理与 checkpoint 写入重试（D34）**：验证边界改为仅在
+  缓存分配器 reserved 占比超阈值（0.5）时 `empty_cache`（MPS 恒清、CPU
+  不清、占用查询失败退化为恒清——饱和卡行为与此前逐位一致，小模型不再
+  支付全量 cudaFree 往返）；checkpoint 原子写新增 3 次指数退避重试
+  （杀毒扫描/设备 flush 类瞬时 OSError），每次重试全新临时文件，耗尽后
+  `CheckpointError` 且旧文件完好。
+- **活流捕获契约（D35）**：`VideoFrameStream` 新增 `reconnect_attempts`/
+  `reconnect_delay_s`（默认 0 = 既有"断流即结束"语义不变）：非文件源读
+  失败时重开 capture，帧序号延续，重开失败计入次数；本地文件短读仍视为
+  截断报错。`info.fps` 消毒：原始值不在 (0, 1000) 开区间（0/NaN/90kHz
+  RTP 时钟）记 0（下游既有默认分支覆盖）。`run_stream` 同名透传
+  （CLI `key=value` 壳自动可达）。
+ - **NSA-Kalman 置信度缩放（D36，opt-in）**：`BYTETracker`/
+  `BOTSORT` 新增 `confidence_scaling=False` 参数——启用后 Kalman 观测
+  噪声按 `max(1 - score, 0.05)` 缩放（StrongSORT NSA），高置信检测更强
+  地牵引状态；默认关闭，ByteTrack 官方固定噪声数值逐位不变（golden
+  生命周期快照锚定）。
+- **断流重连可观测（D35 加固）**：`VideoFrameStream` 新增
+  `reconnects_used`（最近一次迭代消费的重连次数），`run_stream` 透传到
+  `StreamRunResult.reconnects` 并在非零时进入 CLI 摘要行——中途断过流
+  （或重连耗尽后提前结束）的运行不再与「干净 EOF」在结果对象上不可
+  区分，7×24 监控可据此告警。
 - **周期存档与 checkpoint 序列化卫生（设计提案 D20）**：预训练
   `Engine.fit` 新增 `save_period_num_epochs`——命中周期时单次序列化、
   原子写 last + `epoch{N}.ckpt` 双份并滚动保留最近 3 份；所有 checkpoint
@@ -120,6 +171,79 @@
 
 ### 修复
 
+- **评审加固（D32–D36 收尾）**：自审查发现的六处边界收口。
+  - **回滚读侧校验扩展到 engine_state**：`_assert_state_dict_finite` 改为
+    递归遍历整个载荷——NaN 藏在 optimizer moments / EMA sidecar /
+    `best_metric` 标量里（权重本身干净）时，恢复同样拒载，不再静默装回
+    毒状态；RNG 字节张量与整型状态不受影响。
+  - **NaN 恢复预算改为干净 step 复位**：`TaskEngine` 此前只在干净验证后
+    复位预算，无验证集的运行三次预算全程共享；现按干净 step 复位（数据性
+    NaN 在回放中必然连续复现、预算照常耗尽，与「预算在干净窗口后复位」
+    的既有表述一致），预训练面的每干净 epoch 复位不变。
+  - **首个验证评估不再接受非有限基线**：`best_metric is None` 分支此前
+    无条件 `improved=True`，NaN 指标会成为基线并冻结整个 best 跟踪、
+    写出 NaN `best.ckpt`；现要求 `isfinite(watch_value)`。
+  - **验证 loss 非有限逐次告警**：验证侧 NaN 是测量故障（训练窗口已逐步
+    校验），不触发回滚（重放只会复现它并丢弃干净训练进度），按既有早停
+    节奏计入 no-improve；此前完全静默。
+  - **恢复日志标注 NaN 来源**：DDP 下远端 rank 中毒时，本地 rank 的恢复
+    日志此前仍打 "Non-finite loss at step N"——现区分「detected on this
+    rank / reported by a peer rank」，干净 rank 排障不再被引向不存在的
+    本地 NaN。
+  - **示例摘要防御 + EMA 快路径 + mypy 清零**：`summarize_prediction`
+    对 labels/scores 为 None 的记录退化为 outputs 摘要而非 `list(None)`
+    TypeError；`ModelEMA.repair_from` 用单次堆叠 amax 归约替代每张量
+    device 同步（健康 EMA 的每次 checkpoint 写入只付一次同步）；
+    `byte_track.py` 存量 13 个 mypy 错误清零（`_std` 参数收窄、
+    `_STrack.update` 调用点显式 float/int、`Track.bbox` 经 `_xyxy_tuple`
+    精确四元组、`classes_array` 注解），`VideoFrameStream.__iter__` 注解
+    修正为真实的 `Generator` 类型（stream.py 消费 `.close()` 的存量
+    mypy 错误一并消除）。
+- **GTR 实例分割导出无法重载（`--predict-image` 崩溃）**：GTR seg 是
+  `DETRObjectDetection` 子类，导出载荷携带的是 DETR 父层展平的
+  init-args——重载时任务级 model key 盖写的 `model_name` 与本类硬编码
+  转发的 `model_name`/`decoder` 重复传参直接 `TypeError`，且载荷缺
+  `variant`（重载会按默认 "s" 重建几何导致 state dict 形状不匹配）。
+  子类现在剥离 stamp 键并在 init-args 记录 `variant`；加载端
+  （`load_task_model`）同时确立契约：重载从不取外部权重——载荷缺省时
+  对暴露 `load_checkpoint` 形参的类强制 `False`（此前 GTR 五族导出的
+  重载都会再下载官方权重再被训练权重覆盖，离线直接失败）。新增
+  `tests/test_gtr_seg.py` 导出回环回归测试。
+- **任务示例脚本（examples/tasks）的错误路径改为可操作退出**：GTR 推理
+  示例在显式 `--device cpu` 下不再落入 fla 的 Triton 深栈崩溃
+  （`Pointer argument cannot be accessed from Triton`）——`gtr_requirement`
+  新增 `device` 参数校验解析后的设备选择（而非仅机器能力），一行给出
+  CUDA/`--onnx` 替代方案；`--weights` 加载的 checkpoint 若属 GTR 家族
+  （导出元数据无家族标记，按加载后网络的模块树内省识别）同样在首个
+  `predict` 前被干净拒绝，六个推理示例统一接入
+  （`gtr_eager_device_guard`）；`*_train.py` 重复运行且 `--out` 已存在时
+  捕获 `get_out_dir` 的 `ValueError`，打印指向 `--overwrite` 的一行提示
+  而非裸 traceback（新增 `ensure_out_available` 助手，8 个训练示例统一接入）。
+  `detection.py` 补齐兄弟示例都有的 `--class-names`（导出 checkpoint 不携带
+  类名，此前只能渲染裸类别 id）；`detection_train.py` 的 `lr_warmup_steps`
+  钳制到 `--steps`（此前 `--steps 1` 冒烟跑 warmup 长于全程、唯一一步只到
+  峰值 LR 的 25%）；示例输出改为任务感知摘要（`summarize_prediction`）——
+  分类打 `top1 = <类> (分数)`、全景打 `segments = N`、语义/深度描述稠密图
+  尺寸（此前一律按检测措辞 `detections = 1` / `n/a (image-level output)`），
+  训练 `--predict-image` 保留其加长版零检出提示；忽略 `--num-classes` 的
+  5 个训练示例（detection/OBB/pose/depth/panoptic）改为在误传该参数时
+  一行退出说明适用范围，而非静默无效。
+- **engine.py 类型注解修复（mypy 归零）**：`np.random.get_state()` 返回值
+  按 numpy 桩类型与运行时元组的差异显式标注 `Any`（状态字节不变）；
+  LR schedule 的两个分支与验证触发改用 `is not None` 显式收窄（运行时
+  语义不变），`TaskEngine.fit_task` 的 best-metric 首评/提升分支同步消除
+  Optional 算术报错。此前该模块累计 9 个 mypy 错误，现全部消除。
+- **fit 日志语义**：best-metric 行区分首次评估与后续提升——首评打
+  `baseline set to`（此前 2 步冒烟跑会打出误导性的
+  `improved to 0.0000`），其后仍为 `improved to`；LR schedule 行只列
+  非空阶段（冒烟跑此前打出退化的
+  `warmup 2 → flat until 2 → cosine until 2 → tail to 2`），tail 相位
+  正确标注保持 `min_factor × peak`（旧文案的 "at peak LR" 与实现不符）。
+- **存档期 `last.ckpt` 元数据 epoch 改为 0-based（D20 修正，随 D32 生效）**：
+  save_period 存档路径此前把 `last.ckpt` 的元数据 epoch 写成 1-based（与
+  `epoch{N}.ckpt` 文件名对齐），而 resume 约定是"元数据 +1"——存档期之后
+  resume（以及新的 D32 回滚）会静默跳过一个 epoch。现统一为元数据 0-based，
+  仅存档文件名保持 1-based；含跨存档边界回归测试。
 - **GTR 路线的 OpenVINO 导出不再在 parity 门禁崩溃**：OpenVINO 参考被强制
   deepcopy 到 CPU，而 eager GLA 是 fla 的 CUDA-only Triton 核——五条 GTR
   路线（det/obb/pose/depth/semseg）在 `verify=True`（默认）下 IR 转换成功后
@@ -173,8 +297,23 @@
   `.network`；`examples/tasks/detection.py` 新增 `--onnx <artifact>`
   直跑导出工件（`gtr_requirement` 相应增加 `need_cuda` 开关）。
 
+### 文档
+
+- **移除设计提案 `docs/design_ultralytics_adoption.md`**（D1–D36 的内部<!-- docpath-ok -->
+  论证文档，从未随版本发布）：退出 MkDocs nav 并删除文件，全文保留于
+  git 历史（提交 63fe135）。D 编号继续作为设计词汇在 CHANGELOG、
+  `docs/framework_design.md` 与溯源台账中使用；`docs/provenance/LEDGER.md`
+  的净室声明改为指向 git 历史，四处源码注释的设计引用统一收敛到
+  「裸 D 编号 + 台账指针」惯例。
+
 ### 已知边界（文档）
 
+- **fla 版本横幅与导出家族元数据**：`docs/known_limits.md` 新增两条说明——
+  fla 在 Python < 3.11 / Triton < 3.3 导入时打印的升级建议 WARNING 来自
+  `fla.utils.check_environments()`（第三方包的环境建议，Triton 提示为真实
+  风险信号，勿静默）；导出的 `.pt` 不携带模型家族元数据，示例层对
+  `--weights` 的 GTR-on-CPU 预检基于加载后网络的模块树内省，属示例护栏
+  而非格式契约。
 - **TensorRT 版本边界**：GTR 展开纯图的 fp32 引擎在 TensorRT 11.4
   （11.4.0.106，RTX 4090D 实测，det 与 depth 双路线确认）构建成功但引擎
   数值错误（输出系统性偏离 torch/onnxruntime 参考）——疑似 Myelin 对
