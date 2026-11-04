@@ -16,6 +16,9 @@ Every example:
 - prints the checkpoint, exported model, validation metrics and class map;
 - can render one prediction with `--predict-image` and copy the exported
   `.pt` with `--export`;
+- can export the trained model to ONNX with `--export-onnx PATH`
+  (parity-gated) and serve that artifact on any device through the
+  inference scripts' `--onnx PATH`;
 - supports `--dry-run`, which only writes/prints the demo data config.
 
 ## Install
@@ -48,6 +51,15 @@ python examples/tasks/instance_segmentation_train.py --dry-run
 # After training, render one image and copy the exported model
 python examples/tasks/semantic_segmentation_train.py --steps 2 \
     --predict-image path/to/image.png --export runs/semantic.pt
+
+# ONNX round trip: export the trained model (parity-gated), then serve it
+# on any device — the forward runs in the ONNX session, pre/post stay in
+# the torch network, so a CPU-only machine can serve GTR artifacts
+python examples/tasks/classification_train.py --steps 2 \
+    --export-onnx runs/classification.onnx
+python examples/tasks/classification.py \
+    --weights runs/examples/classification_train/exported_models/exported_last.pt \
+    --onnx runs/classification.onnx
 ```
 
 `inference_demo.py` is a compatibility alias for `detection.py`. All inference
@@ -84,11 +96,17 @@ Apache-2.0 core.
 |---|---|
 | `--image PATH` | input image (default: bundled `assets/airport_aerial.jpg`) |
 | `--weights PATH` | exported `.pt` from `<task>_train.py` |
+| `--onnx PATH` | exported `.onnx` artifact: run the forward through it (any device; network supplies pre/post only) |
 | `--class-names PATH` | optional JSON `{class_id: name}` for exported checkpoints |
 | `--threshold F` | score threshold (default: 0.3) |
 | `--device auto\|cpu\|cuda` | inference device |
 | `--out DIR` | output directory (default: `runs/examples/<task>`) |
 
+The ONNX artifact must match the constructed network (image size, class
+count — the loader verifies the artifact's embedded metadata and exits with
+a one-line error otherwise). Exported-demo artifacts match the
+`--weights` networks trained with the same defaults; serving them against
+a released-checkpoint network (different geometry) exits with the mismatch.
 Detection additionally accepts `--model KEY` (default `detr/gtrvit-s`;
 pass `rfdetr/rf-detr-nano` for a CPU-friendly released checkpoint) and the
 GTR tasks accept `--checkpoint NAME` / `--variant s|m|l|x` (official MIT
@@ -109,6 +127,7 @@ require `--weights`.
 | `--dry-run` | write/print the demo data config; no training |
 | `--predict-image PATH` | run the exported model and save `prediction.png` |
 | `--export PATH` | copy the exported `.pt` (ONNX/TRT via `autovision-cli export`) |
+| `--export-onnx PATH` | also export to ONNX (parity-gated; pair with `<task>.py --onnx`) |
 | `--threshold F` | prediction threshold (default 0.3) |
 
 ## Task matrix

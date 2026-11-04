@@ -89,6 +89,83 @@ class TestGtrSegLoad:
             )
             assert net.variant == variant
 
+    @requires_fla
+    def test_export_round_trip_reloads_without_official_fetch(
+        self, tmp_path: Path
+    ) -> None:
+        """The train-entry payload (stamped model key) reloads cleanly.
+
+        The export round trip must not crash on the stamped task-level
+        ``model_name`` (DETR derives its own from the variant), must keep
+        the variant for geometry reconstruction, and must not re-fetch the
+        official checkpoint — the trained state rides in the payload.
+        """
+        from autovision.tasks.instance_segmentation.gtr import (
+            GTRSegObjectDetection,
+        )
+        from autovision.tasks.task_model_helpers import load_task_model
+
+        network = GTRSegObjectDetection(
+            num_classes=2,
+            variant="s",
+            image_size=(128, 128),
+            num_queries=10,
+            num_top_queries=10,
+            num_denoising=0,
+            load_checkpoint=False,
+        )
+        payload = {
+            "schema_version": 1,
+            "kind": "task_model",
+            "model_class_path": network.class_path,
+            "model_init_args": {**network.init_args, "model_name": "gtr/s"},
+            "train_model": network.state_dict(),
+            "normalize_args": None,
+        }
+        path = tmp_path / "exported_last.pt"
+        torch.save(payload, path)
+        reloaded = load_task_model(path, device="cpu")
+        assert type(reloaded) is GTRSegObjectDetection
+        assert reloaded.variant == "s"
+        assert reloaded.image_size == (128, 128)
+        assert reloaded.load_report is None
+
+    @requires_fla
+    def test_round_trip_survives_a_non_gtr_model_name_stamp(
+        self, tmp_path: Path
+    ) -> None:
+        """Any train-level key stamped as model_name is dropped on reload."""
+        from autovision.tasks.instance_segmentation.gtr import (
+            GTRSegObjectDetection,
+        )
+        from autovision.tasks.task_model_helpers import load_task_model
+
+        network = GTRSegObjectDetection(
+            num_classes=2,
+            variant="s",
+            image_size=(128, 128),
+            num_queries=10,
+            num_top_queries=10,
+            num_denoising=0,
+            load_checkpoint=False,
+        )
+        payload = {
+            "schema_version": 1,
+            "kind": "task_model",
+            "model_class_path": network.class_path,
+            "model_init_args": {
+                **network.init_args,
+                "model_name": "gtr/m",
+            },
+            "train_model": network.state_dict(),
+            "normalize_args": None,
+        }
+        path = tmp_path / "exported_last.pt"
+        torch.save(payload, path)
+        reloaded = load_task_model(path, device="cpu")
+        assert type(reloaded) is GTRSegObjectDetection
+        assert reloaded.variant == "s"
+
     @requires_gla
     @pytest.mark.parametrize("variant", ["m", "l", "x"])
     def test_variant_official_checkpoint_loads_completely(self, variant):

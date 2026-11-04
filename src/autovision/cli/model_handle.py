@@ -51,7 +51,7 @@ __all__ = [
 
 # Setup keys of the handle-cached InferenceEngine: any change rebuilds the
 # engine, everything else (threshold, ...) is a per-call runtime parameter.
-# Design doc D15 (docs/design_ultralytics_adoption.md §4.15).
+# Design D15 (lineage: docs/provenance/LEDGER.md).
 _ENGINE_SETUP_KEYS: tuple[str, ...] = (
     "backend",
     "artifact",

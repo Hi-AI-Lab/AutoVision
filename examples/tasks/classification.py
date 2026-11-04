@@ -8,9 +8,14 @@ from ``classification_train.py`` and optionally a class-name JSON:
     python examples/tasks/classification.py \
         --weights runs/examples/classification_train/exported_models/exported_last.pt \
         --class-names class_names.json
+``--onnx`` runs the forward through an ONNX artifact exported from
+the trained checkpoint (any device; pair with the same ``--weights``
+so the network can supply pre/post-processing).
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 from _common import (
     build_inference_parser,
@@ -27,6 +32,16 @@ def main() -> None:
         "Image classification inference (exported .pt)",
         default_out="runs/examples/classification",
     )
+    parser.add_argument(
+        "--onnx",
+        type=Path,
+        default=None,
+        help=(
+            "exported .onnx artifact: run the forward through it (any "
+            "device; still needs --weights for the pre/post-processing "
+            "network)"
+        ),
+    )
     args = parser.parse_args()
 
     if args.weights is None:
@@ -35,7 +50,8 @@ def main() -> None:
             "`python examples/tasks/classification_train.py` and pass "
             "--weights .../exported_models/exported_last.pt."
         )
-    model = autovision.load_model(args.weights, device=resolve_device(args.device))
+    device = "cpu" if args.onnx is not None else resolve_device(args.device)
+    model = autovision.load_model(args.weights, device=device)
     names = load_class_names(args.class_names)
     predict_and_annotate(model, args, names, title="classification")
 

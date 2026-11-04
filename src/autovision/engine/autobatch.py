@@ -16,8 +16,8 @@ measurement loop is a thin, GPU-only shell around it.
 
 CLI integration note: ``batch_size="auto"`` is wired per task surface
 (each task supplies its own ``step_fn`` closure); until a surface wires
-it, callers pass an explicit batch size. See
-docs/design_ultralytics_adoption.md §4.4.
+it, callers pass an explicit batch size. See design D4
+(docs/provenance/LEDGER.md).
 """
 
 from __future__ import annotations

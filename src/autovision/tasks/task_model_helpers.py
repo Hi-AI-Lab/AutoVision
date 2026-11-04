@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import logging
 import pickle
 import re
@@ -261,6 +262,15 @@ def load_task_model(
     init_args.pop("load_weights", None)
     if isinstance(init_args.get("model_name"), str):
         init_args["model_name"] = _migrate_family_key(init_args["model_name"])
+    # A reload never fetches external weights: the trained state rides in
+    # the payload and overwrites anything a constructor preloads. GTR task
+    # models default load_checkpoint=True (official assets), so the round
+    # trip disables that when the class exposes the flag.
+    init_args.pop("checkpoint", None)
+    if "load_checkpoint" in inspect.signature(model_class).parameters:
+        init_args["load_checkpoint"] = False
+    else:
+        init_args.pop("load_checkpoint", None)
     model = model_class(**init_args)
     normalize_args = checkpoint.get("normalize_args")
     if normalize_args:

@@ -425,9 +425,12 @@ class TestSavePeriodArchive:
         # Epochs 2 and 4 hit the period; retention keeps the newest 2.
         assert archives == ["epoch2.ckpt", "epoch4.ckpt"]
         archived = Checkpoint.from_path(checkpoints / "epoch4.ckpt")
-        assert archived.autovision.epoch == 4  # 1-based, matches the name
+        # Metadata epochs are 0-BASED everywhere (the resume/rollback
+        # convention adds 1); only the epoch{N}.ckpt filename is 1-based.
+        assert archived.autovision.epoch == 3
         # On archive epochs last.ckpt shares the archive payload (the D20
-        # single-serialize multi-write point).
+        # single-serialize multi-write point) — so a resume/rollback from
+        # last.ckpt lands on the next epoch, never skipping one.
         last = Checkpoint.from_path(checkpoints / "last.ckpt")
         assert last.autovision.epoch == archived.autovision.epoch
 

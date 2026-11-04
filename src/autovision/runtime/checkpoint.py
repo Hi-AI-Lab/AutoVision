@@ -22,6 +22,8 @@ import glob
 import logging
 import os
 import tempfile
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,6 +41,60 @@ __all__ = ["CHECKPOINT_AUTOVISION_KEY", "Checkpoint", "CheckpointMetadata"]
 logger = logging.getLogger("autovision.runtime.checkpoint")
 
 CHECKPOINT_AUTOVISION_KEY = "autovision"
+
+#: D34: ``torch.save`` (and plain file IO underneath) can fail transiently
+#: (antivirus scans, device flushes on network mounts); the atomic write is
+#: retried with exponential backoff before the failure is declared fatal.
+#: Module-level so tests can collapse the delays.
+_SAVE_RETRY_ATTEMPTS = 3
+_SAVE_RETRY_BASE_DELAY_S = 0.5
+
+
+def _write_atomic(path: Path, payload_writer: Callable[[Path], None]) -> None:
+    """Atomic write with bounded transient-failure retry (design D34).
+
+    ``payload_writer(tmp_path)`` writes the payload into the given temp
+    file. Every attempt gets a fresh temp file, the rename publishes only a
+    fully fsynced file, and a failed attempt leaves the previous checkpoint
+    intact — so a retry never turns a transient fault into corruption.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Hygiene first: temp files orphaned by a crashed writer (SIGKILL,
+    # power loss) are swept before this run starts writing. The age
+    # guard keeps concurrent in-flight writers safe; the name is
+    # glob-escaped so metacharacters in the filename cannot break it.
+    sweep_stale_temp_files(path.parent, f".{glob.escape(path.name)}.*.tmp")
+    last_error: OSError | None = None
+    for attempt in range(1, _SAVE_RETRY_ATTEMPTS + 1):
+        # Unique temp name: two resumed jobs / HPO trials sharing a path
+        # must not interleave writes into one ``.tmp`` file.
+        descriptor, temp_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+        )
+        os.close(descriptor)
+        tmp_path = Path(temp_name)
+        try:
+            payload_writer(tmp_path)
+            with tmp_path.open("rb") as handle:
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, path)
+            _fsync_directory(path.parent)
+            return
+        except OSError as error:
+            last_error = error
+            logger.warning(
+                "Checkpoint write to '%s' failed (attempt %d/%d): %s",
+                path, attempt, _SAVE_RETRY_ATTEMPTS, error,
+            )
+            if attempt < _SAVE_RETRY_ATTEMPTS:
+                time.sleep(_SAVE_RETRY_BASE_DELAY_S * 2 ** (attempt - 1))
+        finally:
+            tmp_path.unlink(missing_ok=True)
+    # Disk full / quota / I/O failure after every retry: fail loud but keep
+    # the previous checkpoint intact.
+    raise CheckpointError(
+        f"Failed to save checkpoint '{path}': {last_error}"
+    ) from last_error
 
 
 @dataclass
@@ -77,39 +133,16 @@ class Checkpoint:
 
     def save(self, path: Path | str) -> None:
         path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # Hygiene first: temp files orphaned by a crashed writer (SIGKILL,
-        # power loss) are swept before this run starts writing. The age
-        # guard keeps concurrent in-flight writers safe; the name is
-        # glob-escaped so metacharacters in the filename cannot break it.
-        sweep_stale_temp_files(path.parent, f".{glob.escape(path.name)}.*.tmp")
-        # Unique temp name: two resumed jobs / HPO trials sharing a path must
-        # not interleave writes into one ``.tmp`` file.
-        descriptor, temp_name = tempfile.mkstemp(
-            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-        )
-        os.close(descriptor)
-        tmp_path = Path(temp_name)
-        try:
-            torch.save(
+        _write_atomic(
+            path,
+            lambda tmp: torch.save(
                 {
                     "state_dict": self.state_dict,
                     CHECKPOINT_AUTOVISION_KEY: self.autovision.to_dict(),
                 },
-                tmp_path,
-            )
-            with tmp_path.open("rb") as handle:
-                os.fsync(handle.fileno())
-            os.replace(tmp_path, path)
-            _fsync_directory(path.parent)
-        except OSError as error:
-            # Disk full / quota / I/O failure: fail loud but keep the
-            # previous checkpoint intact (the temp file is cleaned below).
-            raise CheckpointError(
-                f"Failed to save checkpoint '{path}': {error}"
-            ) from error
-        finally:
-            tmp_path.unlink(missing_ok=True)
+                tmp,
+            ),
+        )
 
     def serialize(self) -> bytes:
         """Full checkpoint payload as bytes (single ``torch.save``, D20).
@@ -136,30 +169,19 @@ class Checkpoint:
         """Atomically write a payload produced by :meth:`serialize`.
 
         Same durability discipline as :meth:`save` (stale-tmp sweep, temp
-        file, fsync, rename, directory fsync) so archives written from a
-        shared payload are exactly as crash-safe as streamed saves.
+        file, fsync, rename, directory fsync, transient-write retry) so
+        archives written from a shared payload are exactly as crash-safe as
+        streamed saves.
         """
         path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        sweep_stale_temp_files(path.parent, f".{glob.escape(path.name)}.*.tmp")
-        descriptor, temp_name = tempfile.mkstemp(
-            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-        )
-        os.close(descriptor)
-        tmp_path = Path(temp_name)
-        try:
-            with tmp_path.open("wb") as handle:
+
+        def _write(tmp: Path) -> None:
+            with tmp.open("wb") as handle:
                 handle.write(payload)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(tmp_path, path)
-            _fsync_directory(path.parent)
-        except OSError as error:
-            raise CheckpointError(
-                f"Failed to save checkpoint '{path}': {error}"
-            ) from error
-        finally:
-            tmp_path.unlink(missing_ok=True)
+
+        _write_atomic(path, _write)
 
     @classmethod
     def from_path(cls, path: Path | str, map_location: Any = "cpu") -> "Checkpoint":

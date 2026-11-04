@@ -14,8 +14,10 @@ from _common import (
     demo_root,
     depth_demo,
     dry_run,
+    ensure_out_available,
     finish,
     gtr_requirement,
+    reject_num_classes,
 )
 
 import autovision
@@ -26,11 +28,13 @@ def main() -> None:
         "Depth estimation example (images + .npy depth by default)",
         default_out="runs/examples/depth_estimation_train",
     ).parse_args()
+    reject_num_classes(args, "depth estimation")
 
     data = args.data or depth_demo(demo_root(args, "depth_estimation"))
     if args.dry_run:
         dry_run("depth_estimation", data)
         return
+    ensure_out_available(args.out, overwrite=args.overwrite)
     gtr_requirement()
 
     result = autovision.train_depth_estimation(

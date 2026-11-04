@@ -58,6 +58,12 @@ AutoVision training use the `*_train.py` scripts in the parent directory.
 
 ## Notes
 
+- **Nano models are weak on the aerial default image**: `yolo11n` is the
+  smallest YOLO11 variant, and the bundled airport scene is far from its
+  training distribution. Zero detections at the default `--threshold 0.25`
+  are common and not a bug — lower the threshold to inspect (for example
+  `--threshold 0.05` finds airplanes on the bundled image), or pass a bigger
+  `--model` (`yolo11s` / `yolo11m`).
 - `yolo11n-obb.pt` is trained on DOTA aerial imagery; the bundled default is
   an overhead CC0 image, suitable for all five examples.
 - First run downloads the checkpoint (about 5–6 MB) from ModelScope for

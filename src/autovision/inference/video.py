@@ -13,9 +13,10 @@ this module without it succeeds, use fails with guidance.
 
 from __future__ import annotations
 
+import logging
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
@@ -23,6 +24,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 from autovision.errors import AutoVisionError
 from autovision.types import PathLike
+
+logger = logging.getLogger("autovision.inference.video")
 
 __all__ = [
     "AnnotatedVideoWriter",
@@ -79,10 +82,20 @@ class VideoFrameStream:
 
     ``source`` is anything OpenCV opens: a path, ``rtsp://``,
     ``http://``, or a camera index. Iteration ends at the source's last
-    frame, at ``max_frames``, or on read failure (live streams: a dropped
-    read ends the run — reconnect handling is out of scope). The
-    ``*_timeout_ms`` knobs are best-effort FFmpeg-backend properties for
-    network sources; local files ignore them.
+    frame, at ``max_frames``, or on read failure — except that live
+    sources (everything that is not a local file) may reconnect:
+    ``reconnect_attempts`` bounds how many times a dropped read reopens
+    the capture (with ``reconnect_delay_s`` between tries) before the
+    iteration ends; frame numbering continues across reconnects. Local
+    files never reconnect — a short read there is truncation/corruption,
+    not a dropped stream, and raises. The ``*_timeout_ms`` knobs are
+    best-effort FFmpeg-backend properties for network sources; local
+    files ignore them.
+
+    ``info.fps`` is sanitized: raw driver values outside ``(0, 1000)``
+    (0, NaN, or a 90 kHz RTP clock) become 0.0, this module's "unknown"
+    convention — downstream consumers already default sensibly on 0
+    (design D35).
     """
 
     def __init__(
@@ -92,41 +105,87 @@ class VideoFrameStream:
         max_frames: int | None = None,
         open_timeout_ms: int | None = 10_000,
         read_timeout_ms: int | None = 5_000,
+        reconnect_attempts: int = 0,
+        reconnect_delay_s: float = 1.0,
     ) -> None:
-        cv2 = _require_cv2()
+        if reconnect_attempts < 0:
+            raise AutoVisionError(
+                f"reconnect_attempts must be >= 0, got {reconnect_attempts}."
+            )
+        if reconnect_delay_s < 0:
+            raise AutoVisionError(
+                f"reconnect_delay_s must be >= 0, got {reconnect_delay_s}."
+            )
         self.source = str(source)
         self.max_frames = max_frames
-        self._capture = cv2.VideoCapture()
+        self.open_timeout_ms = open_timeout_ms
+        self.read_timeout_ms = read_timeout_ms
+        self.reconnect_attempts = int(reconnect_attempts)
+        self.reconnect_delay_s = float(reconnect_delay_s)
+        #: Reconnect attempts consumed by the most recent iteration. A
+        #: positive value after a run means the source dropped mid-way and
+        #: the iteration continued past the drop — a caller-side health
+        #: signal, since a run that gave up reconnecting is otherwise
+        #: indistinguishable from a clean end-of-stream.
+        self.reconnects_used = 0
+        # Local files never reconnect: their short reads mean truncation.
+        self._is_live = not Path(self.source).is_file()
+        self._capture = self._open_capture()
+        self.info = self._read_info()
+        self._frame_count = self.info.frame_count
+
+    def _read_info(self) -> VideoInfo:
+        """Snapshot the source properties (open-time; reconnects keep it)."""
+        cv2 = _require_cv2()
+        raw_fps = float(self._capture.get(cv2.CAP_PROP_FPS))
+        # D35: drivers may report 0, NaN, or a 90 kHz RTP clock; anything
+        # outside (0, 1000) is "unknown" for this module's contract.
+        fps = raw_fps if 0.0 < raw_fps < 1000.0 else 0.0
+        return VideoInfo(
+            width=int(self._capture.get(cv2.CAP_PROP_FRAME_WIDTH)),
+            height=int(self._capture.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+            fps=fps,
+            frame_count=int(self._capture.get(cv2.CAP_PROP_FRAME_COUNT)),
+        )
+
+    def _open_capture(self) -> Any:
+        """Open the capture with the configured timeouts; fail with guidance."""
+        cv2 = _require_cv2()
+        capture = cv2.VideoCapture()
         # Timeouts must be set on the empty capture, before open().
         for prop, value in (
-            ("CAP_PROP_OPEN_TIMEOUT_MSEC", open_timeout_ms),
-            ("CAP_PROP_READ_TIMEOUT_MSEC", read_timeout_ms),
+            ("CAP_PROP_OPEN_TIMEOUT_MSEC", self.open_timeout_ms),
+            ("CAP_PROP_READ_TIMEOUT_MSEC", self.read_timeout_ms),
         ):
             if value is not None and hasattr(cv2, prop):
-                self._capture.set(getattr(cv2, prop), value)
-        self._capture.open(self.source)
-        if not self._capture.isOpened():
-            self._capture.release()
+                capture.set(getattr(cv2, prop), value)
+        capture.open(self.source)
+        if not capture.isOpened():
+            capture.release()
             raise AutoVisionError(
                 f"Could not open video source '{redact_source(self.source)}' — "
                 "check the path or stream URL (RTSP/HTTP sources need OpenCV's "
                 "FFmpeg backend)."
             )
-        self.info = VideoInfo(
-            width=int(self._capture.get(cv2.CAP_PROP_FRAME_WIDTH)),
-            height=int(self._capture.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-            fps=float(self._capture.get(cv2.CAP_PROP_FPS)),
-            frame_count=int(self._capture.get(cv2.CAP_PROP_FRAME_COUNT)),
-        )
-        # Only local files have a trustworthy frame count. A short read before
-        # that count means truncation/corruption, not a normal EOF.
-        self._strict_frame_count = (
-            self.info.frame_count > 0 and Path(self.source).is_file()
-        )
+        return capture
 
-    def __iter__(self) -> Iterator[tuple[int, Any]]:
+    def _reopen_capture(self) -> bool:
+        """Release and reopen the capture for a live-source reconnect."""
+        try:
+            self._capture.release()
+        except Exception:  # noqa: BLE001 - a wedged capture must not block reconnect
+            logger.debug("Releasing the dropped capture failed; continuing.")
+        try:
+            self._capture = self._open_capture()
+        except AutoVisionError:
+            return False
+        return True
+
+    def __iter__(self) -> Generator[tuple[int, Any], None, None]:
         cv2 = _require_cv2()
         index = 0
+        attempts_left = self.reconnect_attempts
+        self.reconnects_used = 0
         try:
             while self.max_frames is None or index < self.max_frames:
                 ok, frame = self._capture.read()
@@ -138,11 +197,31 @@ class VideoFrameStream:
                             f"'{redact_source(self.source)}'; the file may be "
                             "truncated or corrupt."
                         )
+                    if self._is_live and attempts_left > 0:
+                        attempts_left -= 1
+                        self.reconnects_used += 1
+                        logger.warning(
+                            "Read failed at frame %d for '%s'; reconnecting "
+                            "(%d attempt(s) left).",
+                            index, redact_source(self.source), attempts_left,
+                        )
+                        time.sleep(self.reconnect_delay_s)
+                        # A failed reopen leaves the (released) capture
+                        # reporting failed reads, so the next drop consumes
+                        # the next attempt — attempts bound the loop either way.
+                        self._reopen_capture()
+                        continue
                     break
                 yield index, cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 index += 1
         finally:
             self._capture.release()
+
+    @property
+    def _strict_frame_count(self) -> bool:
+        """Only local files have a trustworthy frame count: a short read
+        before that count means truncation/corruption, not a normal EOF."""
+        return self._frame_count > 0 and Path(self.source).is_file()
 
 
 class AnnotatedVideoWriter:

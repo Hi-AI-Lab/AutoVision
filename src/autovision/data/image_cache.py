@@ -2,7 +2,7 @@
 """Image read caching: ``.npy`` disk sidecars and a shared RAM pool.
 
 Opt-in layers over :func:`autovision.data.file_helpers.open_image`
-(design ``docs/design_ultralytics_adoption.md`` §4.10 D10). ``open_image``
+(design D10; lineage: docs/provenance/LEDGER.md). ``open_image``
 stays the single decode contract; this module only decides whether a
 decoded image is stored and reused. Every ``mode`` returns the same object
 as ``open_image``: a uint8 ``(C, H, W)`` tensor.
@@ -49,7 +49,10 @@ CacheMode = Literal["none", "disk", "ram"]
 _META_VERSION = 1
 # Index of the source mtime_ns entry inside the meta array.
 _META_MTIME_NS = 1
-_SHM_DIR = Path("/dev/shm")
+# Deliberate: POSIX shared-memory device (tmpfs), not a private temp dir —
+# the whole point of the RAM pool is cross-process sharing of decoded
+# images. Absence (macOS) degrades to the RAM fallback.
+_SHM_DIR = Path("/dev/shm")  # nosec B108
 
 
 def open_image_cached(

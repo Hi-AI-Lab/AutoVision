@@ -19,6 +19,7 @@ from _common import (
     build_parser,
     demo_root,
     dry_run,
+    ensure_out_available,
     finish,
     gtr_requirement,
     instance_demo,
@@ -37,6 +38,7 @@ def main() -> None:
     if args.dry_run:
         dry_run("instance_segmentation", data)
         return
+    ensure_out_available(args.out, overwrite=args.overwrite)
     gtr_requirement()
 
     result = autovision.train_instance_segmentation(

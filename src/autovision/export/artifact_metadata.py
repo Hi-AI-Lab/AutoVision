@@ -1,5 +1,5 @@
 # Copyright (c) 2026 AutoVision contributors. Apache-2.0.
-"""Artifact identity metadata (design D1, docs/design_ultralytics_adoption.md).
+"""Artifact identity metadata (design D1; lineage: docs/provenance/LEDGER.md).
 
 An exported artifact is self-describing: the task surface, class count,
 input geometry and class names ride inside the artifact (ONNX

@@ -151,6 +151,34 @@ base→x，选型标准为可导出 + 许可干净），实现待落地。`detr/
   的 parity 参考经同一钩子回放导出安全路径：OpenVINO 参考固定在 CPU（此前
   会在 eager fla 核上崩掉全部 GTR 路线），TensorRT 在模型驻留 CPU 时回退并
   告警、GPU 驻留保持 eager-vs-engine 强校验。
+- **fla 版本横幅**：GTR 依赖的 fla 在 Python < 3.11（及 Triton < 3.3.0）导入
+  时即打印升级建议 WARNING（`fla/utils.py` 的 `check_environments()`，
+  logger 名 `fla.utils`），每个导入 GTR 栈的进程各出现一次。仓库本身支持
+  Python 3.10+，这是第三方包的环境建议而非功能错误；Triton 低于 3.3 的
+  提示是真实风险信号（GLA 核可能出错），请勿在库代码里静默，根治方式是
+  升级解释器/Triton。导出的 `.pt` 不携带模型家族元数据（GTR 检测导出与
+  其它 DETR 导出同为 `DETRObjectDetection` + 纯数值超参），因此示例脚本对
+  `--weights` 的 GTR-on-CPU 预检基于加载后网络的模块树内省
+  （`examples/tasks/_common.py` 的 `gtr_eager_device_guard`），属示例层
+  护栏而非格式契约。
+- **NaN 恢复的 DDP 边界**：回滚恢复假定全体 rank 可见同一 `last.ckpt`
+  （共享文件系统部署）。DDP 下任一 rank 非对称死亡后（OOM 自愈本就是
+  单进程路径，`world_size > 1` 时直接 re-raise），`fit`/`fit_task` 的
+  finally 会销毁进程组，对端在下一次集合通信上快速失败而非静默挂死；
+  但不保证所有 NCCL 配置下都是即时失败，极端情况仍可能等到 watchdog
+  超时。
+- **验证 loss 非有限不触发回滚**：训练窗口已逐步校验权重/梯度，验证侧
+  NaN 视为测量故障（坏验证数据/数值问题）：逐次告警、该轮按既有早停
+  节奏计入 no-improve、best 跟踪不受污染（非有限值不能成为基线）。如需
+  对验证数据问题触发训练回滚，属新需求而非缺陷。
+- **升级兼容（存档期 checkpoint）**：save_period 存档路径 `last.ckpt`
+  的元数据 epoch 已从 1-based 修正为 0-based（随 D32 生效）；由旧版本
+  写出的存档期 `last.ckpt` 在 resume/回滚时仍会静默跳过一个 epoch——
+  两种纪元约定无法从文件本身区分，跨版本续训前请确认 `last.ckpt` 由
+  ≥ 本版本写出。
+- **断流重连沿用打开时流属性**：重连只重开 capture，`info`（宽高/fps）
+  保持 open-time 快照（帧序号延续）；RTSP 重协商改变分辨率的流，下游按
+  旧几何渲染可能错位——监控场景建议固定编码参数。
 - ONNX FP16 parity 门禁需要 CUDA execution provider：无 CUDA EP 的构建（如
   CPU-only onnxruntime）退化为「执行 + 有限性」smoke 门禁（输出含非有限值即
   失败）并告警；ONNX 导出的示例输入跟随模型设备（GPU 上训练后可直接导出）。

@@ -10,7 +10,14 @@ two classes. Real data is the same ImageFolder layout:
 
 from __future__ import annotations
 
-from _common import build_parser, classification_demo, demo_root, dry_run, finish
+from _common import (
+    build_parser,
+    classification_demo,
+    demo_root,
+    dry_run,
+    ensure_out_available,
+    finish,
+)
 
 import autovision
 
@@ -25,6 +32,7 @@ def main() -> None:
     if args.dry_run:
         dry_run("classification", data)
         return
+    ensure_out_available(args.out, overwrite=args.overwrite)
 
     result = autovision.train_image_classification(
         out=args.out,

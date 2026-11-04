@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -131,17 +132,22 @@ class _KalmanFilter:
 
     def initiate(self, measurement: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         mean = np.r_[measurement, np.zeros(4, dtype=np.float64)]
-        std = self._std(_STD_WEIGHT_POSITION, _STD_WEIGHT_VELOCITY, measurement[3])
+        std = self._std(_STD_WEIGHT_POSITION, _STD_WEIGHT_VELOCITY, float(measurement[3]))
         return mean, np.diag(np.square(std))
 
     def predict(self, mean: np.ndarray, covariance: np.ndarray):
-        std = self._std(_STD_WEIGHT_POSITION, _STD_WEIGHT_VELOCITY, mean[3])
+        std = self._std(_STD_WEIGHT_POSITION, _STD_WEIGHT_VELOCITY, float(mean[3]))
         motion_cov = np.diag(np.square(std))
         mean = self._motion @ mean
         covariance = self._motion @ covariance @ self._motion.T + motion_cov
         return mean, covariance
 
-    def project(self, mean: np.ndarray, covariance: np.ndarray):
+    def project(
+        self,
+        mean: np.ndarray,
+        covariance: np.ndarray,
+        confidence: float | None = None,
+    ):
         # Measurement noise is 4-dimensional (position-only weights, 1e-1 for
         # the aspect term) — the 8-dimensional vector above is the PROCESS
         # noise of ``predict`` (official ByteTrack parameterization).
@@ -155,14 +161,26 @@ class _KalmanFilter:
             dtype=np.float64,
         )
         innovation_cov = np.diag(np.square(std))
+        if confidence is not None:
+            # NSA (StrongSORT): scale the observation noise by the detection
+            # confidence so high-confidence boxes pull the state harder; the
+            # 0.05 floor keeps a near-certain detection from collapsing the
+            # innovation covariance to singular (design D36).
+            innovation_cov *= max(1.0 - float(confidence), 0.05)
         projected_mean = self._update_matrix @ mean
         projected_cov = self._update_matrix @ covariance @ self._update_matrix.T + innovation_cov
         return projected_mean, projected_cov
 
     def update(
-        self, mean: np.ndarray, covariance: np.ndarray, measurement: np.ndarray
+        self,
+        mean: np.ndarray,
+        covariance: np.ndarray,
+        measurement: np.ndarray,
+        confidence: float | None = None,
     ):
-        projected_mean, projected_cov = self.project(mean, covariance)
+        projected_mean, projected_cov = self.project(
+            mean, covariance, confidence=confidence
+        )
         # Kalman gain via an explicit solve (no scipy.linalg dependency).
         gain = np.linalg.solve(
             projected_cov.T, (covariance @ self._update_matrix.T).T
@@ -192,6 +210,12 @@ def _xyah_to_xyxy(state: np.ndarray) -> np.ndarray:
             state[1] + height / 2.0,
         ]
     )
+
+
+def _xyxy_tuple(box: np.ndarray) -> tuple[float, float, float, float]:
+    """A 4-vector as a strict xyxy tuple (``Track.bbox``'s exact type)."""
+    x1, y1, x2, y2 = box.tolist()
+    return x1, y1, x2, y2
 
 
 def _iou_matrix(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -252,14 +276,19 @@ class _STrack:
         score: float,
         class_id: int,
         det_index: int = -1,
+        confidence: float | None = None,
     ) -> None:
         """Kalman update from a matched detection.
 
         Carries the state transitions too: a ``new`` track becomes
         ``tracked`` (activation) and a ``lost`` track is re-found.
+        ``confidence`` (design D36) scales the observation noise by the
+        matched detection's score when the tracker enabled NSA scaling;
+        ``None`` keeps the official fixed-noise behavior.
         """
         self.mean, self.covariance = self._kalman.update(
-            self.mean, self.covariance, self._kalman.to_state(box)
+            self.mean, self.covariance, self._kalman.to_state(box),
+            confidence=confidence,
         )
         self.score = float(score)
         self.class_id = int(class_id)
@@ -325,6 +354,7 @@ class BYTETracker:
         frame_rate: int = 30,
         class_aware: bool = True,
         motion_compensation: str = "none",
+        confidence_scaling: bool = False,
     ) -> None:
         if not 0.0 <= track_thresh <= 1.0:
             raise AutoVisionError(f"track_thresh must be in [0, 1], got {track_thresh}.")
@@ -340,6 +370,9 @@ class BYTETracker:
         self.track_buffer = int(track_buffer)
         self.frame_rate = int(frame_rate)
         self.class_aware = bool(class_aware)
+        # NSA observation-noise scaling (design D36): opt-in — the default
+        # keeps the official ByteTrack fixed-noise numerics bit-exact.
+        self.confidence_scaling = bool(confidence_scaling)
         self.max_time_lost = int(frame_rate / 30.0 * track_buffer)
         #: Per-instance (not module-level) so a tracker's matrices can never
         #: become shared mutable state across streams or resets.
@@ -366,6 +399,15 @@ class BYTETracker:
     def _make_kalman_filter(self) -> "_KalmanFilter":
         """The motion model (design D7 hook): BoT-SORT swaps in XYWH."""
         return _KalmanFilter()
+
+    def _kalman_confidence(self, score: Any) -> float | None:
+        """The matched score as an NSA observation weight (design D36).
+
+        ``None`` keeps the official fixed-noise update; a score scales the
+        innovation covariance by ``max(1 - score, 0.05)`` when the tracker
+        was built with ``confidence_scaling``.
+        """
+        return float(score) if self.confidence_scaling else None
 
     def reset(self) -> None:
         """Clear all state: ids restart at 1, as for a brand-new source."""
@@ -515,8 +557,9 @@ class BYTETracker:
         )
         for track_index, det_index in pairs:
             pool[track_index].update(
-                high.boxes[det_index], high.scores[det_index],
-                high.classes[det_index], det_index=int(high.det_indices[det_index]),
+                high.boxes[det_index], float(high.scores[det_index]),
+                int(high.classes[det_index]), det_index=int(high.det_indices[det_index]),
+                confidence=self._kalman_confidence(high.scores[det_index]),
             )
         return unmatched_pool, high.take(unmatched_high)
 
@@ -532,8 +575,9 @@ class BYTETracker:
         pairs, unmatched_tracked, _ = self._match(tracked_left, low, _SECOND_MATCH_IOU)
         for track_index, det_index in pairs:
             tracked_left[track_index].update(
-                low.boxes[det_index], low.scores[det_index],
-                low.classes[det_index], det_index=int(low.det_indices[det_index]),
+                low.boxes[det_index], float(low.scores[det_index]),
+                int(low.classes[det_index]), det_index=int(low.det_indices[det_index]),
+                confidence=self._kalman_confidence(low.scores[det_index]),
             )
         for track_index in unmatched_tracked:
             tracked_left[track_index].state = _LOST
@@ -550,9 +594,10 @@ class BYTETracker:
         for track_index, det_index in pairs:
             unconfirmed[track_index].update(
                 remaining.boxes[det_index],
-                remaining.scores[det_index],
-                remaining.classes[det_index],
+                float(remaining.scores[det_index]),
+                int(remaining.classes[det_index]),
                 det_index=int(remaining.det_indices[det_index]),
+                confidence=self._kalman_confidence(remaining.scores[det_index]),
             )
         for track_index in unmatched_new:
             unconfirmed[track_index].state = _REMOVED
@@ -567,8 +612,8 @@ class BYTETracker:
                 continue
             track = _STrack(
                 remaining.boxes[det_index],
-                remaining.scores[det_index],
-                remaining.classes[det_index],
+                float(remaining.scores[det_index]),
+                int(remaining.classes[det_index]),
                 frame_id=self.frame_id,
                 kalman=self._kalman,
                 det_index=int(remaining.det_indices[det_index]),
@@ -591,7 +636,7 @@ class BYTETracker:
                 self._removed.append(
                     Track(
                         track_id=track.track_id,
-                        bbox=tuple(float(value) for value in track.box),
+                        bbox=_xyxy_tuple(track.box),
                         score=track.score,
                         class_id=track.class_id,
                         state=_REMOVED,
@@ -608,7 +653,7 @@ class BYTETracker:
         return [
             Track(
                 track_id=track.track_id,
-                bbox=tuple(float(value) for value in track.box),
+                bbox=_xyxy_tuple(track.box),
                 score=track.score,
                 class_id=track.class_id,
                 state=track.state,
@@ -653,6 +698,7 @@ class BYTETracker:
             )
         if not np.isfinite(scores_array).all():
             raise AutoVisionError("tracker.update: scores contain non-finite values.")
+        classes_array: np.ndarray
         if classes is None:
             classes_array = np.zeros(len(boxes_array), dtype=np.int64)
         else:

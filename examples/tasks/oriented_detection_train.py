@@ -21,9 +21,11 @@ from _common import (
     build_parser,
     demo_root,
     dry_run,
+    ensure_out_available,
     finish,
     gtr_requirement,
     obb_demo,
+    reject_num_classes,
 )
 
 import autovision
@@ -34,11 +36,13 @@ def main() -> None:
         "Oriented object detection example (YOLO-OBB by default)",
         default_out="runs/examples/oriented_detection_train",
     ).parse_args()
+    reject_num_classes(args, "oriented object detection")
 
     data = args.data or obb_demo(demo_root(args, "oriented_detection"))
     if args.dry_run:
         dry_run("oriented_object_detection", data)
         return
+    ensure_out_available(args.out, overwrite=args.overwrite)
     gtr_requirement()
 
     result = autovision.train_oriented_object_detection(

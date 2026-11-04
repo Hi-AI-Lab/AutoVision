@@ -49,6 +49,13 @@ class GTRSegObjectDetection(DETRObjectDetection):
                 f"Unknown GTR seg variant '{variant}'; expected one of "
                 f"{sorted(GTR_SEG_VARIANTS)}."
             )
+        # Parent-level init-args captured by DETR ride along in the export
+        # payload; drop every name this constructor passes explicitly to
+        # super() so the forward cannot collide with them. model_name is
+        # additionally stamped by the train entries with the task-level
+        # key ("gtr/s") — DETR derives its own from the variant.
+        for stamped in ("model_name", "decoder"):
+            kwargs.pop(stamped, None)
         super().__init__(
             num_classes=num_classes,
             model_name=f"gtrvit-{variant}",
@@ -61,6 +68,10 @@ class GTRSegObjectDetection(DETRObjectDetection):
             **kwargs,
         )
         self.variant = variant
+        # DETR's init-args capture has no variant: without this stamp a
+        # reload rebuilds the default "s" geometry and the trained state
+        # dict fails on shape.
+        self._init_args["variant"] = variant
         self.load_report: dict[str, Any] | None = None
         if load_checkpoint:
             # Official weights by default: an explicit ``checkpoint`` (path

@@ -98,3 +98,55 @@ class ModelEMA:
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         self.model.load_state_dict(state_dict["model"])
         self.updates = state_dict.get("updates", 0)
+
+    @torch.no_grad()
+    def repair_from(self, model: nn.Module) -> int:
+        """Resync non-finite EMA tensors from live weights (design D33).
+
+        The EMA is a running average: a single non-finite update poisons it
+        for the rest of the run, while the live model may already have
+        recovered — every checkpoint written afterwards would carry the NaN.
+        Only tensors that are non-finite in the EMA AND finite in the live
+        model are repaired (a live tensor with no clean source is left
+        alone and stays subject to the D20 serialization clamp).
+
+        Returns the number of repaired tensors; callers log the count.
+        Requires a full (non-sharded) ``model.state_dict()`` — the engine
+        skips this pass under FSDP.
+        """
+        model_state = model.state_dict()
+        ema_state = self.model.state_dict()
+        floating = [
+            value
+            for value in ema_state.values()
+            if torch.is_tensor(value) and value.is_floating_point()
+        ]
+        if floating and bool(
+            torch.isfinite(
+                torch.stack([value.abs().amax() for value in floating])
+            ).all()
+        ):
+            # Healthy fast path: amax propagates NaN and keeps inf, so one
+            # stacked reduction replaces a per-tensor device sync on every
+            # checkpoint save.
+            return 0
+        repaired = 0
+        for key, value in ema_state.items():
+            if not torch.is_tensor(value) or not value.is_floating_point():
+                continue
+            if bool(torch.isfinite(value).all()):
+                continue
+            source = model_state.get(key)
+            if source is None or not torch.is_tensor(source):
+                continue
+            if value.shape != source.shape or not bool(
+                torch.isfinite(source).all()
+            ):
+                continue
+            logger.warning(
+                "EMA tensor '%s' is non-finite; resyncing from live weights.",
+                key,
+            )
+            value.copy_(source.to(value.device))
+            repaired += 1
+        return repaired

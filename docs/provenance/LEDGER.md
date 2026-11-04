@@ -30,9 +30,11 @@
 | `serving/app.py`（lifespan 全管线预热）、`docs/framework_design.md` §3.1（引擎/流状态生命周期约定） | [Ultralytics 8.4.177](https://github.com/ultralytics/ultralytics) warmup/预测器复用语义 | AGPL-3.0（上游） | 架构参考；AutoVision 净室实现（D14a/D14d） | 设计提案 §4.14、NOTICE |
 | `cli/model_handle.py`（`_ENGINE_SETUP_KEYS` 引擎缓存二分）、`engine/amp_check.py`（三态 AMP 事前探针）、`runtime/autodevice.py`（`-1` 空闲选卡 + CVD 翻译）、`engine/engine.py`（resume 白名单 `check_resume_fit_args` / 早停状态持久化 / possible_stop）、`geometry/polygons.py`（`is_valid_polygon` / `polygon_from_bbox`）、`data/coco_instance_segmentation_dataset.py`（多边形白名单兜底 + compressed-RLE 修复） | [Ultralytics 8.4.177](https://github.com/ultralytics/ultralytics) `PREDICTOR_SETUP_KEYS`/`check_amp`/`autodevice`/`check_resume`/多边形白名单设计 | AGPL-3.0（上游） | 架构参考；AutoVision 净室实现（D15/D16/D17/D18/D19） | 设计提案 §4.15–§4.19、NOTICE |
 | `engine/engine.py`（save_period 单次序列化多路写 / fp16 克隆钳制 / OOM 降批 / 回调注册接线）、`runtime/checkpoint.py`（`serialize`/`save_serialized`）、`engine/callbacks.py`、`runtime/model_info.py`（thop 惰性）、`runtime/fuse.py`（Sequential Conv+BN 折叠 + parity 门禁）、`augment/core.py`（四目标钩子协议）、`metrics/containers.py`（惰性 stats + 空/空约定）、`data/quality.py`（存储体检）、`metrics/map_evaluator.py`（maxDets 自动抬升）、`cli/common_helpers.py`/`cli/train_helpers.py`（worker 播种） | [Ultralytics 8.4.177](https://github.com/ultralytics/ultralytics) save_model/BytesIO、OOM 降批、回调清单、model_info、fuse、BaseTransform、DetMetrics、check_file_speeds、max_det 抬升设计 | AGPL-3.0（上游） | 架构参考；AutoVision 净室实现（D20/D21/D22/D23/D24/D27/D29；OOM 降批限定单进程、回调隔离严于上游、fuse 只走 Sequential 模式） | 设计提案 §4.20–§4.29、NOTICE |
+| `engine/engine.py`（NaN 回滚自愈 / 条件性显存清理 / EMA 修复接线）、`tasks/shared/ema.py`（`repair_from`）、`runtime/checkpoint.py`（原子写重试）、`inference/video.py`（fps 消毒 / 活流重连）、`inference/stream.py`（参数透传）、`tracking/byte_track.py` / `tracking/bot_sort.py`（NSA 观测噪声缩放，opt-in） | [Ultralytics 8.4.177](https://github.com/ultralytics/ultralytics) `_handle_nan_recovery`/`_clear_memory`/EMA 中毒修复/`torch_save` 重试/`LoadStreams` 重连/NSA Kalman 设计 | AGPL-3.0（上游） | 架构参考；AutoVision 净室实现（D32/D33/D34/D35/D36；DDP 判定屏障/恢复闭包与上游 epoch 粒度不同、首 epoch 有意抛错而非继续、重试/阈值/重连参数语义按本仓库约定重设计） | 设计提案 §4.32–§4.36、NOTICE |
 
 **净室声明（Ultralytics AGPL 架构参考，2026-11-03）**：上述 D 系列实现依据
-`docs/design_ultralytics_adoption.md` 与上游论文级语义（BoT-SORT、ByteTrack、
+`docs/design_ultralytics_adoption.md`<!-- docpath-ok -->（设计提案；已自文档树移除，全文保留于
+git 历史——提交 63fe135）与上游论文级语义（BoT-SORT、ByteTrack、
 Lucas–Kanade/ECC 等公开算法）在本仓库接口风格内重写；实现者未对照上游源码
 逐行翻译，未复制上游注释、docstring、常量表或测试数据。D15–D19 落地时按
 同一纪律执行：探针不下载外部权重（改用调用方自有模型）、选卡算法以本仓库

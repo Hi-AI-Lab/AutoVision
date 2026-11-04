@@ -7,9 +7,14 @@ exported ``.pt`` from ``panoptic_segmentation_train.py``:
 
     python examples/tasks/panoptic_segmentation.py \
         --weights runs/examples/panoptic_segmentation_train/exported_models/exported_last.pt
+``--onnx`` runs the forward through an ONNX artifact exported from
+the trained checkpoint (any device; pair with the same ``--weights``
+so the network can supply pre/post-processing).
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 from _common import (
     build_inference_parser,
@@ -26,6 +31,16 @@ def main() -> None:
         "Panoptic segmentation inference (exported .pt)",
         default_out="runs/examples/panoptic_segmentation",
     )
+    parser.add_argument(
+        "--onnx",
+        type=Path,
+        default=None,
+        help=(
+            "exported .onnx artifact: run the forward through it (any "
+            "device; still needs --weights for the pre/post-processing "
+            "network)"
+        ),
+    )
     args = parser.parse_args()
 
     if args.weights is None:
@@ -34,7 +49,8 @@ def main() -> None:
             "`python examples/tasks/panoptic_segmentation_train.py` and pass "
             "--weights .../exported_models/exported_last.pt."
         )
-    model = autovision.load_model(args.weights, device=resolve_device(args.device))
+    device = "cpu" if args.onnx is not None else resolve_device(args.device)
+    model = autovision.load_model(args.weights, device=device)
     names = load_class_names(args.class_names)
     predict_and_annotate(model, args, names, title="panoptic_segmentation")
 

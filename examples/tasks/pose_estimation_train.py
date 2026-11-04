@@ -9,7 +9,16 @@ Use ``--dry-run`` to inspect the data contract without training.
 
 from __future__ import annotations
 
-from _common import build_parser, demo_root, dry_run, finish, gtr_requirement, pose_demo
+from _common import (
+    build_parser,
+    demo_root,
+    dry_run,
+    ensure_out_available,
+    finish,
+    gtr_requirement,
+    pose_demo,
+    reject_num_classes,
+)
 
 import autovision
 
@@ -19,11 +28,13 @@ def main() -> None:
         "Pose estimation example (COCO person_keypoints by default)",
         default_out="runs/examples/pose_estimation_train",
     ).parse_args()
+    reject_num_classes(args, "pose estimation")
 
     data = args.data or pose_demo(demo_root(args, "pose_estimation"))
     if args.dry_run:
         dry_run("pose_estimation", data)
         return
+    ensure_out_available(args.out, overwrite=args.overwrite)
     gtr_requirement()
 
     result = autovision.train_pose_estimation(

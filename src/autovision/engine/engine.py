@@ -45,7 +45,8 @@ logger = logging.getLogger("autovision")
 
 def _capture_rng_state() -> dict[str, Any]:
     """Capture Python/NumPy/Torch RNG states in a ``weights_only``-safe form."""
-    numpy_state = np.random.get_state()
+    # Runtime value is the legacy 5-tuple; NumPy's stubs type it as a dict.
+    numpy_state: Any = np.random.get_state()
     state: dict[str, Any] = {
         "torch": torch.get_rng_state(),
         "python": list(random.getstate()),
@@ -111,6 +112,24 @@ def _assert_finite_gradients(optimizer: Any, clip_norm: float | None) -> None:
     normalization layer, or a corrupted batch). When the model clips, the
     pre-clip norm is already computed; otherwise one extra inf-norm reduction
     is paid to keep the check unconditional.
+
+    Raises :class:`_TrainingCorruptedError` so callers with NaN recovery
+    (design D32) can roll back instead of losing the run.
+    """
+    if not _grad_norm_is_finite(optimizer, clip_norm):
+        raise _TrainingCorruptedError(
+            "Non-finite gradient norm after a finite loss; check AMP "
+            "scaling, normalization, or the batch. Lower the learning rate "
+            "or enable gradient clipping."
+        )
+
+
+def _grad_norm_is_finite(optimizer: Any, clip_norm: float | None) -> bool:
+    """True when the (possibly pre-computed) gradient norm is finite.
+
+    Without an explicit ``clip_norm`` one extra inf-norm reduction is paid;
+    the norm is returned by :func:`clip_grad_norm_` anyway, so nothing is
+    synchronized twice.
     """
     norm = clip_norm
     if norm is None:
@@ -120,12 +139,149 @@ def _assert_finite_gradients(optimizer: Any, clip_norm: float | None) -> None:
             for parameter in group["params"]
         ]
         norm = float(torch.nn.utils.clip_grad_norm_(params, float("inf")))
-    if not math.isfinite(float(norm)):
+    return math.isfinite(float(norm))
+
+
+#: D21: how many automatic batch halvings one run may attempt.
+_OOM_MAX_ATTEMPTS = 3
+#: D20: rolling retention count for ``epoch{N}.ckpt`` archives.
+_EPOCH_ARCHIVE_KEEP = 3
+#: D32: consecutive NaN/Inf recoveries before the run is declared dead.
+_NAN_RECOVERY_MAX_ATTEMPTS = 3
+#: D34: clear accelerator caches only above this reserved-memory fraction.
+_CACHE_CLEAR_RESERVED_FRACTION = 0.5
+
+
+class _TrainingCorruptedError(RuntimeError):
+    """A step/epoch produced non-finite loss or gradients (design D32).
+
+    Raised instead of a bare ``RuntimeError`` so an engine with a valid
+    ``last.ckpt`` can roll back and retry; after
+    :data:`_NAN_RECOVERY_MAX_ATTEMPTS` consecutive failures the run is
+    declared dead with the original signal chained.
+    """
+
+
+def _assert_state_dict_finite(state: Any, path: Path) -> None:
+    """Refuse to load a checkpoint whose numeric payload contains NaN/Inf.
+
+    Recovery re-enters training from this state — a poisoned checkpoint
+    would reinstall the very NaN the recovery is escaping. The walk covers
+    the whole payload, not just the top level: the ``state_dict`` weights
+    plus the ``engine_state`` a rollback restores alongside them (optimizer
+    moments, scaler scale, EMA sidecar, best-metric baseline). Only
+    floating tensors and Python floats are checked (int/bool/RNG-byte
+    states cannot be non-finite).
+    """
+    if not isinstance(state, dict):
+        return
+    poisoned: list[str] = []
+
+    def walk(prefix: str, node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                walk(f"{prefix}.{key}" if prefix else str(key), value)
+        elif isinstance(node, (list, tuple)):
+            for index, value in enumerate(node):
+                walk(f"{prefix}[{index}]", value)
+        elif torch.is_tensor(node) and node.is_floating_point():
+            if not bool(torch.isfinite(node).all()):
+                poisoned.append(prefix)
+        elif isinstance(node, float) and not math.isfinite(node):
+            poisoned.append(prefix)
+
+    walk("", state)
+    if poisoned:
         raise RuntimeError(
-            "Non-finite gradient norm "
-            f"({norm}) after a finite loss; check AMP scaling, normalization, "
-            "or the batch. Lower the learning rate or enable gradient clipping."
+            f"Checkpoint '{path}' is corrupted with NaN/Inf "
+            f"(first offending keys: {poisoned[:5]}); recovery cannot "
+            "proceed from it."
         )
+
+
+def _sync_corruption_verdict(
+    device: torch.device, world_size: int, corrupted: bool
+) -> bool:
+    """Broadcast a local corruption detection to every rank (design D32).
+
+    Every rank posts a 1 (clean) or 0 (corrupted) int32 and the MIN is
+    reduced, so a NaN on any single rank flips all ranks to the recovery
+    path from the same checkpoint. Call only from points where every rank
+    participates with the same collective count.
+    """
+    if world_size <= 1 or not torch.distributed.is_initialized():
+        return bool(corrupted)
+    flag = torch.tensor(
+        [0 if corrupted else 1], device=device, dtype=torch.int32
+    )
+    torch.distributed.all_reduce(flag, op=torch.distributed.ReduceOp.MIN)
+    return int(flag.item()) == 0
+
+
+def _maybe_clear_accelerator_cache(
+    device: torch.device, *, threshold: float = _CACHE_CLEAR_RESERVED_FRACTION
+) -> None:
+    """Release cached accelerator memory only when it is actually hoarding.
+
+    An unconditional ``empty_cache`` between train and validation forces a
+    full cudaFree + re-cudaMalloc round trip on every boundary even when
+    the cache holds a few MB. Clear when the caching allocator's reserved
+    share of total memory exceeds ``threshold``; MPS clears unconditionally
+    (known allocator leak), CPU is a no-op, and a failed occupancy query
+    degrades to always-clear (the historical behavior) rather than risking
+    an OOM'd validation forward (design D34).
+    """
+    if device.type == "mps":
+        torch.mps.empty_cache()  # type: ignore[attr-defined]
+        return
+    if device.type not in ("cuda", "npu"):
+        return
+    try:
+        if device.type == "cuda":
+            reserved = torch.cuda.memory_reserved(device)
+            total = torch.cuda.get_device_properties(device).total_memory
+        else:
+            reserved = torch.npu.memory_reserved(device)
+            total = torch.npu.get_device_properties(device).total_memory
+        hoarding = total <= 0 or reserved / total > threshold
+    except Exception:  # noqa: BLE001 - introspection is best-effort
+        hoarding = True
+    if not hoarding:
+        return
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    else:
+        torch.npu.empty_cache()
+
+
+def _repair_ema_if_present(model: nn.Module, *, allow: bool = True) -> int:
+    """Resync a poisoned EMA from live weights before saving (design D33).
+
+    The EMA is a running average: one non-finite update poisons it for the
+    rest of the run, while the live model may have already recovered. A
+    non-finite EMA silently enters every checkpoint written afterwards.
+    Returns the number of repaired tensors. ``allow=False`` skips the pass
+    (FSDP shards the live model, so a per-tensor comparison is impossible).
+
+    The EMA copy wraps the TASK model (``TrainModel.model``), so the live
+    comparison source is resolved through ``get_task_model()`` when the
+    host provides it — comparing against the host's own state_dict would
+    key-mismatch (``model.*`` / ``ema_model.*`` prefixes) and silently
+    repair nothing.
+    """
+    if not allow:
+        return 0
+    ema = getattr(model, "ema_model", None)
+    repair = getattr(ema, "repair_from", None)
+    if repair is None:
+        return 0
+    get_task_model = getattr(model, "get_task_model", None)
+    source = (
+        get_task_model()
+        if callable(get_task_model)
+        else model
+    )
+    return int(repair(source))
 
 
 def _is_rank_zero_internal() -> bool:
@@ -423,13 +579,30 @@ def _log_fit_banner(
     no_aug = getattr(scheduler, "no_aug_steps", None)
     total_steps = getattr(scheduler, "total_steps", None)
     milestones = getattr(scheduler, "milestones", None)
-    if None not in (warmup, flat, no_aug, total_steps):
-        logger.info(
-            "LR schedule: warmup %d → flat until %d → cosine until %d → "
-            "tail to %d at peak LR (steps %d)",
-            warmup, warmup + flat, total_steps - no_aug, total_steps, total_steps,
-        )
-    elif None not in (warmup, total_steps, milestones):
+    if (
+        warmup is not None and flat is not None
+        and no_aug is not None and total_steps is not None
+    ):
+        # Name only the non-empty phases: a 2-step smoke run would otherwise
+        # log "warmup 2 → flat until 2 → cosine until 2 → tail to 2", and
+        # the tail holds min_factor × peak, not the peak LR itself.
+        cosine_end = total_steps - no_aug
+        phases = []
+        if warmup > 0:
+            phases.append(f"warmup {warmup}")
+        if flat > 0:
+            phases.append(f"flat until {warmup + flat}")
+        if cosine_end > warmup + flat:
+            phases.append(f"cosine until {cosine_end}")
+        min_factor = getattr(scheduler, "min_factor", None)
+        if no_aug > 0:
+            floor = f" at ×{min_factor}" if min_factor is not None else ""
+            phases.append(f"tail{floor} until {total_steps}")
+        summary = " → ".join(phases) if phases else "constant"
+        logger.info("LR schedule: %s (steps %d)", summary, total_steps)
+    elif (
+        warmup is not None and total_steps is not None and milestones is not None
+    ):
         logger.info(
             "LR schedule: warmup %d → constant with ×%s drops at steps %s "
             "(total %d)",
@@ -651,7 +824,11 @@ class Engine:
             },
         )
         try:
-            for epoch in range(start_epoch, max_epochs):
+            # D32: while (not for) so NaN recovery can rewind `epoch` and
+            # re-run the poisoned epoch from the last checkpoint.
+            epoch = start_epoch
+            nan_attempts = 0
+            while epoch < max_epochs:
                 with otel_span("engine.epoch", {"epoch": epoch}):
                     if sampler is not None:
                         sampler.set_epoch(epoch)
@@ -671,6 +848,7 @@ class Engine:
                         else dataloader
                     )
                     method.train()
+                    epoch_corrupted = False
                     for batch_idx, batch in enumerate(epoch_loader):
                         method.global_step = global_step
                         batch = self._to_device(batch, device)
@@ -685,10 +863,16 @@ class Engine:
                             # PretextRecipe.forward == training_step; DDP wraps forward.
                             loss = ddp_method(batch, batch_idx)
                         if not torch.isfinite(loss):
-                            raise RuntimeError(
-                                f"Non-finite loss at epoch {epoch}, step {global_step}: "
-                                f"{loss}. Check for data issues or lower the learning rate."
-                            )
+                            epoch_corrupted = True
+                            if world_size == 1:
+                                # No collectives to keep aligned: skip the
+                                # poisoned update and the rest of the epoch.
+                                break
+                            # DDP: fall through and finish the batch (and the
+                            # epoch) normally so every rank posts the same
+                            # collective sequence; the epoch-end verdict
+                            # barrier decides recovery and the rollback
+                            # discards these updates.
                         optimizer.zero_grad(set_to_none=True)
                         if scaler is not None:
                             scaler.scale(loss).backward()
@@ -702,8 +886,11 @@ class Engine:
                         # expected overflow signal: scaler.step() skips the
                         # update and backs off the scale. Raising here would
                         # defeat AMP's recovery path.
-                        if scaler is None:
-                            _assert_finite_gradients(optimizer, clip_norm)
+                        if scaler is None and not epoch_corrupted:
+                            if not _grad_norm_is_finite(optimizer, clip_norm):
+                                epoch_corrupted = True
+                                if world_size == 1:
+                                    break
                         method.on_before_optimizer_step(optimizer)
                         if scaler is not None:
                             scale_before = scaler.get_scale()
@@ -731,7 +918,64 @@ class Engine:
                                 _log_metrics_safely(logger_fn, metrics, global_step)
                         else:
                             method.consume_log_dict()  # keep step state clean on all ranks
-                epochs_run += 1
+                    # D32 verdict barrier: UNCONDITIONAL on the local flag —
+                    # a rank whose epoch looked clean must still post the
+                    # verdict, or a rank-local NaN (the exact scenario D32
+                    # exists for) leaves the ranks posting mismatched
+                    # collectives: the poisoned rank's verdict pairs with a
+                    # clean rank's write barrier and every rank dies with a
+                    # misleading barrier error. Single-process runs
+                    # short-circuit inside the helper.
+                    local_corrupted = epoch_corrupted
+                    epoch_corrupted = _sync_corruption_verdict(
+                        device, world_size, epoch_corrupted
+                    )
+                    if epoch_corrupted:
+                        nan_attempts += 1
+                        if nan_attempts > _NAN_RECOVERY_MAX_ATTEMPTS:
+                            raise RuntimeError(
+                                "Training failed: non-finite loss persisted "
+                                f"across {_NAN_RECOVERY_MAX_ATTEMPTS} "
+                                f"rollbacks to {out_dir / 'checkpoints' / 'last.ckpt'} "
+                                f"(last detection at epoch {epoch}, step "
+                                f"{global_step}); check the data pipeline or "
+                                "lower the learning rate."
+                            )
+                        last_path = out_dir / "checkpoints" / "last.ckpt"
+                        if not last_path.exists():
+                            raise RuntimeError(
+                                f"Non-finite loss at epoch {epoch} (step "
+                                f"{global_step}) and no last.ckpt exists to "
+                                "roll back to; fix the data or lower the "
+                                "learning rate."
+                            )
+                        logger.warning(
+                            "Non-finite loss at epoch %d (%s; step %d); "
+                            "recovery attempt %d/%d — rolling back to %s "
+                            "and re-running the epoch.",
+                            epoch,
+                            "detected on this rank" if local_corrupted
+                            else "reported by a peer rank",
+                            global_step, nan_attempts,
+                            _NAN_RECOVERY_MAX_ATTEMPTS, last_path,
+                        )
+                        resumed_epoch, resumed_step = self._resume(
+                            last_path,
+                            method,
+                            optimizer,
+                            scheduler,
+                            device,
+                            scaler=scaler,
+                            validate_finite=True,
+                        )
+                        epoch = resumed_epoch
+                        global_step = resumed_step
+                        continue
+                    # A clean epoch restores the recovery budget (upstream
+                    # resets per clean epoch; scattered transients each get
+                    # their full 3 attempts).
+                    nan_attempts = 0
+                    epochs_run += 1
 
                 # In-training kNN probe (design §7.5), rank zero only. Under
                 # DDP the other ranks block in the next allreduce while the
@@ -762,13 +1006,16 @@ class Engine:
                         with otel_span("engine.checkpoint", {"epoch": epoch}):
                             if archive_epoch:
                                 # D20: serialize ONCE, write last + epochN
-                                # from the same payload.
+                                # from the same payload. The metadata epoch
+                                # stays 0-BASED (the resume convention — a
+                                # 1-based value here would make a resume or
+                                # D32 rollback silently skip one epoch); only
+                                # the epoch{N}.ckpt FILENAME is 1-based.
                                 archive = self._build_checkpoint(
                                     method=method,
                                     optimizer=optimizer,
                                     scheduler=scheduler,
-                                    # 1-based to match the epoch{N}.ckpt name.
-                                    epoch=epoch + 1,
+                                    epoch=epoch,
                                     global_step=global_step,
                                     normalize_args=normalize_args,
                                     scaler=scaler,
@@ -802,6 +1049,7 @@ class Engine:
                 _rank_zero_write_barrier(device, world_size, write_ok)
                 if write_error is not None:
                     raise write_error
+                epoch += 1
         finally:
             end_span(fit_span)
             # Never leave a hung process group behind on error paths.
@@ -842,8 +1090,16 @@ class Engine:
         device: torch.device,
         *,
         scaler: Any | None = None,
+        validate_finite: bool = False,
     ) -> tuple[int, int]:
         ckpt = Checkpoint.from_path(path, map_location=str(device))
+        if validate_finite:
+            # D32: a NaN-recovery resume must not reinstall the very NaN it
+            # is escaping; regular resumes keep their historical tolerance.
+            # The engine_state (optimizer moments, scaler, RNG) rides beside
+            # the weights and is walked by the same guard.
+            _assert_state_dict_finite(ckpt.state_dict, path)
+            _assert_state_dict_finite(ckpt.autovision.engine_state, path)
         raw = {"state_dict": dict(ckpt.state_dict)}
         method.on_load_checkpoint(raw)
         method.load_state_dict(raw["state_dict"])
@@ -880,6 +1136,9 @@ class Engine:
         scaler: Any | None = None,
     ) -> Checkpoint:
         """Assemble the Checkpoint object with D20 serialization hygiene."""
+        # D33: a NaN EMA must not enter the file — resync from live weights
+        # first (pretraining has no FSDP, so the comparison is always safe).
+        _repair_ema_if_present(method)
         checkpoint = {"state_dict": method.state_dict()}
         method.on_save_checkpoint(checkpoint)
         engine_state = {
@@ -1124,7 +1383,10 @@ class TaskEngine(Engine):
             )
         world_size = int(os.getenv("WORLD_SIZE", "1"))
         from autovision.debug.debug_args import DebugArgs
-        from autovision.debug.nan_capture import NaNCaptureMonitor
+        from autovision.debug.nan_capture import (
+            NaNCaptureMonitor,
+            NaNDetectedError,
+        )
         from autovision.debug.underflow_overflow import DebugUnderflowOverflow
 
         debug_args = debug_args or DebugArgs()
@@ -1254,63 +1516,90 @@ class TaskEngine(Engine):
                 val_dataloader, precision, world_size,
             )
 
-        start_step = 0
-        restored_best_metric: float | None = None
-        restored_no_improve = 0
-        if resume_interrupted:
-            last_path = out_dir / "checkpoints" / "last.ckpt"
-            if last_path.exists():
-                ckpt = Checkpoint.from_path(last_path, map_location=str(device))
-                engine_state = ckpt.autovision.engine_state
-                if fsdp_train_model is not None:
-                    from autovision.runtime.fsdp import load_full_state_dict
+        last_path = out_dir / "checkpoints" / "last.ckpt"
+        best_metric: float | None = None
+        no_improve = 0
 
-                    load_full_state_dict(
-                        fsdp_train_model,
-                        optimizer,
-                        ckpt.state_dict,
-                        engine_state.get("optimizer"),
+        def _restore_last_state(
+            *, validate_finite: bool = False
+        ) -> tuple[int, dict[str, Any]]:
+            """Reload every tracked state from ``last.ckpt`` (D32).
+
+            Shared by ``resume_interrupted`` and the NaN-recovery handler so
+            a mid-run rollback restores exactly what a resume would: model
+            (incl. the EMA sidecar), optimizer, scheduler, scaler, RNG, the
+            best-metric baseline (sidecar takes precedence), and the
+            early-stopping counter. Returns ``(resumed_step, engine_state)``.
+            ``validate_finite`` refuses a checkpoint that itself carries
+            non-finite weights — the recovery path sets it; regular resumes
+            keep their historical tolerance.
+            """
+            nonlocal best_metric, no_improve
+            checkpoint_obj = Checkpoint.from_path(last_path, map_location=str(device))
+            if validate_finite:
+                # Same guard as the pretraining rollback: weights AND the
+                # engine_state payload (optimizer/EMA sidecar/scaler) must
+                # both be clean, or the rollback reinstalls the poison.
+                _assert_state_dict_finite(checkpoint_obj.state_dict, last_path)
+            engine_state = checkpoint_obj.autovision.engine_state
+            if validate_finite:
+                _assert_state_dict_finite(engine_state, last_path)
+            if fsdp_train_model is not None:
+                from autovision.runtime.fsdp import load_full_state_dict
+
+                load_full_state_dict(
+                    fsdp_train_model,
+                    optimizer,
+                    checkpoint_obj.state_dict,
+                    engine_state.get("optimizer"),
+                )
+            else:
+                train_model.load_state_dict(checkpoint_obj.state_dict)
+                if "optimizer" in engine_state:
+                    optimizer.load_state_dict(engine_state["optimizer"])
+            if "scheduler" in engine_state:
+                scheduler.load_state_dict(engine_state["scheduler"])
+            if scaler is not None and "scaler" in engine_state:
+                scaler.load_state_dict(engine_state["scaler"])
+            _restore_rng_state(engine_state.get("rng"))
+            resumed_step = int(engine_state.get("step", -1)) + 1
+            # Restore the best-metric baseline: without it the first
+            # post-resume validation resets tracking and a WORSE metric
+            # overwrites best.ckpt (seen in the pilot2 resume — a
+            # 0.1033 best was replaced by a 0.0978 dip). Old checkpoints
+            # without the key fall back to fresh tracking. The
+            # last.ckpt value lags its own validation (the final save
+            # precedes it), so the sidecar written at every best
+            # improvement takes precedence.
+            best_metric = engine_state.get("best_metric")
+            sidecar = out_dir / "checkpoints" / "best_metric.json"
+            if sidecar.exists():
+                try:
+                    sidecar_value = float(
+                        json.loads(sidecar.read_text())["best_metric"]
                     )
-                else:
-                    train_model.load_state_dict(ckpt.state_dict)
-                    if "optimizer" in engine_state:
-                        optimizer.load_state_dict(engine_state["optimizer"])
-                if "scheduler" in engine_state:
-                    scheduler.load_state_dict(engine_state["scheduler"])
-                if scaler is not None and "scaler" in engine_state:
-                    scaler.load_state_dict(engine_state["scaler"])
-                _restore_rng_state(engine_state.get("rng"))
-                start_step = engine_state.get("step", -1) + 1
-                # Restore the best-metric baseline: without it the first
-                # post-resume validation resets tracking and a WORSE metric
-                # overwrites best.ckpt (seen in the pilot2 resume — a
-                # 0.1033 best was replaced by a 0.0978 dip). Old checkpoints
-                # without the key fall back to fresh tracking. The
-                # last.ckpt value lags its own validation (the final save
-                # precedes it), so the sidecar written at every best
-                # improvement takes precedence.
-                restored_best_metric = engine_state.get("best_metric")
-                sidecar = out_dir / "checkpoints" / "best_metric.json"
-                if sidecar.exists():
-                    try:
-                        sidecar_value = float(
-                            json.loads(sidecar.read_text())["best_metric"]
-                        )
-                    except (OSError, ValueError, KeyError, TypeError):
-                        sidecar_value = None
-                    if sidecar_value is not None and (
-                        restored_best_metric is None
-                        or sidecar_value > restored_best_metric
-                    ):
-                        restored_best_metric = sidecar_value
-                # Early-stopping state (D17): continue the patience counter
-                # instead of resetting it. Old checkpoints without the key
-                # fall back to fresh counting.
-                restored_no_improve = int(engine_state.get("no_improve", 0))
+                except (OSError, ValueError, KeyError, TypeError):
+                    sidecar_value = None
+                if sidecar_value is not None and (
+                    best_metric is None or sidecar_value > best_metric
+                ):
+                    best_metric = sidecar_value
+            # Early-stopping state (D17): continue the patience counter
+            # instead of resetting it. Old checkpoints without the key
+            # fall back to fresh counting.
+            no_improve = int(engine_state.get("no_improve", 0))
+            if hasattr(train_model, "on_load_checkpoint"):
+                train_model.on_load_checkpoint({"ema": engine_state.get("ema")})
+            return resumed_step, engine_state
+
+        start_step = 0
+        if resume_interrupted:
+            if last_path.exists():
+                start_step, resume_state = _restore_last_state()
                 # Fit-args drift check (D17): loud, never blocking — the
                 # current call's values govern.
                 check_resume_fit_args(
-                    engine_state.get("fit_args"),
+                    resume_state.get("fit_args"),
                     steps=steps,
                     precision=precision,
                     gradient_accumulation_steps=gradient_accumulation_steps,
@@ -1320,10 +1609,6 @@ class TaskEngine(Engine):
                     save_every_num_steps=save_every_num_steps,
                     log_every_n_steps=log_every_n_steps,
                 )
-                if hasattr(train_model, "on_load_checkpoint"):
-                    train_model.on_load_checkpoint(
-                        {"ema": engine_state.get("ema")}
-                    )
                 logger.info("Resumed task training at step %d.", start_step)
         elif checkpoint is not None:
             ckpt = Checkpoint.from_path(checkpoint, map_location="cpu")
@@ -1342,11 +1627,10 @@ class TaskEngine(Engine):
         step_hooks = step_hooks or []
         infinite_loader = _InfiniteCycleIterator(train_dataloader, sampler=train_sampler)
         train_window = _TrainWindow()
-        no_improve = restored_no_improve
         oom_attempts = 0
+        nan_attempts = 0
         stopped_early = False
         last_completed_step = start_step - 1
-        best_metric: float | None = restored_best_metric
         best_metrics: dict[str, float] = {}
         watch_key = getattr(train_model, "watch_metric", None) or "val_metric/map"
         result = TaskFitResult(out_dir=out_dir, steps_run=0)
@@ -1379,6 +1663,10 @@ class TaskEngine(Engine):
         def save_checkpoint(step: int, best_or_last: str) -> None:
             nonlocal last_full_state
             with otel_span("engine.checkpoint", {"step": step, "kind": best_or_last}):
+                # D33: a NaN EMA must not enter the file — resync from live
+                # weights first. FSDP shards the live model, so the per-
+                # tensor comparison is skipped there (recorded deviation).
+                _repair_ema_if_present(train_model, allow=fsdp_train_model is None)
                 # FSDP gathers collectively on every rank; the other ranks
                 # return empty dicts and must not write. Non-FSDP only
                 # materializes the (potentially large) state on rank zero;
@@ -1511,7 +1799,10 @@ class TaskEngine(Engine):
             # (train is the nn.Module default), which is why this only
             # surfaced on the HF-wrapped families (rfdetr).
             train_model.train()
-            for step in range(start_step, steps):
+            # D32: while (not for) so NaN recovery can rewind `step` and
+            # re-run from the last checkpoint's step.
+            step = start_step
+            while step < steps:
                 with otel_span("engine.step", {"step": step}):
                     for hook in step_hooks:
                         hook.set_step(step)
@@ -1529,6 +1820,7 @@ class TaskEngine(Engine):
                     # only (a mid-run batch change under DDP must be synchronized across
                     # ranks, which asymmetric catches cannot do safely). The OOMed step
                     # is skipped; optimizer/scheduler state is preserved.
+                    corrupt_loss: torch.Tensor | None = None
                     try:
                         with otel_span("engine.dataload", {"step": step}):
                             batch = self._to_device(next(infinite_loader), device)
@@ -1579,12 +1871,12 @@ class TaskEngine(Engine):
                                     # forward == training_step; DDP syncs through it.
                                     step_result = ddp_train_model(batch_i, step)
                             loss = step_result.loss / gradient_accumulation_steps
-                            if not torch.isfinite(loss):
-                                if nan_monitor is not None:
-                                    nan_monitor.check_loss(step_result.loss)
-                                raise RuntimeError(
-                                    f"Non-finite loss at step {step}. Check data or lower lr."
-                                )
+                            if corrupt_loss is None and not torch.isfinite(loss):
+                                # Record the first poisoned microbatch (D32);
+                                # the accumulation window runs to completion so
+                                # every DDP rank posts the same collective
+                                # sequence — the post-window verdict decides.
+                                corrupt_loss = step_result.loss.detach()
                             if scaler is not None:
                                 scaler.scale(loss).backward()
                             else:
@@ -1592,12 +1884,62 @@ class TaskEngine(Engine):
                             # Kept on-device: one sync at logging time instead
                             # of one per microbatch.
                             accumulated_loss = accumulated_loss + step_result.loss.detach()
+                        # D32: window-level corruption verdict. Single-process
+                        # checks locally; under DDP a 4-byte MIN-reduce (the
+                        # grad reduction already synchronized the ranks this
+                        # step) flips every rank together, so all ranks roll
+                        # back from the same checkpoint and stay aligned.
+                        local_corrupted = corrupt_loss is not None
+                        window_corrupted = local_corrupted
+                        if world_size > 1:
+                            window_corrupted = _sync_corruption_verdict(
+                                device, world_size, window_corrupted
+                            )
+                        if window_corrupted:
+                            if nan_monitor is not None:
+                                # check_loss snapshots then raises
+                                # NaNDetectedError; route that into the D32
+                                # recovery instead of killing the run (with
+                                # the snapshot already taken).
+                                try:
+                                    nan_monitor.check_loss(
+                                        corrupt_loss
+                                        if corrupt_loss is not None
+                                        else step_result.loss
+                                    )
+                                except NaNDetectedError as captured:
+                                    raise _TrainingCorruptedError(
+                                        f"Non-finite loss at step {step}. "
+                                        "Check data or lower lr."
+                                    ) from captured
+                            if local_corrupted:
+                                raise _TrainingCorruptedError(
+                                    f"Non-finite loss at step {step}. "
+                                    "Check data or lower lr."
+                                )
+                            # Verdict flipped by a peer: keep the origin in
+                            # the signal so the rollback log does not send a
+                            # clean rank hunting for a NaN it never had.
+                            raise _TrainingCorruptedError(
+                                f"A peer rank reported a non-finite loss at "
+                                f"step {step} (this rank's loss was finite); "
+                                "rolling back jointly."
+                            )
                         if scaler is not None:
                             # Unscale once after the accumulation window so the
                             # gradient checks and clip see real magnitudes.
                             scaler.unscale_(optimizer)
                         if nan_monitor is not None:
-                            nan_monitor.check_gradients(train_model)
+                            # Same routing for the gradient-level probe: a
+                            # NaNDetectedError here used to abort the run; it
+                            # now enters the same rollback path.
+                            try:
+                                nan_monitor.check_gradients(train_model)
+                            except NaNDetectedError as captured:
+                                raise _TrainingCorruptedError(
+                                    f"Non-finite gradients at step {step} "
+                                    "(nan_capture probe)."
+                                ) from captured
                         clip_norm = train_model.clip_gradients(optimizer)
                         # AMP overflow is handled by GradScaler (skip + scale
                         # backoff); only the non-AMP path treats it as fatal.
@@ -1613,10 +1955,50 @@ class TaskEngine(Engine):
                             stepped = True
                         if stepped:
                             scheduler.step()
+                    except _TrainingCorruptedError as corrupt_error:
+                        # D32: roll back to last.ckpt and re-run from its
+                        # step. Every rank received the same verdict, so all
+                        # ranks restore identical state and stay aligned. The
+                        # restored RNG reproduces the pre-corruption data
+                        # order — a data-driven NaN reproduces and eventually
+                        # exhausts the budget; a transient (AMP/allocator
+                        # spike) recovers.
+                        nan_attempts += 1
+                        if nan_attempts > _NAN_RECOVERY_MAX_ATTEMPTS:
+                            raise RuntimeError(
+                                "Training failed: non-finite loss persisted "
+                                f"across {_NAN_RECOVERY_MAX_ATTEMPTS} "
+                                f"rollbacks to {last_path} (last detection at "
+                                f"step {step}); check the data pipeline or "
+                                "lower the learning rate."
+                            ) from corrupt_error
+                        if not last_path.exists():
+                            raise RuntimeError(
+                                f"Non-finite loss at step {step} and no "
+                                "last.ckpt exists to roll back to (nothing "
+                                "completed yet); fix the data or lower the "
+                                "learning rate."
+                            ) from corrupt_error
+                        logger.warning(
+                            "%s Recovery attempt %d/%d — rolling back to %s "
+                            "and re-running from its step.",
+                            corrupt_error, nan_attempts,
+                            _NAN_RECOVERY_MAX_ATTEMPTS, last_path,
+                        )
+                        restored_step, _ = _restore_last_state(validate_finite=True)
+                        step = restored_step
+                        continue
                     except (torch.OutOfMemoryError, RuntimeError) as error:
                         if (
                             not _is_oom_error(error)
                             or oom_attempts >= _OOM_MAX_ATTEMPTS
+                            # OOM recovery is single-process only: skipping
+                            # the step here while peers post the D32
+                            # corruption verdict (or the next grad
+                            # all_reduce) would desync the collectives.
+                            # Re-raising ends this rank; the finally block
+                            # destroys the process group, so peers fail fast
+                            # instead of hanging on a dead communicator.
                             or world_size > 1
                             or fsdp_train_model is not None
                             or not train_dataloader.batch_size
@@ -1646,6 +2028,9 @@ class TaskEngine(Engine):
                             train_dataloader, sampler=train_sampler
                         )
                         optimizer.zero_grad(set_to_none=True)
+                        # The while loop advances only at its bottom; the
+                        # skipped step must increment explicitly here.
+                        step += 1
                         continue
                 if (
                     fsdp_train_model is not None
@@ -1744,16 +2129,13 @@ class TaskEngine(Engine):
                         )
                     )
                 )
-                if do_validation:
+                if do_validation and val_dataloader is not None:
                     with otel_span("engine.validation", {"step": step}):
-                        if device.type == "cuda":
-                            # Release the training cache before the fp32
-                            # validation forward: on memory-saturated GPUs
-                            # the caching allocator holds nearly every byte
-                            # between steps, and validation then fights for
-                            # headroom with only the fragmented remainder —
-                            # the usual hard-OOM point. Re-grown on resume.
-                            torch.cuda.empty_cache()
+                        # D34: clear only when the caching allocator is
+                        # hoarding (reserved share above threshold; MPS
+                        # always, CPU never) — memory-saturated GPUs still
+                        # clear every time, small runs skip the round trip.
+                        _maybe_clear_accelerator_cache(device)
                         train_model.eval()
                         if val_sampler is not None:
                             val_sampler.set_epoch(step)
@@ -1797,15 +2179,31 @@ class TaskEngine(Engine):
                             loss_tensor = torch.tensor([val_loss], device=device)
                             torch.distributed.all_reduce(loss_tensor)
                             val_loss = float(loss_tensor.item()) / world_size
+                        if not math.isfinite(val_loss):
+                            # D32 boundary: a non-finite VALIDATION loss is a
+                            # measurement-side fault (training windows verify
+                            # weights/gradients every step), so it does not
+                            # trigger rollback — replaying the same val shard
+                            # would only reproduce it and discard clean
+                            # training work. Warn loudly (rank zero only, per
+                            # the logging convention); the NaN watch value
+                            # fails the `improved` comparison, so best-metric
+                            # tracking stays untouched and early stopping
+                            # keeps its usual cadence.
+                            if is_rank_zero:
+                                logger.warning(
+                                    "Non-finite validation loss at step %d; "
+                                    "check the validation set or reporting "
+                                    "pipeline (this round counts as no "
+                                    "improvement).",
+                                    step + 1,
+                                )
                         val_metrics: dict[str, float] = (
                             train_model.compute_metrics("val") if is_rank_zero else {}
                         )
-                        if device.type == "cuda":
-                            # Symmetric release on the way back to training:
-                            # leave the freed headroom available for the
-                            # train loop's re-warm instead of carrying the
-                            # validation forward's blocks.
-                            torch.cuda.empty_cache()
+                        # D34: symmetric release on the way back to training,
+                        # same threshold rule as the pre-validation clear.
+                        _maybe_clear_accelerator_cache(device)
                     val_metrics["val_loss"] = val_loss
                     if world_size > 1:
                         # Broadcast rank zero's metrics so every rank makes
@@ -1843,10 +2241,18 @@ class TaskEngine(Engine):
                     if is_rank_zero_run:
                         _invoke("on_validation_end", step + 1, dict(val_metrics))
                     watch_value = val_metrics.get(watch_key, -val_metrics["val_loss"])
-                    improved = (
-                        best_metric is None
-                        or watch_value > best_metric + early_stopping_min_delta
-                    )
+                    if best_metric is None:
+                        first_baseline = True
+                        # A non-finite first evaluation is not a baseline:
+                        # every later comparison with a NaN baseline fails,
+                        # so accepting it here would freeze best tracking
+                        # (and write a NaN best.ckpt) for the whole run.
+                        improved = math.isfinite(watch_value)
+                    else:
+                        first_baseline = False
+                        improved = (
+                            watch_value > best_metric + early_stopping_min_delta
+                        )
                     if improved:
                         best_metric = watch_value
                         best_metrics = dict(val_metrics)
@@ -1863,8 +2269,11 @@ class TaskEngine(Engine):
                                         step, "best", last_full_state
                                     )
                                 logger.info(
-                                    "Best %s improved to %.4f (step %d)",
-                                    watch_key, watch_value, step + 1,
+                                    "Best %s %s %.4f (step %d)",
+                                    watch_key,
+                                    "baseline set to" if first_baseline
+                                    else "improved to",
+                                    watch_value, step + 1,
                                 )
                                 # Sidecar for the resume path: the last.ckpt
                                 # engine_state lags its own validation (the
@@ -1915,7 +2324,15 @@ class TaskEngine(Engine):
                             train_model.train()
                             break
                     train_model.train()
+                # A clean step restores the NaN-recovery budget (D32): a
+                # data-driven NaN reproduces at the same replayed step, so
+                # consecutive attempts still exhaust the budget, while
+                # scattered transients each get the full allowance —
+                # including runs without a validation set, where the
+                # previous validation-time reset never fired.
+                nan_attempts = 0
                 last_completed_step = step
+                step += 1
 
         finally:
             end_span(fit_span)

@@ -16,8 +16,10 @@ from _common import (
     build_parser,
     demo_root,
     dry_run,
+    ensure_out_available,
     finish,
     panoptic_demo,
+    reject_num_classes,
 )
 
 import autovision
@@ -28,11 +30,13 @@ def main() -> None:
         "Panoptic segmentation example (masks + segments JSON by default)",
         default_out="runs/examples/panoptic_segmentation_train",
     ).parse_args()
+    reject_num_classes(args, "panoptic segmentation")
 
     data = args.data or panoptic_demo(demo_root(args, "panoptic_segmentation"))
     if args.dry_run:
         dry_run("panoptic_segmentation", data)
         return
+    ensure_out_available(args.out, overwrite=args.overwrite)
 
     result = autovision.train_panoptic_segmentation(
         out=args.out,

@@ -26,8 +26,12 @@ box with corner brackets or rounded boxes, while ``blur`` / ``pixelate``
 apply privacy filtering to the detections before boxes and labels are drawn.
 
 Pass ``--weights path/to/exported.pt`` to use a model produced by
-``train_object_detection`` instead of the released checkpoint. For a full
-training walkthrough, see ``examples/tasks/detection_train.py``.
+``train_object_detection`` instead of the released checkpoint; exported
+checkpoints carry no class names, so pass ``--class-names names.json``
+(a ``{class_id: name}`` map) to label the render. A GTR-family checkpoint
+on ``--device cpu`` is rejected up front (its eager forward is CUDA-only);
+serve it on CPU through ``--onnx`` instead. For a full training
+walkthrough, see ``examples/tasks/detection_train.py``.
 """
 
 from __future__ import annotations
@@ -37,8 +41,12 @@ import json
 from collections import Counter
 from pathlib import Path
 
-import torch
-from _common import gtr_requirement
+from _common import (
+    gtr_eager_device_guard,
+    gtr_requirement,
+    load_class_names,
+    resolve_device,
+)
 from PIL import Image
 
 import autovision
@@ -108,13 +116,23 @@ def main() -> None:
         help="exported .pt from training; overrides --model",
     )
     parser.add_argument(
+        "--class-names",
+        type=Path,
+        default=None,
+        help=(
+            "optional JSON mapping {class_id: name} for --weights "
+            "checkpoints (registry models carry their own names)"
+        ),
+    )
+    parser.add_argument(
         "--onnx",
         type=Path,
         default=None,
         help=(
             "exported .onnx artifact: run the forward through it "
             "(backend='onnx') instead of the eager model; works on "
-            "CPU-only machines and overrides --weights"
+            "CPU-only machines. Pair with --weights to serve a trained "
+            "checkpoint (its network supplies pre/post only)"
         ),
     )
     parser.add_argument("--threshold", type=float, default=0.3)
@@ -140,32 +158,37 @@ def main() -> None:
 
     if not args.image.is_file():
         raise SystemExit(f"Image not found: {args.image}")
-    device = (
-        "cuda"
-        if args.device == "auto" and torch.cuda.is_available()
-        else "cpu"
-        if args.device == "auto"
-        else args.device
-    )
+    if args.onnx is not None and not args.onnx.is_file():
+        raise SystemExit(f"ONNX artifact not found: {args.onnx}")
+    # ONNX mode keeps the network CPU-resident (the session runs on the
+    # CPU EP), so the eager-only CUDA requirements do not apply.
+    device = "cpu" if args.onnx is not None else resolve_device(args.device)
 
     if args.onnx is not None:
-        # ONNX forward: construction never runs the GLA kernels, so the
-        # CUDA requirement does not apply here (the `gtr` extra still is —
-        # the GLA module builds fla primitives at construction time). The
-        # network stays CPU-resident: the ONNX session runs on the CPU EP
-        # and the network only supplies pre/post-processing.
-        if not args.onnx.is_file():
-            raise SystemExit(f"ONNX artifact not found: {args.onnx}")
+        # Construction never runs the GLA kernels, so the CUDA requirement
+        # does not apply here (the `gtr` extra still is — the GLA module
+        # builds fla primitives at construction time). The network only
+        # supplies pre/post-processing for the ONNX session.
         if args.model.startswith("detr/gtrvit"):
             gtr_requirement(need_cuda=False)
-        names = pretrained_class_names(args.model)
-        model = autovision.detection(args.model, pretrained=True)
+        if args.weights is not None:
+            # Exported checkpoint: its network provides the pre/post
+            # contract; the trained weights themselves stay unused.
+            model = autovision.load_model(args.weights, device="cpu")
+            names = load_class_names(args.class_names)
+        else:
+            names = pretrained_class_names(args.model)
+            model = autovision.detection(args.model, pretrained=True)
     elif args.weights is not None:
         model = autovision.load_model(args.weights, device=device)
-        names = None  # custom checkpoints carry their own class ids
+        gtr_eager_device_guard(model.network, device=device)
+        names = load_class_names(args.class_names)
     else:
         if args.model.startswith("detr/gtrvit"):
-            gtr_requirement()
+            # Validate the selected device, not just machine capability:
+            # an explicit --device cpu on a CUDA box must exit with the
+            # guidance below, not crash inside the GLA Triton kernels.
+            gtr_requirement(device=device)
         names = pretrained_class_names(args.model)
         model = autovision.detection(args.model, pretrained=True)
         model.to(device)

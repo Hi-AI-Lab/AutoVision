@@ -49,6 +49,12 @@ class StreamRunResult:
     backend: str
     #: Number of distinct track ids over the run (0 when tracking is off).
     tracks: int = 0
+    #: Reconnect attempts consumed on a dropped LIVE source (design D35).
+    #: 0 means the stream never dropped; a positive value means the run
+    #: continued past drops — the caller's health signal for monitoring,
+    #: since a run that gave up reconnecting is otherwise indistinguishable
+    #: from a clean end-of-stream in ``frames`` alone.
+    reconnects: int = 0
     #: Wall-clock seconds spent decoding, inferring, rendering and encoding.
     decode_s: float = 0.0
     infer_s: float = 0.0
@@ -66,10 +72,11 @@ class StreamRunResult:
         """One-line run summary for the CLI."""
         video = f", video={self.video_path}" if self.video_path else ""
         tracked = f", tracks={self.tracks}" if self.tracks else ""
+        dropped = f", reconnects={self.reconnects}" if self.reconnects else ""
         return (
             f"frames={self.frames} backend={self.backend} "
             f"fps={self.fps:.1f} elapsed={self.elapsed_s:.2f}s "
-            f"jsonl={self.predictions_path}{video}{tracked}"
+            f"jsonl={self.predictions_path}{video}{tracked}{dropped}"
         )
 
 
@@ -217,6 +224,8 @@ def run_stream(
     track_thresh: float = 0.5,
     track_buffer: int = 30,
     motion_compensation: str = "none",
+    reconnect_attempts: int = 0,
+    reconnect_delay_s: float = 1.0,
 ) -> StreamRunResult:
     """Run inference over a video file / RTSP stream and persist artifacts.
 
@@ -244,9 +253,21 @@ def run_stream(
     entry and to the rendered video. ``smooth=True`` averages each track's
     box over recent frames for rendering; the JSONL predictions stay raw.
     ``mask_format`` is ``"rle"`` (default), ``"dense"`` or ``"none"``.
+    ``reconnect_attempts`` / ``reconnect_delay_s`` (design D35) bound how
+    many times a dropped LIVE source (RTSP/camera/URL — not a local file)
+    reopens its capture before the run ends; frame numbering continues
+    across reconnects.
     """
     if batch_size < 1:
         raise AutoVisionError(f"batch_size must be >= 1, got {batch_size}.")
+    if reconnect_attempts < 0:
+        raise AutoVisionError(
+            f"reconnect_attempts must be >= 0, got {reconnect_attempts}."
+        )
+    if reconnect_delay_s < 0:
+        raise AutoVisionError(
+            f"reconnect_delay_s must be >= 0, got {reconnect_delay_s}."
+        )
     if mask_format not in {"rle", "dense", "none"}:
         raise AutoVisionError(
             "mask_format must be 'rle', 'dense', or 'none', "
@@ -279,7 +300,12 @@ def run_stream(
     predictions_path = out_dir / "predictions.jsonl"
 
     started = time.perf_counter()
-    stream = VideoFrameStream(source, max_frames=max_frames)
+    stream = VideoFrameStream(
+        source,
+        max_frames=max_frames,
+        reconnect_attempts=reconnect_attempts,
+        reconnect_delay_s=reconnect_delay_s,
+    )
 
     tracker = None
     if track:
@@ -586,6 +612,7 @@ def run_stream(
         elapsed_s=elapsed,
         backend=engine.backend,
         tracks=len(track_ids),
+        reconnects=stream.reconnects_used,
         decode_s=stats["decode_s"],
         infer_s=stats["infer_s"],
         render_s=stats["render_s"],
