@@ -5,7 +5,7 @@
 | 版本 | v1.0 |
 | 状态 | as-built 设计 + 整改实施设计（待实施） |
 | 日期 | 2026-11-06 |
-| 审计基线 | v0.6.0 工作区（分支 release/0.3.0，含未提交改动）；文中行号均为该快照，实施时以符号名为锚 |
+| 审计基线 | v0.6.0 工作区（分支 `release/0.6`，含未提交改动）；文中行号均为该快照，实施时以符号名为锚 |
 | 读者 | 框架研发、评审人、平台 / MLOps |
 | 关联 | [工程加固计划](../hardening_plan.md)（跨模块批次与版本映射）、[架构总览](../framework_design.md)、[已知限制](../known_limits.md)、[发布流程](../release_process.md) |
 
@@ -133,7 +133,8 @@ layering / docs links / mkdocs --strict），外加：
 
 1. **分支/版本失配**：当前分支名 `release/0.3.0`，但树内已是 v0.6.0
    提交、CHANGELOG 有 Unreleased 段。建立"分支名与版本对齐"的发布
-   检查项。
+   检查项。（2026-11-07 更新：分支已重命名为 `release/0.6`，按 minor
+   线滚动；0.7.0 起开新分支。）
 2. **AGENTS.md §5 的 mypy 命令是红的**：
    `src/autovision/inference/stream.py:512` 存在 `LineZone` 类型变量
    被赋值 `PolygonZone` 的类型错误。二选一：修类型（推荐，用联合
