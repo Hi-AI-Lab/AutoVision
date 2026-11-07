@@ -32,6 +32,7 @@ import math
 import pytest
 import torch
 
+from autovision.errors import ConfigValidationError
 from autovision.tasks.detection.detr.dome_decoder import (
     DomeDFINEv2Decoder,
 )
@@ -1195,9 +1196,9 @@ class TestGradientAccumulationResolution:
 
     def test_explicit_passthrough_and_validation(self):
         assert self._resolve(3, 64, 16) == 3
-        with pytest.raises(ValueError, match=">= 1"):
+        with pytest.raises(ConfigValidationError, match=">= 1"):
             self._resolve(0, 64, 16)
-        with pytest.raises(ValueError, match="auto"):
+        with pytest.raises(ConfigValidationError, match="auto"):
             self._resolve("sometimes", 64, 16)
 
     @pytest.mark.skipif(
