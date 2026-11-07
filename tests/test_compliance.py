@@ -54,6 +54,34 @@ def test_license_normalization():
     assert normalize_license(None) == "UNKNOWN"
 
 
+def test_license_normalization_with_exception():
+    # SPDX ``WITH <exception>`` must not collapse the whole expression to
+    # UNKNOWN: the exception is stripped per-term and the underlying license
+    # is normalized (regression: torch's License-Expression).
+    assert normalize_license("Apache-2.0 WITH LLVM-exception") == "Apache-2.0"
+    assert (
+        normalize_license("GPL-2.0-or-later WITH Classpath-exception-2.0")
+        == "GPL-2.0-or-later"
+    )
+    assert (
+        normalize_license("MIT AND Apache-2.0 WITH LLVM-exception")
+        == "MIT AND Apache-2.0"
+    )
+
+
+def test_license_normalization_bsl_and_compound_expression():
+    # BSL-1.0 (Boost Software License) must be recognized, and a full compound
+    # expression with exceptions must normalize without falling through to
+    # UNKNOWN (torch's actual metadata).
+    assert normalize_license("BSL-1.0") == "BSL-1.0"
+    assert normalize_license("boost software license") == "BSL-1.0"
+    torch_expr = (
+        "Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause "
+        "AND BSD-3-Clause AND BSL-1.0 AND MIT"
+    )
+    assert normalize_license(torch_expr) != "UNKNOWN"
+
+
 def test_license_normalization_atoms():
     expected = {
         "MIT": "MIT",

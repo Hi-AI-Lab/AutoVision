@@ -62,6 +62,51 @@ python examples/tasks/classification.py \
     --onnx runs/classification.onnx
 ```
 
+## Subsystem / coverage examples
+
+Beyond the per-task train/infer pairs, these examples exercise subsystems and
+code paths the default happy-path scripts do not reach — every detection
+backend family, the TensorRT / OpenVINO / INT8 export paths, the FastAPI
+reference serving stack, the plugin protocol, and self-supervised pretraining
+plus embedding extraction:
+
+```bash
+# Every detection backend family (gtr/rfdetr via released weights,
+# rtdetr/detr via a 2-step coco8 smoke train + inference)
+python examples/tasks/detection_backends.py
+
+# Export a trained .pt to ONNX / TensorRT / OpenVINO / INT8
+python examples/tasks/export_demo.py \
+    --weights runs/examples/classification_train/exported_models/exported_last.pt --int8
+
+# Reference serving: wrap a checkpoint in the FastAPI app, hit /predict + /healthz
+python examples/tasks/serving_demo.py
+
+# Plugin protocol: register / enumerate / retrieve a plugin
+python examples/tasks/plugin_demo.py
+
+# Tracking primitives: BYTETracker association + line/polygon zones + smoother
+python examples/tasks/tracking_demo.py
+
+# Hyperparameter search: random / grid / asha (synthetic objective, offline)
+python examples/tasks/hpo_demo.py
+
+# Model registry: filesystem backend + deployment gates + rollback + audit
+python examples/tasks/registry_demo.py
+
+# Compliance: license normalization + compliance report + gate
+python examples/tasks/compliance_demo.py
+
+# Self-supervised pretraining + embedding extraction
+python examples/tasks/pretrain_demo.py
+```
+
+> Known framework limits surfaced by these examples: detection (`gtr`) TensorRT
+> export fails the parity gate, and detection OpenVINO serving crashes in the
+> postprocess (`decode.py` expects a structured output, gets a `list`). Those
+> are `src/autovision` defects, not example bugs — the ONNX and OpenVINO
+> artifacts still build/serve where the path is healthy.
+
 > **`--onnx` needs `--weights` for trained artifacts**: without `--weights`,
 > the inference script builds its task's DEFAULT checkpoint network (e.g.
 > the 19-class Cityscapes semseg model, the 80-class COCO detector) purely
@@ -106,6 +151,8 @@ Apache-2.0 core.
 | `--image PATH` | input image (default: bundled `assets/airport_aerial.jpg`) |
 | `--weights PATH` | exported `.pt` from `<task>_train.py` |
 | `--onnx PATH` | exported `.onnx` artifact: run the forward through it (any device; network supplies pre/post only) |
+| `--engine PATH` | compiled TensorRT `.engine` artifact: run the forward via backend=`tensorrt` (needs CUDA) |
+| `--openvino PATH` | OpenVINO `.xml` IR artifact: run the forward via backend=`openvino` |
 | `--class-names PATH` | optional JSON `{class_id: name}` for exported checkpoints |
 | `--threshold F` | score threshold (default: 0.3) |
 | `--device auto\|cpu\|cuda` | inference device |

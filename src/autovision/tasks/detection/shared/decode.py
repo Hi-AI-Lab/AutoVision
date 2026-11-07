@@ -27,12 +27,17 @@ def decode_detection_outputs(
 ) -> list[dict[str, Any]]:
     """Top-k decode raw DETR outputs to per-image boxes in original pixels.
 
-    ``raw_outputs``: object with ``.logits``/``.boxes`` (or such a tuple) —
-    ``logits`` (B, Q, C) raw class scores, ``boxes`` (B, Q, 4) normalized
-    cxcywh. ``metadata``: per-image ``{"orig_w", "orig_h"}``.
+    ``raw_outputs``: object with ``.logits``/``.boxes`` (or such a tuple /
+    list) — ``logits`` (B, Q, C) raw class scores, ``boxes`` (B, Q, 4)
+    normalized cxcywh. ``metadata``: per-image ``{"orig_w", "orig_h"}``.
+
+    Compiled backends (OpenVINO / TensorRT runners) return a flat list in
+    the exported output-port order, which follows the
+    :class:`ObjectDetectionOutput` field order: ``[logits, boxes]`` (the
+    export parity gate pins this order).
     """
-    if isinstance(raw_outputs, tuple):
-        logits, boxes = raw_outputs
+    if isinstance(raw_outputs, (tuple, list)):
+        logits, boxes = raw_outputs[0], raw_outputs[1]
     else:
         logits, boxes = raw_outputs.logits, raw_outputs.boxes
     scores = logits.sigmoid()

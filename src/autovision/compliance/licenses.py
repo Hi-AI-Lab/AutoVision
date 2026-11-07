@@ -25,6 +25,7 @@ DEFAULT_ALLOWLIST: frozenset[str] = frozenset(
         "Python-2.0",
         "PSF-2.0",
         "MPL-2.0",
+        "BSL-1.0",
     }
 )
 
@@ -68,10 +69,27 @@ _ALIASES: dict[str, str] = {
     r"python(?:[\s-]+licen[cs]e)?[\s-]*,?[\s-]*(?:v|version[\s-]+)?2(?:\.0)?": "Python-2.0",
     # Non-SPDX license still tracked explicitly by the registry.
     r"dino[\s-]*v?3(?:[\s-]+licen[cs]e)?": "DINOv3 License",
+    # Boost Software License (permissive; appears in package expressions such
+    # as torch's License-Expression). Matches the canonical "BSL-1.0" token and
+    # the spelled-out name; without it the whole expression falls through to
+    # UNKNOWN (the alias table only maps explicit entries).
+    r"bsl[\s-]*1(?:\.0)?": "BSL-1.0",
+    r"boost[\s-]+software[\s-]+licen[cs]e"
+    r"(?:,?[\s-]+(?:version|v)\.?[\s-]+1(?:\.0)?)?": "BSL-1.0",
 }
 
 _ATOM_PUNCTUATION = " \t\r\n.,;:!?\"'()[]{}"
-_SPDX_OPERATOR = re.compile(r"(?<![\w-])(AND|OR|WITH)(?![\w-])", re.IGNORECASE)
+#: Top-level SPDX connectors between licenses. ``WITH`` is deliberately NOT
+#: here: it binds a single license to an exception (e.g. ``Apache-2.0 WITH
+#: LLVM-exception``), and splitting on it turns the exception name into a
+#: standalone license atom that the alias table cannot resolve — collapsing a
+#: perfectly good expression to ``UNKNOWN`` (observed with torch's
+#: ``Apache-2.0 AND ... WITH LLVM-exception AND ...`` metadata). Exceptions
+#: are stripped per-term instead (see ``_strip_exception``).
+_SPDX_CONNECTOR = re.compile(r"(?<![\w-])(AND|OR)(?![\w-])", re.IGNORECASE)
+#: A trailing ``WITH <exception>`` (classpath / LLVM / GCC / ...) on a single
+#: license term — removed before the license atom is matched.
+_EXCEPTION_RE = re.compile(r"\s+WITH\s+\S.*$", re.IGNORECASE)
 _COMPILED_ALIASES: tuple[tuple[re.Pattern[str], str], ...] = tuple(
     sorted(
         ((re.compile(pattern, re.IGNORECASE), spdx) for pattern, spdx in _ALIASES.items()),
@@ -102,12 +120,26 @@ def _match_atom(atom: str) -> str | None:
     return None
 
 
+def _strip_exception(term: str) -> str:
+    """Drop a trailing ``WITH <exception>`` from one license term.
+
+    ``Apache-2.0 WITH LLVM-exception`` -> ``Apache-2.0``; terms without an
+    exception pass through unchanged. Exceptions are GPL-style additions that
+    do not change a license's allowlist standing, so the gate judges the
+    underlying license.
+    """
+    return _EXCEPTION_RE.sub("", term).strip()
+
+
 def normalize_license(value: str | None) -> str:
     """Map a license name or SPDX expression to canonical identifiers.
 
-    ``AND``/``OR``/``WITH`` are preserved in order.  Every atom must resolve
-    through the explicit alias table; if any atom is unknown the whole value
-    becomes ``"UNKNOWN"`` so compliance never silently allows it.
+    ``AND``/``OR`` are preserved in order; a ``WITH <exception>`` suffix on a
+    license term (e.g. ``Apache-2.0 WITH LLVM-exception``) is stripped before
+    matching so the exception name is never treated as a standalone license.
+    Every license atom must still resolve through the explicit alias table; if
+    any atom is unknown the whole value becomes ``"UNKNOWN"`` so compliance
+    never silently allows it.
     """
     if not value:
         return "UNKNOWN"
@@ -122,11 +154,11 @@ def normalize_license(value: str | None) -> str:
         return atom
 
     tokens: list[str] = []
-    for index, part in enumerate(_SPDX_OPERATOR.split(text)):
+    for index, part in enumerate(_SPDX_CONNECTOR.split(text)):
         if index % 2:
             tokens.append(part.upper())
             continue
-        atom = _match_atom(part)
+        atom = _match_atom(_strip_exception(part))
         if atom is None:
             return "UNKNOWN"
         tokens.append(atom)

@@ -191,9 +191,17 @@ def train_instance_segmentation(
         raise ValueError("The training dataset is empty.")
 
     train_model = train_cls(resolved_model_args)
-    train_model.set_categories(
-        {index: str(index) for index in range(num_classes)}
+    # Surface the dataset's real category names (COCO ``categories`` carry
+    # ``name``) instead of generic ``{0: '0', 1: '1'}`` placeholders. Fall back
+    # to numeric names only when the annotation declares a different category
+    # count than ``num_classes``.
+    detected = getattr(probe, "categories", None) or {}
+    classes = (
+        detected
+        if len(detected) == num_classes
+        else {index: str(index) for index in range(num_classes)}
     )
+    train_model.set_categories(classes)
     precision_resolved = precision
     if precision_resolved == "auto":
         precision_resolved = (
@@ -276,5 +284,5 @@ def train_instance_segmentation(
         best_metrics=fit_result.best_metrics,
         stopped_early=fit_result.stopped_early,
         stop_step=fit_result.stop_step,
-        classes={index: str(index) for index in range(num_classes)},
+        classes=classes,
     )

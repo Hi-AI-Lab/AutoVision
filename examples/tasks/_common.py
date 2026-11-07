@@ -298,20 +298,36 @@ def load_exported_model(path: Path, device: str) -> Any:
 
 
 def run_prediction(model: Any, args: argparse.Namespace) -> dict[str, Any]:
-    """Run one image eagerly, or through ``--onnx`` when the flag is set.
+    """Run one image eagerly, or through a compiled artifact when set.
 
-    The ONNX backend swaps only the forward: the network keeps its own
-    pre/post-processing, so the returned record is identical in shape to
-    ``model.predict`` regardless of the backend. ``model`` may be a
-    ``DetectionModel`` handle or a bare task network — the examples build
-    both shapes depending on the ``--weights`` flag.
+    The compiled backends (``--onnx`` / ``--engine`` / ``--openvino``) swap
+    only the forward: the network keeps its own pre/post-processing, so the
+    returned record is identical in shape to ``model.predict`` regardless of
+    the backend. ``model`` may be a ``DetectionModel`` handle or a bare task
+    network — the examples build both shapes depending on the ``--weights``
+    flag. TensorRT runs on CUDA; ONNX/OpenVINO run CPU-resident sessions.
     """
-    if getattr(args, "onnx", None) is not None:
+    artifact = (
+        getattr(args, "engine", None)
+        or getattr(args, "openvino", None)
+        or getattr(args, "onnx", None)
+    )
+    if artifact is not None:
         from autovision.inference import InferenceEngine
 
+        backend = (
+            "tensorrt"
+            if getattr(args, "engine", None) is not None
+            else "openvino"
+            if getattr(args, "openvino", None) is not None
+            else "onnx"
+        )
         network = model.network if hasattr(model, "network") else model
+        device = "cuda" if backend == "tensorrt" else "cpu"
         try:
-            engine = InferenceEngine(network, backend="onnx", artifact=args.onnx)
+            engine = InferenceEngine(
+                network, backend=backend, artifact=artifact, device=device
+            )
         except AutoVisionError as error:
             # Geometry/task identity mismatches between the artifact and
             # the constructed network (fail-closed metadata check) read

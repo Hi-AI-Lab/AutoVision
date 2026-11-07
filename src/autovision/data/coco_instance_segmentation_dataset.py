@@ -60,6 +60,17 @@ class COCOInstanceSegmentationDataset(Dataset):
             for c in payload.get("categories", [])
         )
         self._user_to_internal = {c: i for i, c in enumerate(categories)}
+        # Internal index -> human name (COCO ``categories`` carry ``name``;
+        # fall back to the numeric id when absent). Mirrors the pose dataset's
+        # ``categories`` contract so training helpers can surface real names
+        # instead of generic ``{0: '0', 1: '1'}`` placeholders.
+        name_by_id = {
+            int(c["id"]): str(c.get("name", c["id"]))
+            for c in payload.get("categories", [])
+        }
+        self.categories: dict[int, str] = {
+            i: name_by_id.get(cat_id, str(cat_id)) for i, cat_id in enumerate(categories)
+        }
         self._images_dir = images_dir
         self.transform = transform
 

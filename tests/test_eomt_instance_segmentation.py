@@ -153,6 +153,27 @@ class TestMaskAPEvaluator:
         evaluator = COCOMaskAPEvaluator({0: "a"})
         assert evaluator.compute() == {"mask_map": 0.0, "mask_map_50": 0.0}
 
+
+class TestInstanceDatasetCategories:
+    def test_categories_map_internal_index_to_name(self, tmp_path):
+        # The dataset must surface COCO category names (not just ids) so the
+        # training helper can report real class names instead of
+        # ``{0: '0', 1: '1'}`` placeholders.
+        path = write_coco(tmp_path)
+        dataset = COCOInstanceSegmentationDataset(path, images_dir=tmp_path)
+        assert dataset.categories == {0: "square_a", 1: "square_b"}
+
+    def test_categories_fallback_to_id_without_name(self, tmp_path):
+        annotations = {
+            "images": [{"id": 0, "file_name": "x.jpg", "width": 4, "height": 4}],
+            "categories": [{"id": 3}, {"id": 7}],
+            "annotations": [],
+        }
+        path = tmp_path / "no_names.json"
+        path.write_text(json.dumps(annotations))
+        dataset = COCOInstanceSegmentationDataset(path, images_dir=tmp_path)
+        assert dataset.categories == {0: "3", 1: "7"}
+
     def test_state_roundtrip(self):
         evaluator = COCOMaskAPEvaluator({0: "a"})
         mask = torch.ones(1, 2, 2, dtype=torch.bool)

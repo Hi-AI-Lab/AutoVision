@@ -52,7 +52,10 @@ def main() -> None:
         model = load_exported_model(args.weights, device=device)
         if args.onnx is None:
             gtr_eager_device_guard(model.network, device=device)
-        names = load_class_names(args.class_names) or {0: "person", 1: "person"}
+        # COCO person_keypoints uses category id 1 for "person"; the model's
+        # class 0 is the background/no-object slot (filtered by threshold), so
+        # only class 1 carries a display name.
+        names = load_class_names(args.class_names) or {1: "person"}
     else:
         gtr_requirement(need_cuda=not args.onnx, device=device)
         from autovision.tasks.pose_estimation.gtr import GTRPoseEstimation
@@ -65,7 +68,9 @@ def main() -> None:
             load_checkpoint=not args.onnx,
         )
         model.eval().to(device)
-        names = {0: "person", 1: "person"}
+        # COCO person_keypoints uses category id 1 for "person"; class 0 is the
+        # background/no-object slot (filtered by threshold).
+        names = {1: "person"}
     predict_and_annotate(model, args, names, title="pose_estimation")
 
 

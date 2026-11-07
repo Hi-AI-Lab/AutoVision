@@ -6,6 +6,31 @@
 
 `0.1.x` 为内部开发线（未对外发布，无变更记录）；本文件自 `0.2.0` 起对外。
 
+## [Unreleased]
+
+### 新增
+
+- **示例覆盖补全**（`examples/tasks`）：新增 `detection_backends.py`（遍历 gtr / rfdetr / rtdetr / detr 四检测家族，rtdetr/detr 无发布权重时改走 coco8 两步训练 + 推理）、`export_demo.py`（将训练所得 `.pt` 导出 ONNX / TensorRT / OpenVINO / INT8 四格式）、`serving_demo.py`（FastAPI 参考服务 `/predict` + `/healthz` 冒烟）、`plugin_demo.py`（插件协议注册 / 枚举 / 获取）、`tracking_demo.py`（BYTETracker 关联 + 线/多边形区域计数 + 轨迹平滑，离线合成序列）、`hpo_demo.py`（超参搜索 random/grid/asha 三策略 + 产物 + 指纹复用 + task_trial 集成，合成目标离线可跑）、`registry_demo.py`（文件系统模型注册表 + 部署门禁 dev→staging→prod + 回滚 + 审计 / 模型卡 / 目录查询，全合成离线）、`compliance_demo.py`（许可证归一化 `normalize_license` + allowlist + 依赖清单 + 合规报告三态 pass/mismatch/missing + 产物包与门禁，全合成离线）、`pretrain_demo.py`（自监督预训练 + 嵌入提取）；`detection.py` 与 `_common.run_prediction` 新增 `--engine` / `--openvino`    编译后端（复用 `InferenceEngine`）。
+
+### 修复
+
+- **合规许可证归一化误判 `UNKNOWN`**：`compliance/licenses.py` 的
+  `normalize_license` 把 SPDX 的 `WITH <exception>`（如
+  `Apache-2.0 WITH LLVM-exception`）当作顶层连接符拆分，导致例外名作为独立
+  license 原子无法命中别名表、整个表达式 fail-closed 成 `UNKNOWN`；torch 等
+  真实包的 `License-Expression` 因此被错误报告。现改为按项剥离 `WITH` 例外后缀，
+  仅 `AND`/`OR` 作为顶层连接符，且新增 `BSL-1.0`（Boost Software License）别名并
+  纳入部署 allowlist（与 MIT/BSD 同属宽松许可，保持一致）。`dependency_inventory`
+  现在能正确把 torch 等标记为 `BSL-1.0` 而非 `UNKNOWN`。
+
+- **检测 OpenVINO / TensorRT 后端推理崩溃**：`detection/shared/decode.py`
+  的 `decode_detection_outputs` 此前只接受带 `.logits`/`.boxes` 的对象或
+  `(logits, boxes)` 元组，而 OpenVINO / TensorRT 的编译运行器返回的是按导出
+  端口顺序排列的 `list`（`[logits, boxes]`），触发
+  `AttributeError: 'list' object has no attribute 'logits'`。现已同时接受
+  `list` / `tuple` / 对象三种输入，各检测 DETR 家族（detr / rtdetr / rfdetr）
+  的 `--openvino` / `--engine` 推理路径恢复正常。
+
 ## [0.6.1] - 2026-11-07
 
 ### 安全修复

@@ -20,6 +20,11 @@ its own pre/post-processing; only the forward is swapped):
         'detr/gtrvit-s', pretrained=True).export('gtrvit_s.onnx', precision='fp32')"
     python examples/tasks/detection.py --onnx gtrvit_s.onnx
 
+``--engine`` / ``--openvino`` run the forward through a TensorRT ``.engine``
+or an OpenVINO ``.xml`` IR exported from the same checkpoint (see
+``examples/tasks/export_demo.py``), again keeping the network's own
+pre/post-processing — the compiled deployment paths.
+
 ``--effect`` renders through the annotators migrated from supervision
 (``autovision.visualize.effects``): ``corner`` / ``round`` replace the plain
 box with corner brackets or rounded boxes, while ``blur`` / ``pixelate``
@@ -137,6 +142,24 @@ def main() -> None:
             "checkpoint (its network supplies pre/post only)"
         ),
     )
+    parser.add_argument(
+        "--engine",
+        type=Path,
+        default=None,
+        help=(
+            "compiled TensorRT .engine artifact: run the forward via "
+            "backend='tensorrt' (needs CUDA). Built with export_demo.py."
+        ),
+    )
+    parser.add_argument(
+        "--openvino",
+        type=Path,
+        default=None,
+        help=(
+            "OpenVINO .xml IR artifact: run the forward via "
+            "backend='openvino'. Built with export_demo.py."
+        ),
+    )
     parser.add_argument("--threshold", type=float, default=0.3)
     parser.add_argument(
         "--effect",
@@ -162,15 +185,19 @@ def main() -> None:
         raise SystemExit(f"Image not found: {args.image}")
     if args.onnx is not None and not args.onnx.is_file():
         raise SystemExit(f"ONNX artifact not found: {args.onnx}")
-    # ONNX mode keeps the network CPU-resident (the session runs on the
-    # CPU EP), so the eager-only CUDA requirements do not apply.
-    device = "cpu" if args.onnx is not None else resolve_device(args.device)
+    # Compiled-artifact modes (ONNX / TensorRT / OpenVINO) keep the network
+    # CPU-resident and never run the GLA CUDA kernels, so the eager-only
+    # CUDA requirements do not apply.
+    uses_compiled = (
+        args.onnx is not None or args.engine is not None or args.openvino is not None
+    )
+    device = "cpu" if uses_compiled else resolve_device(args.device)
 
-    if args.onnx is not None:
+    if uses_compiled:
         # Construction never runs the GLA kernels, so the CUDA requirement
         # does not apply here (the `gtr` extra still is — the GLA module
         # builds fla primitives at construction time). The network only
-        # supplies pre/post-processing for the ONNX session.
+        # supplies pre/post-processing for the compiled artifact session.
         if args.model.startswith("detr/gtrvit"):
             gtr_requirement(need_cuda=False)
         if args.weights is not None:
@@ -232,9 +259,16 @@ def main() -> None:
 
     print(f"image       = {args.image} ({rendered.width}x{rendered.height})")
     print(f"weights     = {args.weights or args.model} @ threshold {args.threshold}")
-    backend = f"onnx ({args.onnx})" if args.onnx is not None else "eager"
+    if args.engine is not None:
+        backend = f"tensorrt ({args.engine})"
+    elif args.openvino is not None:
+        backend = f"openvino ({args.openvino})"
+    elif args.onnx is not None:
+        backend = f"onnx ({args.onnx})"
+    else:
+        backend = "eager"
     print(f"backend     = {backend}")
-    device_shown = "cpu (onnx session)" if args.onnx is not None else device
+    device_shown = f"cpu ({backend} session)" if uses_compiled else device
     print(f"device      = {device_shown}")
     print(f"effect      = {args.effect}")
     print(f"detections  = {len(records)}")
