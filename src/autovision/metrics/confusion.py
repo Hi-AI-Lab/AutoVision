@@ -10,6 +10,7 @@ FP lands in the FP row under its predicted class.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -20,6 +21,8 @@ if TYPE_CHECKING:
     from autovision.metrics.error_analysis import Match
 
 __all__ = ["ConfusionMatrix"]
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -65,24 +68,49 @@ class ConfusionMatrix:
         fp_row = size - 1
         fn_col = size - 1
 
+        # Explicit class_ids may omit classes present in the matches; their
+        # counts are dropped by design, but that must not happen silently
+        # (H3-1c): aggregate the missed predicted/true class sets and warn
+        # once instead of per row.
+        unseen_predicted: set[int] = set()
+        unseen_true: set[int] = set()
+
         for match in matches:
             if match.kind == "ignored":
                 continue
             predicted = int(match.class_id)
             column = index.get(predicted)
             if match.kind == "tp":
-                if column is not None:
+                if column is None:
+                    unseen_predicted.add(predicted)
+                else:
                     matrix[column, column] += 1
             elif match.kind == "fn":
-                if column is not None:
+                # For FN rows ``class_id`` is the missed GT (true) class.
+                if column is None:
+                    unseen_true.add(predicted)
+                else:
                     matrix[column, fn_col] += 1
             elif match.kind == "fp":
+                if column is None:
+                    unseen_predicted.add(predicted)
                 other = match.other_class_id
                 row = index.get(int(other)) if other is not None else None
                 if row is not None and column is not None:
                     matrix[row, column] += 1
                 elif column is not None:
                     matrix[fp_row, column] += 1
+                if other is not None and int(other) not in index:
+                    unseen_true.add(int(other))
+        if unseen_predicted or unseen_true:
+            logger.warning(
+                "Confusion matrix is restricted to class_ids=%s; counts for "
+                "unseen predicted classes %s and unseen true classes %s are "
+                "dropped and not representable in the matrix.",
+                ordered,
+                sorted(unseen_predicted),
+                sorted(unseen_true),
+            )
         return cls(
             matrix=matrix,
             class_ids=ordered,

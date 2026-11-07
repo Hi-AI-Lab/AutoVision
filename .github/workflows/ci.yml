@@ -25,6 +25,17 @@ jobs:
       # Incremental type gate for dependency-light core modules. A full-tree
       # gate is tracked separately; these files are annotation-clean today.
       - run: mypy src/autovision/errors.py src/autovision/runtime/env.py src/autovision/runtime/checkpoint.py src/autovision/runtime/fsdp.py src/autovision/config
+      # H4-4: structural guard — every test_* definition must live at module
+      # top level or in a module-level class body (the H0-1 indentation
+      # accident hid 8 tests from collection; this makes it a lint failure).
+      - run: python scripts/check_test_layout.py
+      # H4-3: every design/H id referenced in src/ or docs/ must be anchored
+      # by a test docstring/comment. Time-boxed exemptions live in
+      # scripts/design_anchor_allowlist.toml, MAINTAINED ONLY VIA
+      #   python scripts/check_design_anchors.py --write-allowlist
+      # (each entry carries a reason and an expiry date; an expired or no
+      # longer needed entry fails the run).
+      - run: python scripts/check_design_anchors.py
 
   provenance:
     runs-on: ubuntu-latest

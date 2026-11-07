@@ -39,7 +39,15 @@ class DepthMetricCollector:
         self.min_depth = float(min_depth)
         self.max_depth = float(max_depth)
         self.alignment = alignment
-        self._pairs: list[tuple[torch.Tensor, torch.Tensor]] = []
+        # METRIC-07: streaming scalars, not accumulated depth maps — the
+        # eager variant stored every (pred, gt) map for the whole val set
+        # (and merge_state doubled it), which is tens of GB at NYU scale.
+        # The alignment fits per image BEFORE the scalars are taken, so
+        # the accumulated state is O(1) in dataset size.
+        self._abs_rel_sum = 0.0
+        self._squared_error_sum = 0.0
+        self._delta_counts = [0, 0, 0]
+        self._total = 0
 
     def update(self, predictions: torch.Tensor, targets: torch.Tensor) -> None:
         """``predictions``/``targets``: (B, H, W) or (H, W) depth in meters."""
@@ -47,18 +55,48 @@ class DepthMetricCollector:
             predictions = predictions.unsqueeze(0)
             targets = targets.unsqueeze(0)
         for pred, gt in zip(predictions, targets):
-            self._pairs.append(
-                (pred.detach().float().cpu(), gt.detach().float().cpu())
-            )
+            self._accumulate(pred.detach().float().cpu(), gt.detach().float().cpu())
+
+    def _accumulate(self, pred: torch.Tensor, gt: torch.Tensor) -> None:
+        support = (
+            (gt >= self.min_depth)
+            & (gt <= self.max_depth)
+            & torch.isfinite(pred)
+            & (pred > 0)
+        )
+        if not bool(support.any()):
+            return
+        pred_v = self._align(pred[support], gt[support]).clamp_min(1e-6)
+        gt_v = gt[support]
+        self._abs_rel_sum += (pred_v - gt_v).abs().div(gt_v).sum().item()
+        self._squared_error_sum += ((pred_v - gt_v) ** 2).sum().item()
+        ratio = torch.maximum(pred_v / gt_v, gt_v / pred_v)
+        for index, threshold in enumerate((1.25, 1.25**2, 1.25**3)):
+            self._delta_counts[index] += int((ratio < threshold).sum().item())
+        self._total += pred_v.numel()
 
     def reset(self) -> None:
-        self._pairs = []
+        self._abs_rel_sum = 0.0
+        self._squared_error_sum = 0.0
+        self._delta_counts = [0, 0, 0]
+        self._total = 0
 
     def export_state(self) -> dict:
-        return {"pairs": list(self._pairs)}
+        return {
+            "abs_rel_sum": self._abs_rel_sum,
+            "squared_error_sum": self._squared_error_sum,
+            "delta_counts": list(self._delta_counts),
+            "total": self._total,
+        }
 
     def merge_state(self, state: dict) -> None:
-        self._pairs.extend(state.get("pairs", []))
+        """Merge a rank's scalar totals — additive, so rank order is
+        irrelevant and the merged totals equal the single-process run."""
+        self._abs_rel_sum += state.get("abs_rel_sum", 0.0)
+        self._squared_error_sum += state.get("squared_error_sum", 0.0)
+        for index, count in enumerate(state.get("delta_counts", [0, 0, 0])):
+            self._delta_counts[index] += count
+        self._total += state.get("total", 0)
 
     def _align(self, pred: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
         if self.alignment == "none":
@@ -77,35 +115,16 @@ class DepthMetricCollector:
         return (slope * log_pred + intercept).exp()
 
     def compute(self) -> dict[str, float]:
-        if not self._pairs:
-            return {"abs_rel": 0.0, "rmse": 0.0, "delta1": 0.0, "delta2": 0.0, "delta3": 0.0}
-        abs_rel_sum = 0.0
-        squared_error_sum = 0.0
-        delta_counts = [0, 0, 0]
-        total = 0
-        for pred, gt in self._pairs:
-            support = (
-                (gt >= self.min_depth)
-                & (gt <= self.max_depth)
-                & torch.isfinite(pred)
-                & (pred > 0)
-            )
-            if not bool(support.any()):
-                continue
-            pred_v = self._align(pred[support], gt[support]).clamp_min(1e-6)
-            gt_v = gt[support]
-            abs_rel_sum += (pred_v - gt_v).abs().div(gt_v).sum().item()
-            squared_error_sum += ((pred_v - gt_v) ** 2).sum().item()
-            ratio = torch.maximum(pred_v / gt_v, gt_v / pred_v)
-            for index, threshold in enumerate((1.25, 1.25**2, 1.25**3)):
-                delta_counts[index] += int((ratio < threshold).sum().item())
-            total += pred_v.numel()
+        total = self._total
         if total == 0:
-            return {"abs_rel": 0.0, "rmse": 0.0, "delta1": 0.0, "delta2": 0.0, "delta3": 0.0}
+            return {
+                "abs_rel": 0.0, "rmse": 0.0,
+                "delta1": 0.0, "delta2": 0.0, "delta3": 0.0,
+            }
         return {
-            "abs_rel": abs_rel_sum / total,
-            "rmse": (squared_error_sum / total) ** 0.5,
-            "delta1": delta_counts[0] / total,
-            "delta2": delta_counts[1] / total,
-            "delta3": delta_counts[2] / total,
+            "abs_rel": self._abs_rel_sum / total,
+            "rmse": (self._squared_error_sum / total) ** 0.5,
+            "delta1": self._delta_counts[0] / total,
+            "delta2": self._delta_counts[1] / total,
+            "delta3": self._delta_counts[2] / total,
         }

@@ -13,6 +13,8 @@ entry points copy the input once, so callers never lose their original.
 
 from __future__ import annotations
 
+import logging
+import math
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -22,7 +24,7 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw, ImageFont
 
-from autovision.errors import AutoVisionError
+from autovision.errors import ConfigValidationError
 from autovision.results import InferenceResult, mask_to_bool
 from autovision.visualize.skeletons import COCO_SKELETON, SKELETONS
 
@@ -41,6 +43,8 @@ __all__ = [
     "annotate_result",
     "draw_result",
 ]
+
+logger = logging.getLogger(__name__)
 
 RGB = tuple[int, int, int]
 
@@ -137,7 +141,12 @@ def _label_text(
         )
     if scores is None or index >= int(scores.shape[0]):
         return name
-    return f"{name} {float(scores[index]):.2f}"
+    score = float(scores[index])
+    if not math.isfinite(score):
+        # NaN/Inf would format as "cat nan"; the overlay contract shows "n/a"
+        # so a broken confidence never renders like a parsed value (H3-1j).
+        return f"{name} n/a"
+    return f"{name} {score:.2f}"
 
 
 def _clamped_box(
@@ -326,6 +335,43 @@ class LabelAnnotator(BaseAnnotator):
         return image
 
 
+def _resize_nearest_bool(array: np.ndarray, width: int, height: int) -> np.ndarray:
+    """NEAREST-resize a binary mask to ``(height, width)`` as bool.
+
+    Nearest-neighbour keeps per-pixel foreground labels intact; a smooth
+    filter would smear mask borders into intermediate values that a binary
+    threshold then re-erodes (H3-1i).
+    """
+    resized = Image.fromarray(array.astype(np.uint8)).resize(
+        (width, height), Image.NEAREST
+    )
+    return np.asarray(resized).astype(bool)
+
+
+def _resize_mask_stack_to_frame(
+    masks: np.ndarray, width: int, height: int
+) -> np.ndarray:
+    """Bring an ``(N, h, w)`` instance stack to the frame size (H3-1i).
+
+    Decoders run at network input resolution while frames arrive at source
+    resolution; silently skipping mismatched instances used to hide every
+    mask. Semantic masks already resize with NEAREST, so instance masks do
+    the same and the mismatch is logged (once per annotate call) instead of
+    being swallowed.
+    """
+    if masks.shape[0] == 0 or masks.shape[1:] == (height, width):
+        return masks
+    logger.debug(
+        "MaskAnnotator resized %d instance mask(s) from %s to frame size "
+        "(width=%d, height=%d).",
+        int(masks.shape[0]),
+        tuple(masks.shape[1:]),
+        width,
+        height,
+    )
+    return np.stack([_resize_nearest_bool(mask, width, height) for mask in masks])
+
+
 class MaskAnnotator(BaseAnnotator):
     """Blend per-instance masks onto the image (alpha-composited)."""
 
@@ -341,6 +387,7 @@ class MaskAnnotator(BaseAnnotator):
         base = np.asarray(image.convert("RGB")).astype(np.float32)
         height, width = base.shape[:2]
         masks: np.ndarray = mask_to_bool(result.masks)
+        masks = _resize_mask_stack_to_frame(masks, width, height)
         boxes = (
             _as_numpy(result.bboxes).reshape(-1, 4)
             if result.bboxes is not None
@@ -353,8 +400,6 @@ class MaskAnnotator(BaseAnnotator):
         )
         for index in range(min(masks.shape[0], len(result))):
             mask = masks[index]
-            if mask.shape != (height, width):
-                continue
             clamped = None
             if boxes is not None and index < boxes.shape[0]:
                 clamped = _clamped_box(boxes[index].tolist(), width, height)
@@ -435,7 +480,10 @@ class KeypointAnnotator(BaseAnnotator):
         elif isinstance(skeleton, str):
             name = skeleton.lower()
             if name not in SKELETONS:
-                raise AutoVisionError(
+                # Annotator constructor arguments are user-facing configuration,
+                # so the existing concrete ConfigValidationError fits; H3-1h
+                # only bans raising the bare AutoVisionError base class.
+                raise ConfigValidationError(
                     f"Unknown skeleton '{skeleton}'; available: "
                     f"{sorted(SKELETONS)}."
                 )
@@ -446,7 +494,7 @@ class KeypointAnnotator(BaseAnnotator):
             self.edges = tuple((int(start), int(end)) for start, end in skeleton)
         for start, end in self.edges:
             if start < 0 or end < 0:
-                raise AutoVisionError(
+                raise ConfigValidationError(
                     "Keypoint skeleton edges must be zero-based and non-negative."
                 )
         self.vertex_radius = max(1, int(vertex_radius))
@@ -555,17 +603,27 @@ def _blend_label_map(
     """Alpha-blend a ``(H, W)`` integer label map with a categorical palette."""
     base = np.asarray(image.convert("RGB")).astype(np.float32)
     height, width = base.shape[:2]
+    if not np.issubdtype(labels.dtype, np.integer) and labels.dtype != bool:
+        # INFER-02: a float label map used to crash the direct branch with
+        # "arrays used as indices must be of integer type" while the
+        # resize branch (size mismatch) happened to cast and survive —
+        # behavior depended on the resolution. Rounding keeps the overlay
+        # alive on the same deprecation path the serializer uses (H1-11);
+        # NaN/Inf buckets to background 0 so the cast is defined.
+        labels = np.where(np.isfinite(labels), np.rint(labels), 0).astype(
+            np.int64
+        )
+        logger.debug(
+            "Float label map rounded to integer ids for rendering; convert "
+            "to integer dtype (the JSON RLE path deprecates float maps)."
+        )
     if labels.shape != (height, width):
         resized = Image.fromarray(labels.astype(np.int32), mode="I").resize(
             (width, height), Image.NEAREST
         )
         labels = np.asarray(resized)
         if valid is not None:
-            valid = np.asarray(
-                Image.fromarray(valid.astype(np.uint8) * 255).resize(
-                    (width, height), Image.NEAREST
-                )
-            ) > 0
+            valid = _resize_nearest_bool(valid, width, height)
     colors = np.asarray(palette.colors, dtype=np.float32)
     keep = labels >= 0
     if valid is not None:

@@ -15,6 +15,7 @@ code, where the native tensor/dict contract stays authoritative.
 from __future__ import annotations
 
 import math
+import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, TypeAlias
@@ -22,6 +23,7 @@ from typing import Any, TypeAlias
 import numpy as np
 import torch
 
+from autovision.errors import AutoVisionError, ResultValidationError
 from autovision.keys import (
     BBOXES,
     DEPTH,
@@ -152,9 +154,16 @@ def _summarize(value: ArrayLike) -> dict[str, Any]:
         finite = array
     if finite.size == 0:
         return summary
-    summary["min"] = float(np.min(finite))
-    summary["max"] = float(np.max(finite))
-    summary["mean"] = float(np.mean(finite))
+    try:
+        summary["min"] = float(np.min(finite))
+        summary["max"] = float(np.max(finite))
+        summary["mean"] = float(np.mean(finite))
+    except (TypeError, ValueError):
+        # Non-numeric payloads (strings, datetimes, mixed objects) have no
+        # numeric statistics: ``np.min`` raises TypeError/UFuncTypeError and
+        # ``float(<str>)`` raises ValueError. A shape/dtype/length summary
+        # still bounds the payload instead of crashing serialization (H3-1d).
+        summary["length"] = int(array.size)
     return summary
 
 
@@ -195,28 +204,32 @@ def _jsonable(value: Any, *, max_elements: int) -> Any:
 
 
 def mask_to_bool(value: ArrayLike) -> np.ndarray:
-    """Normalize bool/int/float masks to a boolean NumPy array."""
+    """Normalize bool/int/float masks to a boolean NumPy array.
+
+    Integer masks use ``> 0`` so panoptic-style ``-1`` (unassigned) counts
+    as background, mirroring the float path's ``> 0.5`` (H3-1g).
+    """
     array = (
         value.detach().cpu().numpy() if isinstance(value, torch.Tensor) else np.asarray(value)
     )
     if np.issubdtype(array.dtype, np.bool_):
         return array
     if np.issubdtype(array.dtype, np.integer):
-        return array != 0
+        return array > 0
     return array > 0.5
 
 
 def _encode_binary_mask(mask: ArrayLike) -> dict[str, Any]:
     """Encode one 2-D mask as COCO RLE (pycocotools is a core dependency).
 
-    Bool masks are used as-is; integer masks use ``!= 0`` and float masks use
+    Bool masks are used as-is; integer masks use ``> 0`` and float masks use
     ``> 0.5`` as the binary threshold.
     """
     from pycocotools import mask as mask_utils
 
     array = mask_to_bool(mask)
     if array.ndim != 2:
-        raise ValueError(f"RLE expects a 2-D mask, got shape {array.shape}.")
+        raise ResultValidationError(f"RLE expects a 2-D mask, got shape {array.shape}.")
     encoded = mask_utils.encode(np.asfortranarray(array.astype(np.uint8)))
     counts = encoded["counts"]
     if isinstance(counts, bytes):
@@ -232,7 +245,7 @@ def _encode_label_map(label_map: ArrayLike) -> dict[str, Any]:
         else np.asarray(label_map)
     )
     if array.ndim != 2:
-        raise ValueError(f"label-map RLE expects a 2-D map, got shape {array.shape}.")
+        raise ResultValidationError(f"label-map RLE expects a 2-D map, got shape {array.shape}.")
     flat = array.reshape(-1)
     if flat.size == 0:
         return {"size": list(array.shape), "counts": [], "values": []}
@@ -299,11 +312,15 @@ class InferenceResult:
 
         collisions = set(self.extra) & _KNOWN_KEYS
         if collisions:
-            raise ValueError(
+            raise ResultValidationError(
                 "InferenceResult.extra must not duplicate typed fields: "
                 f"{sorted(collisions)}."
             )
+        # Unique values of a float semantic map entering the RLE path; cached
+        # so repeated serialization does not rescan a large map (H1-11).
+        self._float_mask_unique: np.ndarray | None = None
         self._validate()
+        self._warn_ambiguous_panoptic_shape()
 
     # ── construction ───────────────────────────────────────────────────
     @classmethod
@@ -353,7 +370,7 @@ class InferenceResult:
             return "pose_estimation"
         if self.depth is not None:
             return "depth_estimation"
-        if self.segment_ids is not None or self._is_panoptic_map():
+        if self.segment_ids is not None or self._looks_like_panoptic_map():
             return "panoptic_segmentation"
         if self.mask is not None:
             return "semantic_segmentation"
@@ -374,8 +391,12 @@ class InferenceResult:
 
     @property
     def is_panoptic(self) -> bool:
-        """True for a panoptic ``(H, W, 2)`` label map with segment ids."""
-        return self._is_panoptic_map()
+        """True for a panoptic ``(H, W, 2)`` label map.
+
+        ``segment_ids`` disambiguate authoritatively; without them the
+        shape-only heuristic in :meth:`_looks_like_panoptic_map` decides.
+        """
+        return self._looks_like_panoptic_map()
 
     @property
     def has_instance_masks(self) -> bool:
@@ -388,17 +409,31 @@ class InferenceResult:
                 return value
         return None
 
-    def _is_panoptic_map(self) -> bool:
-        return (
-            self.masks is not None
-            and self.masks.ndim == 3
-            and int(self.masks.shape[-1]) == 2
-            and self.bboxes is None
-            and self.segment_ids is not None
-        )
+    def _looks_like_panoptic_map(self) -> bool:
+        """Shape-level panoptic decision shared by every mask consumer (H3-1b).
+
+        Panoptic decoders emit ``(H, W, 2)`` ``(class_id, segment_id)`` maps;
+        instance stacks are ``(N, H, W)``. ``segment_ids`` is the only
+        reliable discriminator, but producers that omit it made a ``(H, W,
+        2)`` map read as N per-instance rows with degenerate ``(W, 2)``
+        masks, so the heuristic classifies every box-less ``(H, W, 2)``
+        -shaped ``masks`` as panoptic — ``segment_ids`` present or not.
+
+        Ambiguity boundary: a genuine ``(N, H, W)`` instance stack over a
+        2-pixel-wide frame also has ``shape[-1] == 2`` and is misclassified
+        as panoptic. The trade-off is deliberate: panoptic maps never carry
+        boxes in this contract, so an explicit ``bboxes`` row contract keeps
+        such stacks per-instance, while a box-less ``W == 2`` stack is far
+        rarer than the missing-``segment_ids`` map this fixes. Constructors
+        hitting the boundary get a warning pointing at ``segment_ids`` (see
+        :meth:`_warn_ambiguous_panoptic_shape`).
+        """
+        if self.masks is None or self.masks.ndim != 3 or int(self.masks.shape[-1]) != 2:
+            return False
+        return self.bboxes is None
 
     def _masks_are_per_instance(self) -> bool:
-        if self.masks is None or self.masks.ndim != 3 or self._is_panoptic_map():
+        if self.masks is None or self.masks.ndim != 3 or self._looks_like_panoptic_map():
             return False
         primary = self._primary()
         if primary is not None:
@@ -419,7 +454,7 @@ class InferenceResult:
         if self.labels is not None:
             return _array_length(self.labels)
         if self.masks is not None:
-            return 1 if self._is_panoptic_map() else int(self.masks.shape[0])
+            return 1 if self._looks_like_panoptic_map() else int(self.masks.shape[0])
         if self.mask is not None or self.depth is not None:
             return 1
         return 0
@@ -432,13 +467,20 @@ class InferenceResult:
         and task-specific ``extra`` fields are copied unchanged.
         """
         if isinstance(index, (int, np.integer)):
+            if len(self) == 0:
+                # An empty container would surface a bare ``IndexError`` from
+                # the array backends; fail with a framework error instead.
+                raise AutoVisionError(
+                    f"select({int(index)}) needs a non-empty result: this "
+                    "container holds no per-instance rows to index."
+                )
             index = [int(index)]
-        if self._is_panoptic_map() or (
+        if self._looks_like_panoptic_map() or (
             self.segment_ids is not None and self.bboxes is None and self.keypoints is None
         ):
-            raise ValueError(
-                "select() is not defined for image-level or panoptic results; "
-                "slice the per-pixel map directly."
+            raise ResultValidationError(
+                "select() is not defined for image-level or segment-based "
+                "results; slice the per-pixel map directly."
             )
         masks = self.masks if self._masks_are_per_instance() else None
         selected = InferenceResult(
@@ -467,12 +509,30 @@ class InferenceResult:
         return self.select(mask)
 
     def filter_scores(self, min_score: float) -> "InferenceResult":
-        """Drop rows whose score is below ``min_score`` (no-op without scores)."""
+        """Drop rows whose score is below ``min_score`` (no-op without scores).
+
+        NaN scores fail every threshold comparison and are dropped; a
+        warning reports the discarded count so row loss stays visible
+        instead of silently shrinking the result (H3-1j).
+        """
         if self.scores is None or self.is_panoptic:
             return self
         if self.mask is not None or self.depth is not None:
             # Image-level payloads have no per-instance rows to filter.
             return self
+        scores = (
+            self.scores.detach().cpu().numpy()
+            if isinstance(self.scores, torch.Tensor)
+            else np.asarray(self.scores)
+        )
+        nan_rows = int(np.isnan(scores).sum())
+        if nan_rows:
+            warnings.warn(
+                f"filter_scores dropped {nan_rows} row(s) with NaN scores; "
+                "NaN fails every threshold comparison and cannot be kept.",
+                UserWarning,
+                stacklevel=2,  # past this method: the filter_scores caller
+            )
         return self.select(self.scores >= float(min_score))
 
     # ── conversion ─────────────────────────────────────────────────────
@@ -547,11 +607,11 @@ class InferenceResult:
                 behind a summary.
         """
         if masks not in {"rle", "dense", "none"}:
-            raise ValueError(
+            raise ResultValidationError(
                 f"masks must be 'rle', 'dense', or 'none', got {masks!r}."
             )
         if max_elements < 1:
-            raise ValueError("max_elements must be >= 1.")
+            raise ResultValidationError("max_elements must be >= 1.")
         uncapped = 10**18
 
         payload: dict[str, Any] = {}
@@ -579,10 +639,10 @@ class InferenceResult:
                 if isinstance(self.mask, torch.Tensor)
                 else np.asarray(self.mask)
             )
-            if masks == "rle" and (
-                np.issubdtype(mask_array.dtype, np.bool_)
-                or not np.issubdtype(mask_array.dtype, np.integer)
-            ):
+            if masks == "rle" and np.issubdtype(mask_array.dtype, np.bool_):
+                payload[MASK] = _encode_binary_mask(self.mask)
+            elif masks == "rle" and not np.issubdtype(mask_array.dtype, np.integer):
+                self._warn_float_label_map_rle(mask_array)
                 payload[MASK] = _encode_binary_mask(self.mask)
             elif masks == "rle":
                 payload[MASK] = _encode_label_map(self.mask)
@@ -601,6 +661,50 @@ class InferenceResult:
             payload["task"] = self.task
         return payload
 
+    def _warn_float_label_map_rle(self, mask_array: np.ndarray) -> None:
+        """Deprecation gate for float semantic maps on the RLE path (H1-11).
+
+        Through 0.6.x the behavior stays the silent ``> 0.5`` binarization;
+        0.7.0 will reject these maps. One warning is emitted per serialization
+        event; the ``np.unique`` scan backing the message is cached on the
+        instance so repeated ``to_json`` calls skip the rescan.
+        """
+        if self._float_mask_unique is None:
+            self._float_mask_unique = np.unique(mask_array)
+        unique = self._float_mask_unique
+        shown = ", ".join(str(float(value)) for value in unique[:8]) + (
+            ", ..." if unique.size > 8 else ""
+        )
+        warnings.warn(
+            "Semantic float label maps are binarized (> 0.5) by masks='rle' "
+            f"(unique values: {shown}); deprecated in 0.6.1, float label "
+            "maps will be rejected in 0.7.0; convert to integer dtype or use "
+            "masks='dense'/'none'.",
+            FutureWarning,
+            stacklevel=3,  # past this helper and to_json: the caller
+        )
+
+    def _check_dense_mask_budget(self, max_elements: int) -> None:
+        """Hard resource gate for explicit ``masks="dense"`` mode (H3-1a).
+
+        Dense mode opts out of summarization on purpose, so the gate only
+        rejects payloads far beyond the caller's budget (``max_elements``
+        times 100) — a runaway mask shape must fail loud instead of building
+        an unbounded JSON blob.
+        """
+        assert self.masks is not None
+        # isinstance narrows for mypy: torch.is_tensor is not a TypeGuard here.
+        if isinstance(self.masks, np.ndarray):
+            numel = int(self.masks.size)
+        else:
+            numel = int(self.masks.numel())
+        if numel > max_elements * 100:
+            raise AutoVisionError(
+                f"dense mask payload has {numel} elements, above the "
+                f"max_elements*100 safety limit ({max_elements * 100}); use "
+                "masks='rle' or shrink the input."
+            )
+
     def _serialize_masks(self, *, mode: str, max_elements: int) -> Any:
         assert self.masks is not None
         if self._masks_are_per_instance():
@@ -609,7 +713,9 @@ class InferenceResult:
                     _encode_binary_mask(self.masks[index])
                     for index in range(int(self.masks.shape[0]))
                 ]
-            # Explicit dense mode: never hide rows behind a summary.
+            # Explicit dense mode: never hide rows behind a summary, but the
+            # opt-in still passes the H3-1a resource gate.
+            self._check_dense_mask_budget(max_elements)
             return _jsonable(self.masks, max_elements=10**18)
         if self.is_panoptic and mode == "rle":
             return {
@@ -618,6 +724,7 @@ class InferenceResult:
                 "segment_ids": _encode_label_map(self.masks[..., 1]),
             }
         if mode == "dense":
+            self._check_dense_mask_budget(max_elements)
             return _jsonable(self.masks, max_elements=10**18)
         # Unknown image-level mask payloads keep the dense/capped form.
         return _jsonable(self.masks, max_elements=max_elements)
@@ -632,7 +739,7 @@ class InferenceResult:
                 self._validate_ndim(name, value, 1)
         if self.keypoints is not None:
             if self.keypoints.ndim not in (2, 3):
-                raise ValueError(
+                raise ResultValidationError(
                     "keypoints must be (N, 3K) or (N, K, 3), got shape "
                     f"{_shape(self.keypoints)}."
                 )
@@ -645,12 +752,12 @@ class InferenceResult:
                     else reshaped.numpy()
                 )
             if self.polygons.ndim != 3 or int(self.polygons.shape[-1]) != 2:
-                raise ValueError(
+                raise ResultValidationError(
                     "polygons must be (N, 4, 2) or (N, 8), got shape "
                     f"{_shape(self.polygons)}."
                 )
         if self.masks is not None and self.masks.ndim != 3:
-            raise ValueError(
+            raise ResultValidationError(
                 "masks must be (N, H, W) or (H, W, 2), got shape "
                 f"{_shape(self.masks)}."
             )
@@ -668,13 +775,13 @@ class InferenceResult:
                     continue
                 length = _array_length(value)
                 if length != primary_len:
-                    raise ValueError(
+                    raise ResultValidationError(
                         f"{name} has {length} rows but {BBOXES if self.bboxes is not None else 'the primary field'} "
                         f"has {primary_len}."
                     )
         if self.segment_ids is not None and self.scores is not None:
             if _array_length(self.segment_ids) != _array_length(self.scores):
-                raise ValueError(
+                raise ResultValidationError(
                     f"segment_ids has {_array_length(self.segment_ids)} entries but "
                     f"scores has {_array_length(self.scores)}."
                 )
@@ -685,7 +792,7 @@ class InferenceResult:
             and self.scores is not None
             and _array_length(self.labels) != _array_length(self.scores)
         ):
-            raise ValueError(
+            raise ResultValidationError(
                 f"labels has {_array_length(self.labels)} rows but scores has "
                 f"{_array_length(self.scores)}."
             )
@@ -693,23 +800,49 @@ class InferenceResult:
             self.masks is not None
             and self.masks.ndim == 3
             and self._primary() is None
-            and not self._is_panoptic_map()
+            and not self._looks_like_panoptic_map()
             and self.labels is not None
             and int(self.masks.shape[0]) != _array_length(self.labels)
         ):
-            raise ValueError(
+            raise ResultValidationError(
                 f"masks has {int(self.masks.shape[0])} rows but labels has "
                 f"{_array_length(self.labels)}."
             )
         if self.input_w is not None and int(self.input_w) <= 0:
-            raise ValueError("input_w must be positive.")
+            raise ResultValidationError("input_w must be positive.")
         if self.input_h is not None and int(self.input_h) <= 0:
-            raise ValueError("input_h must be positive.")
+            raise ResultValidationError("input_h must be positive.")
+
+    def _warn_ambiguous_panoptic_shape(self) -> None:
+        """Constructor-time warning for ``(H, W, 2)`` masks without ids (H3-1b).
+
+        The shape-only heuristic in :meth:`_looks_like_panoptic_map` decides
+        panoptic for box-less ``(H, W, 2)`` masks even when ``segment_ids``
+        is missing; this names that decision once per construction so
+        producers restore an unambiguous contract instead of leaning on the
+        heuristic.
+        """
+        if (
+            self.masks is None
+            or self.segment_ids is not None
+            or self.bboxes is not None
+            or self.masks.ndim != 3
+            or int(self.masks.shape[-1]) != 2
+        ):
+            return
+        warnings.warn(
+            "masks has (H, W, 2) shape but segment_ids is missing; it is "
+            "treated as a panoptic (class_id, segment_id) map, which would "
+            "misread a genuine (N, H, W) instance stack on a 2-pixel-wide "
+            "frame. Pass segment_ids explicitly to remove the ambiguity.",
+            UserWarning,
+            stacklevel=3,  # past this helper and __post_init__: the caller
+        )
 
     @staticmethod
     def _validate_ndim(name: str, value: ArrayLike, ndim: int) -> None:
         if value.ndim != ndim:
-            raise ValueError(
+            raise ResultValidationError(
                 f"{name} must be a {ndim}-D array, got shape {_shape(value)}."
             )
 
@@ -718,6 +851,6 @@ class InferenceResult:
         name: str, value: ArrayLike, ndim: int, last: int
     ) -> None:
         if value.ndim != ndim or int(value.shape[-1]) != last:
-            raise ValueError(
+            raise ResultValidationError(
                 f"{name} must have shape (N, {last}), got {_shape(value)}."
             )

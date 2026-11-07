@@ -124,6 +124,35 @@ class TestMatching:
         assert fp.kind == "fp"
         assert fp.fp_reason == "classification"
 
+    def test_other_class_crowd_is_not_an_ignore_hit(self):
+        """H3-6d: pycocotools matches per category — a dog detection over a
+        person crowd region is a plain FP, never an ignore-region hit."""
+        matches = match_detections(
+            [_pred([[0, 0, 10, 10]], [0.9], [0])],
+            [_target([[0, 0, 10, 10]], [1], iscrowds=[1])],
+            class_names={0: "dog", 1: "person"},
+        )
+        assert _kinds(matches) == [("fp", "dog")]
+        assert matches[0].fp_reason == "background"
+        summary = summarize_matches(matches, {0: "dog", 1: "person"})
+        assert summary["totals"]["ignored"] == 0
+        assert summary["totals"]["fp"] == 1
+
+    def test_same_class_crowd_below_threshold_not_masked_by_other_crowd(self):
+        """H3-6d: only the same-class crowd can absorb a detection — an
+        other-class crowd with a higher IoU must not hide a real error."""
+        matches = match_detections(
+            [_pred([[0, 0, 10, 10]], [0.9], [0])],
+            # Person crowd: IoU 1.0 (pre-H3-6d winner); dog crowd: IoU 0.32.
+            [_target([[0, 0, 10, 10], [3, 3, 13, 13]], [1, 0], iscrowds=[1, 1])],
+            class_names={0: "dog", 1: "person"},
+            iou_threshold=0.5,
+        )
+        assert _kinds(matches) == [("fp", "dog")]
+        # Crowd regions (even same-class) never anchor the TIDE attribution,
+        # so the box reads as background rather than localization.
+        assert matches[0].fp_reason == "background"
+
     def test_score_threshold_drops_low_confidence(self):
         matches = match_detections(
             [_pred([[0, 0, 10, 10]], [0.2], [0])],
@@ -132,6 +161,59 @@ class TestMatching:
             score_threshold=0.5,
         )
         assert _kinds(matches) == [("fn", "cat")]
+
+
+class TestScoreOrderMatching:
+    """H1-1: ``ious`` 行序是类内张量序，TP/FP 归因不得依赖输入分数顺序。"""
+
+    def test_unsorted_scores_do_not_misalign_iou_rows(self) -> None:
+        """乱序分数输入：0.9 分正压 GT 的框判 TP，0.3 分空白框判 FP（H1-1）。"""
+        matches = match_detections(
+            # 张量序故意与分数序相反：0.30 的空白框在前。
+            [_pred([[100, 100, 110, 110], [0, 0, 10, 10]], [0.3, 0.9], [0, 0])],
+            [_target([[0, 0, 10, 10]], [0])],
+            class_names={0: "cat"},
+        )
+        assert _kinds(matches) == [("tp", "cat"), ("fp", "cat")]
+        assert matches[0].score == pytest.approx(0.9)
+        assert matches[0].iou == pytest.approx(1.0)
+        assert matches[1].score == pytest.approx(0.3)
+        assert matches[1].fp_reason == "background"
+        summary = summarize_matches(matches, {0: "cat"})
+        assert summary["totals"]["tp"] == 1
+        assert summary["totals"]["fp"] == 1
+        assert summary["totals"]["fn"] == 0
+
+    @pytest.mark.parametrize(
+        ("scores", "boxes", "expected"),
+        [
+            pytest.param(
+                [0.9, 0.9],
+                [[0, 0, 10, 10], [0, 0, 10, 10]],
+                [("tp", "cat"), ("fp", "cat")],
+                id="tied-scores",
+            ),
+            pytest.param(
+                [0.9],
+                [[0, 0, 10, 10]],
+                [("tp", "cat")],
+                id="single-prediction",
+            ),
+        ],
+    )
+    def test_degenerate_score_orders_stay_correct(
+        self,
+        scores: list[float],
+        boxes: list[list[int]],
+        expected: list[tuple[str, str]],
+    ) -> None:
+        """同分与单预测退化用例：TP/FP 归因与排序实现细节无关（H1-1）。"""
+        matches = match_detections(
+            [_pred(boxes, scores, [0] * len(scores))],
+            [_target([[0, 0, 10, 10]], [0])],
+            class_names={0: "cat"},
+        )
+        assert _kinds(matches) == expected
 
 
 class TestSummarize:

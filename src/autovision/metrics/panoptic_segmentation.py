@@ -106,6 +106,28 @@ class PanopticMetricCollector:
                     pair_p[keep],
                     iou[keep],
                 )
+                # METRIC audit P3-13: overlapping PREDICTIONS could each
+                # claim the same GT (IoU > 0.5 both) and double-count a TP.
+                # Panoptic segments are mutually exclusive by definition —
+                # keep only the best-IoU match per GT (and per prediction).
+                order = match_iou.argsort(descending=True)
+                match_g, match_p, match_iou = (
+                    match_g[order], match_p[order], match_iou[order],
+                )
+                seen_g: set[int] = set()
+                seen_p: set[int] = set()
+                sel: list[int] = []
+                for index in range(match_g.shape[0]):
+                    g = int(match_g[index])
+                    pr = int(match_p[index])
+                    if g in seen_g or pr in seen_p:
+                        continue
+                    seen_g.add(g)
+                    seen_p.add(pr)
+                    sel.append(index)
+                match_g = match_g[torch.tensor(sel, dtype=torch.long)]
+                match_p = match_p[torch.tensor(sel, dtype=torch.long)]
+                match_iou = match_iou[torch.tensor(sel, dtype=torch.long)]
                 gt_matched[match_g] = True
                 pred_matched[match_p] = True
                 rows = gt_class[match_g]

@@ -8,13 +8,18 @@ decoded image is stored and reused. Every ``mode`` returns the same object
 as ``open_image``: a uint8 ``(C, H, W)`` tensor.
 
 - ``mode="none"``: direct passthrough, byte-identical to the uncached path.
-- ``mode="disk"``: ``<stem>.npy`` sidecar next to the source image. The
-  sidecar is an uncompressed numpy zip container (``np.savez`` written
-  into a file handle, so the name stays ``.npy``) holding the decoded
-  array plus a ``meta`` int64 array ``[schema_version, source_mtime_ns]``.
-  Storing the metadata inside the sidecar instead of a second JSON file
-  keeps exactly one extra file per image and commits pixels + mtime in a
-  single ``os.replace`` — two sidecar files could go stale independently.
+- ``mode="disk"``: ``<full source name>.npy`` sidecar next to the source
+  image (DATA-05: the old ``<stem>.npy`` layout collided across suffixes —
+  ``a.jpg`` and ``a.png`` shared one sidecar and thrashed or cross-served
+  pixels). The sidecar is an uncompressed numpy zip container
+  (``np.savez`` written into a file handle, so the name stays ``.npy``)
+  holding the decoded array plus a ``meta`` int64 array
+  ``[schema_version, source_mtime_ns, source_size]`` — the size component
+  catches same-mtime content swaps (``cp -p``-style tools preserve
+  mtimes). Storing the metadata inside the sidecar instead of a second
+  JSON file keeps exactly one extra file per image and commits pixels +
+  freshness in a single ``os.replace`` — two sidecar files could go stale
+  independently.
 - ``mode="ram"``: :class:`SharedImagePool` packs all images into one
   contiguous uint8 tensor built once in the dataloader-builder process;
   forked workers share it copy-on-write.
@@ -46,9 +51,11 @@ logger = logging.getLogger(__name__)
 CacheMode = Literal["none", "disk", "ram"]
 
 # Sidecar container schema. Bump when the meta layout changes.
-_META_VERSION = 1
+_META_VERSION = 2
 # Index of the source mtime_ns entry inside the meta array.
 _META_MTIME_NS = 1
+# Index of the source byte-size entry (DATA-05: equal-mtime content swaps).
+_META_SIZE = 2
 # Deliberate: POSIX shared-memory device (tmpfs), not a private temp dir —
 # the whole point of the RAM pool is cross-process sharing of decoded
 # images. Absence (macOS) degrades to the RAM fallback.
@@ -94,40 +101,49 @@ def _open_image_disk(path: Path, *, num_channels: int) -> torch.Tensor:
     sidecar = _sidecar_path(path)
     # Stat before decoding: if the source changes mid-decode the stored
     # mtime is older than the file, so the next read rebuilds (conservative).
-    source_mtime_ns = _source_mtime_ns(path)
-    if source_mtime_ns is not None:
+    source_stat = _source_stat(path)
+    if source_stat is not None:
         cached = _read_sidecar(
-            sidecar, num_channels=num_channels, source_mtime_ns=source_mtime_ns
+            sidecar, num_channels=num_channels, source_stat=source_stat
         )
         if cached is not None:
             return torch.from_numpy(cached)
     tensor = open_image(path, num_channels=num_channels)
-    if source_mtime_ns is not None:
-        _write_sidecar(sidecar, tensor.numpy(), source_mtime_ns)
+    if source_stat is not None:
+        _write_sidecar(sidecar, tensor.numpy(), source_stat)
     return tensor
 
 
 def _sidecar_path(path: Path) -> Path:
-    """Sidecar lives beside the source as ``<stem>.npy``."""
-    return path.with_suffix(".npy")
+    """Sidecar lives beside the source as ``<full name>.npy`` (DATA-05).
+
+    ``with_suffix(".npy")`` collapsed ``a.jpg`` and ``a.png`` onto one
+    sidecar: different mtimes turned every read into a miss + rebuild
+    (thrashing), and equal mtimes could serve one file's pixels for the
+    other. The full source name keeps one sidecar per source.
+    """
+    return path.with_name(path.name + ".npy")
 
 
-def _source_mtime_ns(path: Path) -> int | None:
-    """Source mtime in ns, or ``None`` when the file cannot be stat'd."""
+def _source_stat(path: Path) -> os.stat_result | None:
+    """Source stat, or ``None`` when the file cannot be stat'd."""
     try:
-        return path.stat().st_mtime_ns
+        return path.stat()
     except OSError:
         return None
 
 
 def _read_sidecar(
-    sidecar: Path, *, num_channels: int, source_mtime_ns: int
+    sidecar: Path, *, num_channels: int, source_stat: os.stat_result
 ) -> np.ndarray | None:
     """Return the cached array if fresh and well-formed, else ``None``.
 
     A corrupt container (bad zip, truncated member) is unlinked so the
     rebuild replaces it; a merely stale or mismatched sidecar is left in
-    place for the atomic rebuild to overwrite.
+    place for the atomic rebuild to overwrite. Freshness is keyed on the
+    source's (mtime_ns, size) pair: a same-name sidecar collision is gone
+    with the full-name sidecar path, and equal-mtime content swaps are
+    caught by the size component (DATA-05).
     """
     try:
         with np.load(sidecar) as data:
@@ -136,9 +152,11 @@ def _read_sidecar(
     except Exception:  # noqa: BLE001 - corrupt sidecars may fail in many ways
         _unlink_quiet(sidecar)
         return None
-    if meta.size < 2 or int(meta[0]) != _META_VERSION:
+    if meta.size < 3 or int(meta[0]) != _META_VERSION:
         return None
-    if int(meta[_META_MTIME_NS]) != source_mtime_ns:
+    if int(meta[_META_MTIME_NS]) != source_stat.st_mtime_ns:
+        return None
+    if int(meta[_META_SIZE]) != source_stat.st_size:
         return None
     if image.dtype != np.uint8 or image.ndim != 3:
         return None
@@ -147,7 +165,9 @@ def _read_sidecar(
     return image
 
 
-def _write_sidecar(sidecar: Path, image: np.ndarray, source_mtime_ns: int) -> None:
+def _write_sidecar(
+    sidecar: Path, image: np.ndarray, source_stat: os.stat_result
+) -> None:
     """Atomically publish the sidecar; concurrent rebuilds: last one wins.
 
     The unique tmp name lets parallel first-readers coexist; ``os.replace``
@@ -160,7 +180,8 @@ def _write_sidecar(sidecar: Path, image: np.ndarray, source_mtime_ns: int) -> No
                 handle,
                 image=np.ascontiguousarray(image),
                 meta=np.array(
-                    [_META_VERSION, source_mtime_ns], dtype=np.int64
+                    [_META_VERSION, source_stat.st_mtime_ns, source_stat.st_size],
+                    dtype=np.int64,
                 ),
             )
         os.replace(tmp, sidecar)

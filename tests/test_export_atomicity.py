@@ -130,3 +130,41 @@ def test_sweep_keeps_sidecar_for_genuine_external_data(tmp_path):
     _sweep_orphan_external_data(path)
 
     assert path.with_suffix(path.suffix + ".data").read_bytes() == b"really referenced"
+
+
+# ── H1-6: the TensorRT engine blob publish ──────────────────────────────────
+
+
+def test_engine_blob_publish_replaces_target_atomically(tmp_path):
+    """H1-6: the TensorRT helper stages the engine blob under ``.tmp-<pid>``
+    and publishes it with ``os.replace`` — the target never holds a partial
+    engine and no temp file survives the publish."""
+    from autovision.export.tensorrt_helpers import _publish_engine
+
+    target = tmp_path / "model.engine"
+    target.write_bytes(b"old-engine")
+
+    _publish_engine(target, b"new-engine-blob")
+
+    assert target.read_bytes() == b"new-engine-blob"
+    assert not any(".tmp-" in p.name for p in tmp_path.iterdir())
+
+
+def test_engine_blob_publish_failure_preserves_previous_engine(
+    tmp_path, monkeypatch
+):
+    """H1-6: a publish failure (e.g. disk full at the rename) keeps the
+    previous engine bytes and leaves no ``.tmp-`` residue behind."""
+    import autovision.export.tensorrt_helpers as helpers
+
+    target = tmp_path / "model.engine"
+    target.write_bytes(b"previous-good-engine")
+
+    def enospc_replace(src, dst):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(helpers.os, "replace", enospc_replace)
+    with pytest.raises(OSError, match="No space left"):
+        helpers._publish_engine(target, b"new-engine-blob")
+    assert target.read_bytes() == b"previous-good-engine"
+    assert not any(".tmp-" in p.name for p in tmp_path.iterdir())

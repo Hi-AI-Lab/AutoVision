@@ -298,7 +298,7 @@ class TestPretrainingRecovery:
         )
         method = _PretextStub()
         optimizer, scheduler = method.configure_optimizers(8, 2)
-        epoch, step = Engine._resume(
+        epoch, step, _state = Engine._resume(
             path, method, optimizer, scheduler, torch.device("cpu")
         )
         assert (epoch, step) == (1, 4)

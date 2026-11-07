@@ -3,11 +3,15 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pytest
 import torch
 
+from autovision.errors import AutoVisionError, ResultValidationError
 from autovision.inference import InferenceResult
+from autovision.results import mask_to_bool
 
 
 def _detection(n: int = 2) -> InferenceResult:
@@ -117,6 +121,33 @@ class TestSelection:
         filtered = result.filter([True, False])
         assert filtered.scores.tolist() == pytest.approx([0.9])
 
+    def test_filter_scores_warns_once_for_nan_rows(self) -> None:
+        """H3-1j: 含 NaN 分数的行被丢弃时输出一次 warning，不再静默丢行。"""
+        result = InferenceResult(
+            bboxes=torch.zeros(3, 4),
+            scores=torch.tensor([0.9, float("nan"), 0.2]),
+            labels=torch.zeros(3, dtype=torch.long),
+        )
+        with pytest.warns(UserWarning, match="1 row") as caught:
+            filtered = result.filter_scores(0.5)
+        assert len(caught) == 1
+        assert filtered.labels.tolist() == [0]
+
+    def test_select_int_on_empty_result_raises_framework_error(self) -> None:
+        """H3-1f: 空结果 select(0) 报 AutoVisionError 而非裸 IndexError。"""
+        empty = InferenceResult.from_record({"bboxes": [], "scores": [], "labels": []})
+        with pytest.raises(AutoVisionError, match="non-empty"):
+            empty.select(0)
+
+    def test_select_error_names_segment_based_results_accurately(self) -> None:
+        """H3-1f: segment_ids-only 结果的报错文案不再谎称 panoptic。"""
+        result = InferenceResult(
+            segment_ids=torch.tensor([0, 1]),
+            scores=torch.tensor([0.9, 0.8]),
+        )
+        with pytest.raises(ValueError, match="segment-based"):
+            result.select([0])
+
     def test_select_does_not_slice_image_level_masks(self):
         result = InferenceResult(
             bboxes=torch.zeros(2, 4),
@@ -167,6 +198,71 @@ class TestSerialization:
         payload = result.to_json(max_elements=10)
         assert payload["depth"]["summarized"] is True
         assert payload["depth"]["shape"] == [10, 10]
+
+    def test_dense_mode_over_100x_budget_raises(self) -> None:
+        """H3-1a: dense 模式超过 max_elements*100 硬闸 → AutoVisionError。"""
+        result = InferenceResult(
+            bboxes=torch.zeros(1, 4),
+            scores=torch.ones(1),
+            labels=torch.zeros(1, dtype=torch.long),
+            masks=torch.zeros(1, 30, 30, dtype=torch.bool),  # 900 > 1*100
+        )
+        with pytest.raises(AutoVisionError, match="masks='rle'"):
+            result.to_json(masks="dense", max_elements=1)
+
+    def test_dense_mode_at_budget_boundary_passes(self) -> None:
+        """H3-1a: 恰好 max_elements*100 的 dense 输出保持完整不被摘要。"""
+        masks = torch.zeros(1, 10, 10, dtype=torch.bool)  # 100 == 1*100
+        masks[0, 0, 0] = True
+        result = InferenceResult(
+            bboxes=torch.zeros(1, 4),
+            scores=torch.ones(1),
+            labels=torch.zeros(1, dtype=torch.long),
+            masks=masks,
+        )
+        payload = result.to_json(masks="dense", max_elements=1)
+        assert payload["masks"][0][0][0] is True
+
+    def test_dense_mode_gate_covers_panoptic_maps(self) -> None:
+        """H3-1a: panoptic 图的 dense 模式同样受硬闸约束。"""
+        result = InferenceResult(
+            masks=torch.zeros(30, 30, 2, dtype=torch.long),
+            segment_ids=torch.tensor([0, 1]),
+            scores=torch.tensor([0.9, 0.8]),
+        )
+        with pytest.raises(AutoVisionError, match="safety limit"):
+            result.to_json(masks="dense", max_elements=1)
+
+    def test_non_numeric_extra_array_summarizes_without_crashing(self) -> None:
+        """H3-1d: extra 的字符串数组摘要只输出 shape/dtype/length，不崩。"""
+        result = InferenceResult(
+            bboxes=torch.zeros(1, 4),
+            extra={"names": np.array([f"id-{i}" for i in range(50)])},
+        )
+        summary = result.to_json(max_elements=10)["names"]
+        assert summary["summarized"] is True
+        assert summary["shape"] == [50]
+        assert summary["dtype"] == "<U5"
+        assert summary["length"] == 50
+        assert "min" not in summary
+        assert "max" not in summary
+        assert "mean" not in summary
+
+    def test_object_string_array_summary_handles_value_error(self) -> None:
+        """H3-1d: object 字符串数组在 float(np.min) 处抛 ValueError，同样降级。"""
+        result = InferenceResult(
+            bboxes=torch.zeros(1, 4),
+            extra={"tags": np.array([f"t{i}" for i in range(50)], dtype=object)},
+        )
+        summary = result.to_json(max_elements=10)["tags"]
+        assert summary["summarized"] is True
+        assert summary["length"] == 50
+        assert "min" not in summary
+
+    def test_mask_to_bool_integer_negatives_are_background(self) -> None:
+        """H3-1g: 整数路径 > 0，-1（panoptic unassigned 约定）不算前景。"""
+        array = np.array([[0, -1, 2]], dtype=np.int64)
+        assert mask_to_bool(array).tolist() == [[False, False, True]]
 
     def test_semantic_bool_mask_encodes_as_rle(self):
         result = InferenceResult(mask=torch.zeros(4, 5, dtype=torch.bool))
@@ -327,3 +423,75 @@ class TestValidation:
                 labels=torch.tensor([0, 1]),
                 scores=torch.ones(1),
             )
+
+    def test_validation_errors_are_framework_and_value_errors(self) -> None:
+        """H3-1h: 校验异常双继承 AutoVisionError/ValueError 且 MRO 正确。"""
+        assert issubclass(ResultValidationError, AutoVisionError)
+        assert issubclass(ResultValidationError, ValueError)
+        assert ResultValidationError.__mro__[:3] == (
+            ResultValidationError,
+            AutoVisionError,
+            ValueError,
+        )
+        with pytest.raises(ResultValidationError, match="bboxes must have shape"):
+            InferenceResult(bboxes=torch.zeros(2, 3))
+        try:
+            InferenceResult(bboxes=torch.zeros(2, 3))
+        except ValueError as error:  # 既有 except ValueError 调用方不破坏
+            assert isinstance(error, AutoVisionError)
+        else:
+            pytest.fail("ResultValidationError must stay catchable as ValueError")
+
+
+class TestPanopticShapeHeuristic:
+    """H3-1b: (H, W, 2) masks 缺 segment_ids 时的共用判定与构造期告警。"""
+
+    def test_hw2_masks_without_segment_ids_are_not_instance_rows(self) -> None:
+        """H3-1b: 480×640×2 无 segment_ids 不再误判为 480 个实例行。"""
+        with pytest.warns(UserWarning, match="segment_ids"):
+            result = InferenceResult(masks=torch.zeros(480, 640, 2))
+        assert result.is_panoptic is True
+        assert result.has_instance_masks is False
+        assert len(result) == 1
+        assert result.inferred_task == "panoptic_segmentation"
+
+    def test_ambiguous_panoptic_shape_serializes_as_label_map_rle(self) -> None:
+        """H3-1b: to_json 走 label-map RLE 组合而非 480 条实例 RLE。"""
+        with pytest.warns(UserWarning):
+            result = InferenceResult(masks=torch.zeros(480, 640, 2))
+        payload = result.to_json()
+        assert isinstance(payload["masks"], dict)
+        assert payload["masks"]["size"] == [480, 640]
+        assert set(payload["masks"]) == {"size", "class_ids", "segment_ids"}
+
+    def test_segment_ids_present_keeps_the_legacy_path_warning_free(self) -> None:
+        """H3-1b: 带 segment_ids 的 panoptic 路径行为逐位不变且不告警。"""
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            result = InferenceResult(
+                masks=torch.zeros(8, 8, 2, dtype=torch.long),
+                segment_ids=torch.tensor([0, 1, 2]),
+                scores=torch.tensor([0.9, 0.8, 0.7]),
+            )
+        assert result.is_panoptic is True
+        assert len(result) == 3
+        assert result.to_json()["masks"]["size"] == [8, 8]
+
+    def test_degenerate_two_column_instance_stack_is_documented_ambiguity(self) -> None:
+        """H3-1b: W==2 的真实例栈是启发式的已知歧义边界（取舍记录）。
+
+        无 bboxes/labels/segment_ids 的 (N, H, 2) 栈与 panoptic (H, W, 2)
+        图仅凭 shape 不可区分，按设计归 panoptic 侧（构造期 warning 指向
+        segment_ids）；显式 bboxes 行契约在场时仍按实例栈处理，不回归。
+        """
+        with pytest.warns(UserWarning, match="segment_ids"):
+            result = InferenceResult(masks=torch.zeros(3, 480, 2))
+        assert result.is_panoptic is True
+        assert result.has_instance_masks is False
+        boxed = InferenceResult(
+            bboxes=torch.zeros(3, 4),
+            scores=torch.ones(3),
+            labels=torch.zeros(3, dtype=torch.long),
+            masks=torch.zeros(3, 480, 2, dtype=torch.bool),
+        )
+        assert boxed.has_instance_masks is True

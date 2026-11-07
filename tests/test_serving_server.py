@@ -39,6 +39,9 @@ class TestServeLauncher:
     def test_single_worker_builds_the_app_and_passes_tls(
         self, monkeypatch, uvicorn_run
     ):
+        # H2-1: a non-loopback bind without credentials is refused, so the
+        # TLS-kwargs forwarding intent of this test needs a key present.
+        monkeypatch.setenv("AUTOVISION_SERVING_API_KEY", "test-key")
         monkeypatch.setattr(
             server, "create_app", lambda model, **kwargs: ("APP", model, kwargs)
         )
@@ -65,30 +68,35 @@ class TestServeLauncher:
     def test_multi_worker_uses_the_import_string_factory(
         self, monkeypatch, uvicorn_run
     ):
-        old = os.environ.get(SERVE_CONFIG_ENV)
-        try:
-            serve(
-                "model.pt",
-                workers=2,
-                threshold=0.3,
-                class_names={0: "cat"},
-            )
-            assert uvicorn_run.args[0] == (
-                "autovision.serving.worker:create_app_from_env"
-            )
-            assert uvicorn_run.kwargs["factory"] is True
-            assert uvicorn_run.kwargs["workers"] == 2
-            payload = json.loads(os.environ[SERVE_CONFIG_ENV])
-            assert payload == {
-                "model": "model.pt",
-                "threshold": 0.3,
-                "class_names": {"0": "cat"},
-            }
-        finally:
-            if old is None:
-                os.environ.pop(SERVE_CONFIG_ENV, None)
-            else:
-                os.environ[SERVE_CONFIG_ENV] = old
+        """SERVE-09: the config env payload is observed AT CALL TIME via a
+        side-effect recorder — serve() now cleans the variable up on exit,
+        so reading it after the call would see nothing."""
+        observed: dict[str, str] = {}
+
+        def recording_run(*args, **kwargs):
+            observed["payload"] = os.environ[SERVE_CONFIG_ENV]
+            uvicorn_run(*args, **kwargs)
+
+        monkeypatch.setattr("uvicorn.run", recording_run)
+        serve(
+            "model.pt",
+            workers=2,
+            threshold=0.3,
+            class_names={0: "cat"},
+        )
+        assert uvicorn_run.args[0] == (
+            "autovision.serving.worker:create_app_from_env"
+        )
+        assert uvicorn_run.kwargs["factory"] is True
+        assert uvicorn_run.kwargs["workers"] == 2
+        payload = json.loads(observed["payload"])
+        assert payload == {
+            "model": "model.pt",
+            "threshold": 0.3,
+            "class_names": {"0": "cat"},
+        }
+        # SERVE-09: the stale payload does not outlive the launch.
+        assert SERVE_CONFIG_ENV not in os.environ
 
     def test_invalid_launch_options_fail_loud(self):
         with pytest.raises(AutoVisionError, match="workers"):

@@ -15,6 +15,7 @@ from collections import defaultdict
 
 import torch
 
+from autovision.errors import AutoVisionError
 from autovision.geometry.obb import (
     rotated_iou_matrix,
     xyxyxyxy_to_xywhr,
@@ -25,29 +26,61 @@ __all__ = ["OrientedDetectionMetricCollector"]
 _IOU_THRESHOLDS = tuple(0.5 + 0.05 * i for i in range(10))
 
 
-def _average_precision(scores_tps: list[tuple[float, int]], num_gt: int) -> float:
-    """All-point (VOC-style envelope) AP from score-ordered TP flags."""
+def _average_precision(
+    scores_tps: list[tuple[float, int]],
+    num_gt: int,
+    interpolation: str = "all-point",
+) -> float:
+    """VOC all-point (or COCO 101-point) AP from score-ordered TP flags.
+
+    METRIC-02: the envelope must be computed over the WHOLE precision
+    sequence BEFORE integration. The old implementation interleaved the
+    monotone-precision envelope with the (reverse-order) integration, so a
+    higher-precision entry earlier in the sequence could not retroactively
+    lift a recall segment already integrated with a lower precision — a
+    systematic AP underestimate (audit reproduction: [(0.9 TP), (0.8 FP)]
+    on one GT scored 0.5 instead of 1.0).
+    """
     if num_gt == 0:
         return 0.0
+    if interpolation not in ("all-point", "coco101"):
+        raise ValueError(
+            f"interpolation must be 'all-point' or 'coco101', got {interpolation!r}."
+        )
     scores_tps = sorted(scores_tps, key=lambda entry: -entry[0])
     tp_cum = 0
     fp_cum = 0
-    recalls_precisions: list[tuple[float, float]] = []
+    recalls: list[float] = []
+    precisions: list[float] = []
     for _, tp in scores_tps:
         tp_cum += tp
         fp_cum += 1 - tp
-        recalls_precisions.append(
-            (tp_cum / num_gt, tp_cum / (tp_cum + fp_cum))
-        )
-    # Monotone precision envelope from the right, then integrate over the
-    # strictly increasing recall steps.
+        recalls.append(tp_cum / num_gt)
+        precisions.append(tp_cum / (tp_cum + fp_cum))
+    # Monotone precision envelope from the right over the FULL sequence.
+    for index in range(len(precisions) - 2, -1, -1):
+        precisions[index] = max(precisions[index], precisions[index + 1])
+
+    if interpolation == "coco101":
+        # COCO protocol: sample the envelope on the fixed 101-point recall
+        # grid, taking the envelope precision at recall >= the point.
+        ap = 0.0
+        for step in range(101):
+            point = step / 100.0
+            precision_at = 0.0
+            for recall, precision in zip(recalls, precisions):
+                if recall >= point and precision > precision_at:
+                    precision_at = precision
+            ap += precision_at
+        return ap / 101.0
+
+    # All-point: integrate over the strictly increasing recall steps in
+    # SCORE order, using the pre-computed envelope precision at each step.
     ap = 0.0
     prev_recall = 0.0
-    best_precision = 0.0
-    for recall, precision in reversed(recalls_precisions):
-        best_precision = max(best_precision, precision)
+    for recall, precision in zip(recalls, precisions):
         if recall > prev_recall:
-            ap += (recall - prev_recall) * best_precision
+            ap += (recall - prev_recall) * precision
             prev_recall = recall
     return float(ap)
 
@@ -122,6 +155,15 @@ class OrientedDetectionMetricCollector:
     def compute(self) -> dict[str, float]:
         if not self._ground_truth:
             return {"map": 0.0, "map_50": 0.0}
+        if len(self._predictions) != len(self._ground_truth):
+            # A silent zip truncation here would DROP every unmatched
+            # prediction — exactly the false positives the PR stream needs
+            # (the audit reproduction only worked through this hole).
+            raise AutoVisionError(
+                f"{len(self._predictions)} prediction record(s) for "
+                f"{len(self._ground_truth)} ground-truth record(s); update "
+                "and update_targets must be called for the same images."
+            )
 
         # Per threshold -> per class -> score-ordered (score, tp) stream.
         streams: dict[float, dict[int, list[tuple[float, int]]]] = {
@@ -144,8 +186,19 @@ class OrientedDetectionMetricCollector:
             pred_labels = pred["labels"]
             pred_scores = pred["scores"]
 
-            for class_id in gt_labels.unique().tolist():
-                class_id = int(class_id)
+            # METRIC-01: iterate the UNION of this image's GT and predicted
+            # classes. The old gt_labels.unique() loop silently DROPPED
+            # predictions for every class absent from that image's ground
+            # truth — background false positives never entered the PR
+            # stream and AP inflated systematically (audit reproduction:
+            # an official-AP-0.5 scenario scored 1.0). Pred-only classes
+            # here still accumulate FPs; classes with no GT anywhere in
+            # the dataset stay out of the macro mean (pycocotools
+            # semantics) via the num_gt > 0 gate below.
+            class_ids: set[int] = set(
+                int(v) for v in gt_labels.unique().tolist()
+            ) | set(int(v) for v in pred_labels.unique().tolist())
+            for class_id in sorted(class_ids):
                 gt_class = gt_xywhr[gt_labels == class_id]
                 num_gt_per_class[class_id] += int(gt_class.shape[0])
                 class_mask = pred_labels == class_id
@@ -176,7 +229,9 @@ class OrientedDetectionMetricCollector:
                         else:
                             stream.append((float(scores_class[k]), 0))
 
-        classes_with_gt = sorted(num_gt_per_class)
+        classes_with_gt = sorted(
+            class_id for class_id, count in num_gt_per_class.items() if count > 0
+        )
         if not classes_with_gt:
             return {"map": 0.0, "map_50": 0.0}
 

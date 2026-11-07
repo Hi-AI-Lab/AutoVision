@@ -36,7 +36,7 @@ def main() -> None:
 
     data = args.data or instance_demo(demo_root(args, "instance_segmentation"))
     if args.dry_run:
-        dry_run("instance_segmentation", data)
+        dry_run("instance_segmentation", data, args)
         return
     ensure_out_available(args.out, overwrite=args.overwrite)
     gtr_requirement()

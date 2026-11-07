@@ -5,6 +5,12 @@ Per-process limits: with multiple uvicorn workers each worker enforces its own
 bucket, so the effective aggregate is ``workers × limit``. Global quotas belong
 at the ingress/gateway layer; this guard protects an individual process from a
 single noisy client.
+
+The BUCKET KEY is namespaced per endpoint and resolved by
+``autovision.serving.app._client_key``: by default the socket peer, which
+under a reverse proxy collapses all clients into one bucket — pass
+``trusted_proxy_hops=N`` (see that docstring) when N trusted proxies sit
+in front of the server.
 """
 
 from __future__ import annotations

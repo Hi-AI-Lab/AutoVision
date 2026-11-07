@@ -164,16 +164,22 @@ class DataAuditReport:
         lines.append("|---|---|---|---|---|")
         for split, values in sorted(self.per_split.items()):
             lines.append(
-                f"| {split} | {values.get('images', 0)} | "
+                f"| {_escape_markdown_cell(split)} | {values.get('images', 0)} | "
                 f"{values.get('boxes', 0)} | {values.get('errors', 0)} | "
                 f"{values.get('warnings', 0)} |"
             )
         lines.append("\n## 类别分布\n")
-        lines.append("| 类别 | " + " | ".join(sorted(self.per_split)) + " |")
+        lines.append(
+            "| 类别 | "
+            + " | ".join(
+                _escape_markdown_cell(split) for split in sorted(self.per_split)
+            )
+            + " |"
+        )
         lines.append("|---|" + "---|" * len(self.per_split))
         for name, values in sorted(self.per_class.items()):
             lines.append(
-                f"| {name} | "
+                f"| {_escape_markdown_cell(name)} | "
                 + " | ".join(str(values.get(split, 0)) for split in sorted(self.per_split))
                 + " |"
             )
@@ -185,17 +191,39 @@ class DataAuditReport:
             lines.append("| severity | split | path | kind | detail |")
             lines.append("|---|---|---|---|---|")
             for issue in issues[: self.max_examples]:
-                path = issue.path.replace("|", "\\|")
-                detail = issue.detail.replace("|", "\\|")
+                # detail comes from exception messages and file names: it
+                # must not be able to restructure the table (H3-2j).
                 lines.append(
-                    f"| {issue.severity} | {issue.split} | {path} | "
-                    f"{issue.kind} | {detail} |"
+                    f"| {_escape_markdown_cell(issue.severity)} | "
+                    f"{_escape_markdown_cell(issue.split)} | "
+                    f"{_escape_markdown_cell(issue.path)} | "
+                    f"{_escape_markdown_cell(issue.kind)} | "
+                    f"{_escape_markdown_cell(issue.detail)} |"
                 )
             if len(issues) > self.max_examples:
                 lines.append(
                     f"\n_仅显示前 {self.max_examples} 条；完整清单见 manifest.json。_\n"
                 )
         return "\n".join(lines)
+
+
+def _escape_markdown_cell(text: str) -> str:
+    """Make one string safe inside a single markdown table cell (H3-2j).
+
+    The old escaping only handled ``|``; details built from exception
+    messages could still inject newlines (row breaks) or backticks
+    (inline-code spans) and restructure the report tables. Backslash is
+    escaped first so the escaped pipe/backtick sequences survive, newlines
+    collapse to spaces, and backticks are escaped so no span can start.
+    """
+    return (
+        text.replace("\\", "\\\\")
+        .replace("|", "\\|")
+        .replace("`", "\\`")
+        .replace("\r\n", " ")
+        .replace("\n", " ")
+        .replace("\r", " ")
+    )
 
 
 def _iou(box: tuple[float, ...], other: tuple[float, ...]) -> float:

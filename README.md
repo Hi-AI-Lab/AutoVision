@@ -5,9 +5,9 @@
 企业级视觉模型训练框架：训练 → 评测 → 导出 → 部署一条龙。旗舰模型家族
 **[GTR](https://github.com/Intellindust-AI-Lab/GTR)**（MIT）一个共享骨干覆盖
 六个任务，26 个官方权重全部注册、开箱即下。Python API 与 `autovision-cli`
-（30 条命令）共享同一套 Pydantic 严格校验。
+（31 条命令）共享同一套 Pydantic 严格校验。
 
-当前版本 **0.6.0**。适合需要自托管训练、评测、导出和私有部署的团队；不提供
+当前版本 **0.6.1**。适合需要自托管训练、评测、导出和私有部署的团队；不提供
 托管 API，也不替代生产网关。核心代码 Apache-2.0，权重许可逐资产登记
 （[模型库](docs/model_zoo.md)），受限许可权重默认不下载。
 
@@ -223,7 +223,7 @@ autovision.train_semantic_segmentation(
 <details>
 <summary>能力与子系统</summary>
 
-- **一套校验、两个入口**：Python API 与 `autovision-cli`（30 条命令）共享
+- **一套校验、两个入口**：Python API 与 `autovision-cli`（31 条命令）共享
   Pydantic 严格校验；拼错或越界直接报错（did-you-mean）。
 - **模型面**：7 个注册源（torchvision、timm、super-gradients、ultralytics
   （AGPL 隔离）、dinov2、dinov3、rfdetr）+ 树内 `rtdetr/*`、`detr/*`、
@@ -341,10 +341,10 @@ A/B / canary 分流（Python API `create_app(variants=...)`）。属参考实现
   （`hard_examples=`）、伪标注自训练（`pseudo-label` +
   `scripts/self_train_detect.py`）、长尾采样（`long_tail_sampler=`）。
 
-命令全表（30 条）：训练 9 条 `pretrain` / `train-*`；评测推理 `val` /
+命令全表（31 条）：训练 9 条 `pretrain` / `train-*`；评测推理 `val` /
 `predict` / `benchmark` / `embed` / `pseudo-label` / `analyze-errors`；
 导出服务 `export` / `serve`；数据 `download` / `convert-data` /
-`data-check` / `data-snapshot`；治理 `list-models` / `model-info` /
+`data-check` / `data-snapshot` / `tile-dataset`；治理 `list-models` / `model-info` /
 `list-methods` / `plugins` / `compliance-report` / `registry`；工具 `hpo` /
 `extract-video-frames` / `plot-curves`。
 

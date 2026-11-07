@@ -62,6 +62,15 @@ python examples/tasks/classification.py \
     --onnx runs/classification.onnx
 ```
 
+> **`--onnx` needs `--weights` for trained artifacts**: without `--weights`,
+> the inference script builds its task's DEFAULT checkpoint network (e.g.
+> the 19-class Cityscapes semseg model, the 80-class COCO detector) purely
+> for pre/post-processing, and the identity gate rejects an artifact whose
+> class count differs ("Artifact has N classes but the loaded network has
+> M"). Always pair `--onnx` with `--weights <exported.pt>` from the same
+> training run — the default network then only supplies the (class-count-
+> agnostic) pre/post contract.
+
 `inference_demo.py` is a compatibility alias for `detection.py`. All inference
 examples default to the CC0 `assets/airport_aerial.jpg` (see `assets/README.md`
 for provenance); pass `--image` for task-specific imagery. The OBB example uses
@@ -127,7 +136,7 @@ require `--weights`.
 | `--dry-run` | write/print the demo data config; no training |
 | `--predict-image PATH` | run the exported model and save `prediction.png` |
 | `--export PATH` | copy the exported `.pt` (ONNX/TRT via `autovision-cli export`) |
-| `--export-onnx PATH` | also export to ONNX (parity-gated; pair with `<task>.py --onnx`) |
+| `--export-onnx PATH` | also export to ONNX (parity-gated); serve it with `<task>.py --weights <exported.pt> --onnx <artifact>` — `--weights` is REQUIRED unless the artifact's class count matches that task's default checkpoint (see the note below) |
 | `--threshold F` | prediction threshold (default 0.3) |
 
 ## Task matrix

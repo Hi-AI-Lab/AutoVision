@@ -27,6 +27,8 @@ from autovision.export.artifact_metadata import (
     build_metadata,
     infer_task_name,
     read_metadata,
+    record_onnx_opset,
+    toolchain_versions,
     verify_engine_artifact,
     verify_metadata,
     write_artifact_metadata,
@@ -145,6 +147,93 @@ def test_infer_task_name_prefers_the_explicit_attribute() -> None:
     network = _pose_network(artifact_task_name="oriented_detection")
 
     assert infer_task_name(network) == "oriented_detection"
+
+
+# ── toolchain record (H3-4d) ────────────────────────────────────────────
+
+
+def test_build_metadata_records_toolchain_payload() -> None:
+    """H3-4d: the schema carries the producing toolchain; optional packages
+    that are absent stay None instead of lying about a version."""
+    metadata = build_metadata(_pose_network())
+
+    payload = json.loads(metadata["autovision_toolchain"])
+    assert set(payload) == {
+        "torch", "onnx", "onnx_opset", "onnxruntime", "tensorrt", "openvino",
+    }
+    assert payload["torch"] == toolchain_versions()["torch"]
+
+
+def test_tensorrt_sidecar_carries_toolchain(tmp_path: Path) -> None:
+    """H3-4d: the engine's .meta.json write point records the toolchain."""
+    engine = tmp_path / "model.engine"
+    write_artifact_metadata(
+        _pose_network(), engine, backend="tensorrt", extra={"precision": "fp16"}
+    )
+
+    metadata = read_metadata(engine, backend="tensorrt")
+    payload = json.loads(metadata["autovision_toolchain"])
+
+    assert "torch" in payload and payload["torch"]
+
+
+def test_openvino_sidecar_write_point_carries_toolchain(tmp_path: Path) -> None:
+    """H3-4d: the OV sidecar spreads ``onnx_export_metadata()``, so the
+    toolchain rides along without openvino_helpers changing."""
+    ir = tmp_path / "model.xml"
+    ir.with_suffix(".json").write_text(
+        json.dumps({**build_metadata(_pose_network()), "backend": "openvino"}),
+        encoding="utf-8",
+    )
+
+    metadata = read_metadata(ir, backend="openvino")
+
+    assert json.loads(metadata["autovision_toolchain"])["torch"]
+
+
+def test_record_onnx_opset_fills_the_payload() -> None:
+    """H3-4d: the exporter fills the REAL graph opset; a legacy payload
+    without the key is left alone."""
+    metadata = build_metadata(_pose_network())
+    record_onnx_opset(metadata, 18)
+    assert json.loads(metadata["autovision_toolchain"])["onnx_opset"] == 18
+
+    legacy: dict[str, str] = {}
+    record_onnx_opset(legacy, 18)
+    assert legacy == {}
+
+
+def test_verify_metadata_warns_on_toolchain_mismatch(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """H3-4d: load-time version skew warns (via the existing verify path —
+    InferenceEngine constructs through it) but never fails."""
+    network = _pose_network()
+    metadata = build_metadata(network)
+    payload = json.loads(metadata["autovision_toolchain"])
+    payload["torch"] = "0.0.0-fake-build"
+    metadata["autovision_toolchain"] = json.dumps(payload, sort_keys=True)
+
+    with caplog.at_level(logging.WARNING):
+        verify_metadata(metadata, network, artifact=tmp_path / "model.onnx")
+
+    assert "different toolchain" in caplog.text
+    assert "0.0.0-fake-build" in caplog.text
+
+
+def test_verify_metadata_stays_silent_when_toolchain_matches(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Matching toolchains (and legacy artifacts without the key) warn not."""
+    network = _pose_network()
+
+    with caplog.at_level(logging.WARNING):
+        verify_metadata(
+            build_metadata(network), network, artifact=tmp_path / "model.onnx"
+        )
+        verify_metadata({}, network, artifact=tmp_path / "model.onnx")
+
+    assert "different toolchain" not in caplog.text
 
 
 # ── read / verify round-trips ───────────────────────────────────────────

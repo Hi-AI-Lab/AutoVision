@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import torch
 
 from autovision.metrics.confusion import ConfusionMatrix
@@ -72,3 +74,20 @@ class TestConfusionMatrix:
         assert payload["fp_row"] == 2
         assert payload["fn_col"] == 2
         assert len(payload["matrix"]) == 3
+
+    def test_explicit_class_ids_warn_once_for_unseen_classes(self, caplog):
+        """H3-1c: class_ids=[0] 但匹配含类 1 → 聚合 warning 一次，矩阵行为不变。"""
+        with caplog.at_level(logging.WARNING, logger="autovision.metrics.confusion"):
+            matrix = ConfusionMatrix.from_matches(_matches(), class_ids=[0])
+        warnings_seen = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings_seen) == 1
+        message = warnings_seen[0].getMessage()
+        assert "[1]" in message  # the unseen class id is aggregated, not per-row
+        # 矩阵行为不变：dog 计数被丢弃，cat 的 TP 与 classification FP 行保持。
+        assert matrix.matrix.tolist() == [[1, 0], [1, 0]]
+
+    def test_inferred_class_ids_do_not_warn(self, caplog):
+        """H3-1c: 推断模式覆盖所有出现类别，不应触发未见类别 warning。"""
+        with caplog.at_level(logging.WARNING, logger="autovision.metrics.confusion"):
+            ConfusionMatrix.from_matches(_matches(), class_names={0: "cat", 1: "dog"})
+        assert caplog.records == []

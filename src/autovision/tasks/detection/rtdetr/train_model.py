@@ -139,10 +139,19 @@ class RTDETRObjectDetectionTrain(TrainModel):
             "val", COCOMAPEvaluator(self.categories, max_dets=self.model_args.eval_max_dets)
         )
         evaluator.update(decoded)
+        # METRIC-03: crowd flags ride the collate; a directly-constructed
+        # batch (tests, custom loaders) without them falls back to zeros —
+        # the pre-fix semantics for callers that never had crowd data.
+        iscrowds_batch = batch.get("iscrowds") or [
+            torch.zeros(labels.shape[0], dtype=torch.long)
+            for labels in batch["classes"]
+        ]
         evaluator.update_targets(
             [
-                {"boxes": boxes, "labels": labels}
-                for boxes, labels in zip(batch["bboxes"], batch["classes"])
+                {"boxes": boxes, "labels": labels, "iscrowds": crowds}
+                for boxes, labels, crowds in zip(
+                    batch["bboxes"], batch["classes"], iscrowds_batch
+                )
             ],
             original_sizes=batch["original_size"],
         )

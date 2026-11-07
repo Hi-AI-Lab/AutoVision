@@ -6,6 +6,7 @@ from autovision.cli.common_helpers import (
     get_num_workers,
     get_out_dir,
 )
+from autovision.errors import ConfigValidationError
 
 
 class TestGetOutDir:
@@ -23,7 +24,7 @@ class TestGetOutDir:
         out = tmp_path / "run"
         out.mkdir()
         (out / "file.txt").write_text("x")
-        with pytest.raises(ValueError, match="not empty"):
+        with pytest.raises(ConfigValidationError, match="not empty"):
             get_out_dir(out)
 
     def test_overwrite_replaces_nonempty(self, tmp_path):
@@ -57,7 +58,7 @@ class TestGetGlobalBatchSize:
         assert get_global_batch_size(128, 64, 1) == 64
 
     def test_not_divisible_raises(self):
-        with pytest.raises(ValueError, match="divisible"):
+        with pytest.raises(ConfigValidationError, match="divisible"):
             get_global_batch_size(10, 1000, 4)
 
     def test_batch_one_device_ok(self):
@@ -89,7 +90,7 @@ def test_resolve_gradient_checkpointing():
 
     assert resolve_gradient_checkpointing(None) is False
     assert resolve_gradient_checkpointing({"gradient_checkpointing": True}) is True
-    with pytest.raises(ValueError, match="must be a bool"):
+    with pytest.raises(ConfigValidationError, match="must be a bool"):
         resolve_gradient_checkpointing({"gradient_checkpointing": "yes"})
 
 
@@ -98,5 +99,5 @@ def test_resolve_parallel():
 
     assert resolve_parallel(None) == "ddp"
     assert resolve_parallel({"parallel": "FSDP"}) == "fsdp"
-    with pytest.raises(ValueError, match="must be 'ddp' or 'fsdp'"):
+    with pytest.raises(ConfigValidationError, match="must be 'ddp' or 'fsdp'"):
         resolve_parallel({"parallel": "deepspeed"})

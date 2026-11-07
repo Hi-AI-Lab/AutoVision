@@ -6,9 +6,432 @@
 
 `0.1.x` 为内部开发线（未对外发布，无变更记录）；本文件自 `0.2.0` 起对外。
 
+## [0.6.1] - 2026-11-07
+
+### 安全修复
+
+- **serving 认证默认 fail-closed（加固计划 H2-1）**：`serve()` 绑定非回环
+  地址且未提供 `api_key=` / `AUTOVISION_SERVING_API_KEY` 时拒绝启动；显式
+  `AUTOVISION_SERVE_ALLOW_INSECURE=1` 可接受开放端点。`create_app` 作为库
+  入口保持 opt-in 语义不变。
+- **资源上界（H2-2）**：`serve()` 暴露 `limit_concurrency`（默认 64）与
+  `timeout_keep_alive`（默认 30）；`create_app` 新增
+  `max_request_pixels`（默认 `max_batch × max_image_pixels`），批量解码
+  累计像素超限返回 413；`max_image_pixels` 默认 40M → 16M。
+- **api_key 不落环境变量（H2-4）**：`workers>1` 且显式传入 `api_key=` 时
+  拒绝启动（多 worker 路径会把配置序列化进同 UID 可读的环境变量），key
+  必须走 `AUTOVISION_SERVING_API_KEY`。
+- **4xx 错误信息脱敏（H2-5c）**：跨越引擎/序列化边界的 `AutoVisionError`
+  不再原文回传（可能含服务器路径），映射为稳定短语 + request_id，原文进
+  服务端日志；纯客户端输入错误（base64、图片解码）保留原文。
+- **`X-Request-ID` 清洗（H2-5b）**：请求 ID 先校验
+  `[0-9a-zA-Z-]{1,64}`，不合格截断并中性化后再进日志/响应头/A-B 分桶，
+  消除日志伪造面。
+- **A/B 分桶键不可客户端操控（H2-5a）**：分桶键改为服务端逐请求签发的
+  routing key（此前用客户端可控的 `X-Request-ID`，可通过重放同一 id 粘住
+  指定变体）；`X-AB-Variant` 定向改为 opt-in——`create_app` 新增
+  `allow_variant_override`（默认 `False`，请求头被忽略），测试场景显式
+  开启后未知变体名仍返回 400。
+- **可下载资产下载加固（H3-4i）**：`resolve_downloadable` 改为分块流式
+  写入（`.part` + `os.replace`，常量内存）+ per-target FileLock 互斥
+  （并发 resolve 同一资产不再互踩）+ (path, size, mtime, expected) 摘要
+  缓存（进程内重复 resolve 不再重复全量哈希）；哈希不匹配保持
+  fail-closed 删除并重下。
+
+### 修复
+
+- **误差分析匹配器 IoU 行错位（H1-1）**：输入预测分数未按降序排列时
+  （离线 JSON 导入的常见形态），TP/FP 归因系统性错位并污染难例采样；
+  IoU 行索引改为经 `sorted_idx` 映射。
+- **crowd-ignore 类别一致性（H3-6d）**：误差分析的 ignore 判定只考虑
+  与预测**同类**的 crowd GT（对齐 pycocotools）——异类 crowd 框不再把
+  真实 FP 掩蔽为 ignored。
+- **run_stream 永久挂起（H1-2）**：reader 结束时队列满 >5 秒会丢失
+  sentinel 使主循环永久空转；sentinel 改为无条件重试（只阻塞 reader
+  线程），主循环增加"reader 已死且队列空且无 sentinel"守卫。
+- **run_stream 丢帧策略缺陷（H3-5b）**：新增 `max_lag_frames` 参数
+  （默认 None=现状），设置后积压超限即 drop_oldest 并计入
+  `StreamRunResult.frames_dropped`——修复初版实现"积压检查放在
+  `queue.Full` 异常之后永不触发"的缺陷。
+- **ByteTrack 两处无界泄漏（H1-3）**：匹配失败的 unconfirmed 轨迹现在
+  立即移出 `self.tracks`（此前每帧对其做 Kalman 预测且永不清理）；
+  `run_stream` 每批调用 `drain_removed_tracks()`（D2 契约的首个 src
+  消费方），退役轨迹计数暴露为 `StreamRunResult.tracks_removed`。
+- **断流重连后状态重置（H3-5c）**：重连成功后 tracker/smoother/zone
+  状态重置（断流是场景不连续，ID 从 1 重新开始、计数清零）；
+  `reconnects=0` 在"断流后未尝试重连即结束"时输出 warning，不再与
+  clean EOF 不可区分。
+- **multi_stream 加固（H3-1e/H3-5a/d/e/f）**：逐源序列化异常隔离；
+  `batch_size` 成为每源每轮实际批组装上限；重连预算随连续健康运行
+  重置（累计 reconnects 统计保留）；分辨率变化轮换 writer 分段文件
+  （不再覆盖旧段）；每源滑动窗口失败率熔断（最近 20 帧 >50% 失败即
+  中止该源并标记 `aborted`），持续 OOM 不再假成功。
+- **DDP 种子三件套（H1-4）**：`DistributedSampler` 现在接收运行 seed
+  （此前固定 seed=0，多卡数据顺序与 seed 脱钩）；`Engine.fit` 的
+  epoch loader 重建补齐 `worker_init_fn/generator/prefetch_factor/
+  persistent_workers`；CLI loader generator 按 rank 偏移。多卡训练的
+  数据顺序与 0.6.0 不同（复现性修复的预期结果）。resume 现在恢复
+  sampler epoch（H3-3b，旧 checkpoint 缺键回退 0）。
+- **DDP 验证指标精确性（H3-3c/e）**：验证集分片改为无填充跨 rank 划分
+  （`_StridedValSampler`）——padding 复制样本不再被计两次，DDP 验证
+  指标与单进程完全一致；`world_size > len(dataset)` 显式报错（此前
+  空 epoch 静默通过）；per-rank RNG 状态随 checkpoint 分片保存/恢复
+  （H3-3a，旧 checkpoint 回退 rank0 流）。
+- **`export_weights` 原子化（H1-5）**：导出权重走 checkpoint 同款
+  tmp+fsync+`os.replace`；周期/早停导出补 rank 写失败屏障，rank0 写
+  失败不再让其余 rank 挂到 NCCL watchdog 超时。
+- **TensorRT 引擎 / OpenVINO IR 原子发布（H1-6/H1-7）**：两者改为
+  staged 写入 + parity 门禁通过后 `os.replace` 发布——门禁失败只删
+  暂存件，旧好工件不再被"先覆盖再删除"；sidecar 同样原子化。
+- **TRT 精度容差与暂存件（H3-4a/b）**：`precision="auto"` 按构建决策点
+  回读的**实际**精度选 parity 容差（平台降级到 fp32 不再被 fp16 宽容差
+  掩盖）；fp32/fp16 路径的 staged ONNX 在引擎构建成功后清理（未对拍的
+  `.onnx` 不再与已验证 `.engine` 并存误导部署）。
+- **fp16 门禁 CUDA-EP 路径兑现（H1-8）**：onnxruntime 带 CUDA EP 时
+  parity 会话实际路由 CUDA EP（此前警告承诺的路径在代码中不存在）。
+- **verify 钩子 precision 中央兜底（H3-4c）**：不接受 `precision`
+  参数的任务钩子改为不传该参调用 + 每钩子一次 warning（此前直接
+  TypeError 或以 fp32 容差静默校验 fp16）。
+- **导出工件携带工具链版本（H3-4d）**：`autovision_toolchain`
+  （torch/onnx/opset/onnxruntime/tensorrt/openvino）进 ONNX in-graph
+  元数据与 TRT/OV sidecar；`InferenceEngine` 加载时版本不匹配输出
+  warning。
+- **截断图像全局开关隔离（H1-10）**：掩码解码的
+  `LOAD_TRUNCATED_IMAGES` 宽松旗标收进作用域上下文，不再泄漏到图片
+  解码——修复分割任务中截断 JPEG 被静默解码进训练。
+- **数据加载健壮性（H3-2e/f/g/h）**：COCO/VOC/YOLO 各加载器的损坏/
+  截断 JSON、缺键、bbox 长度错统一包装为带文件名的 `AutoVisionError`；
+  `yolo_to_coco` 增加归一化坐标校验（越界/非正宽高报错含行号），标签
+  文件显式 `utf-8-sig` 编码（BOM 兼容）；mmap refcount 的
+  exists→open→increment 竞态移入 FileLock 临界区（新增 4 进程并发
+  用例）；版本快照对文件消失报 `AutoVisionError` 且快照 JSON 原子写。
+- **掩码匹配跨目录错配（H3-2i）**：semantic/panoptic/depth/ImageDataset
+  的掩码匹配键优先相对路径，嵌套目录中同名 stem 不再互相错配（回退
+  stem 时对歧义告警一次）；扁平目录行为逐位不变。
+- **空验证 shard 按 0 平均（H3-3d）**：DDP 验证损失改为分子/分母分别
+  归约，某 rank 零 batch 不再稀释全局均值。
+- **registry 版本混排崩溃（H3-4g）**：stage 混入非语义版本号（如
+  `rc1`）时 `get(version=None)` 不再 TypeError；数值最新优先并告警。
+- **registry 晋升失败审计（H3-4j）**：promote 门禁失败也写
+  `promote_failed` 审计条目（含 gate 名与原因摘要，hash-chain 不变）。
+- **许可证判定统一（H3-4h）**：deployment_gates 的 allowlist 收敛为
+  `compliance/licenses` 单一来源；模型卡 license 统一过
+  `normalize_license`（"Apache Software License" 等别名不再误报）。
+- **契约层健壮性（H3-1b/d/f/h）**：`(H,W,2)` 缺 `segment_ids` 的
+  panoptic 图不再被误判为 N 个实例（box-less 形状启发式 + 构造期
+  warning）；`_summarize` 对非数值数组降级为 shape/dtype/length 摘要
+  （此前崩溃）；`select()` 空结果抛 `AutoVisionError`；新增
+  `ResultValidationError`（`AutoVisionError` 与 `ValueError` 双继承）
+  替换 results.py 全部裸 `ValueError`（`except ValueError` 调用方
+  不受影响），annotators 的骨架校验改抛 `ConfigValidationError`。
+- **可视化一致性（H3-1i/j）**：MaskAnnotator 对分辨率不匹配的 mask
+  栈做 NEAREST resize（此前静默跳过全部实例），与语义路径对齐；
+  NaN score 渲染为 `n/a`；`filter_scores` 对含 NaN 输入 warning 一次。
+- **CLI 与指标（H3-6a/b/c/e/f）**：`val` 的 `AutoVisionError` 输出单行
+  错误 + exit 1（此前裸 traceback）；`plot-curves` 缺 `run=` 改为
+  exit 2 用法错误；`download`/`predict` 接入未知键拒绝；`auto_raise`
+  不再永久改写 `max_dets` 属性（compute 内局部抬升，两次 compute
+  读数可比，抬升时告警一次）；val 输出声明 headline 口径
+  （argmax-F1 点读数，非 COCO summary）；analyze-errors 支持
+  predictions 信封格式（`categories` 显式映射）并在裸列表时告警排序
+  假设；HPO 逐 trial 失败聚合透出首个原始异常（拼错键不再只报
+  "no successful trial"）。
+- **serving 摘要 depth 可见性（H2-5f）**：`/predict` 响应中 depth 深度图
+  因 `max_json_elements` 被摘要（`summarized: true`）时，每条结果附加
+  `depth_truncated: true`——形状/摘要不是像素，客户端可据此回退到
+  文件/对象存储通道而非静默拿到不可用数据。
+- **数据快照原生支持 Ultralytics data.yaml（DATA-01/02/22）**：
+  `dataset_snapshot` / `verify_dataset_snapshot` 把 `path/train/val` +
+  `names` 解释为 YOLO 规格（此前 train/val 被折叠进 `"(shared)"`、类名
+  被当路径收集，strict 下直接报错）；镜像 `labels/` 目录一并纳入快照
+  （标签内容同样被钉住）；校验对"快照后新增的 split"报
+  `added_split` 差异（此前完全失明）；截断/手工编辑的快照（缺
+  `splits`/`spec` 或条目非对象）响亮报错而非裸 `KeyError`。YOLO 快照
+  额外记录 `names` 类别表。
+- **YOLO/OBB 行缓存指纹纳入图像清单（DATA-03）**：mmap 缓存键的目录
+  指纹现包含图像文件（路径/大小/mtime）——增删图像正确失效缓存，此前
+  新图静默不进训练、删图训练中途崩溃；指纹 stat 失败的降级路径输出
+  warning（DATA-23）。
+- **COCO 实例分割懒解码（DATA-04）**：行保存紧凑 RLE、`__getitem__`
+  按需解码（此前构造期把全部实例 mask 解码为 bool 数组常驻内存，COCO
+  train2017 量级需数百 GB）；损坏 RLE 报 `AutoVisionError` 并指明行与
+  图像。
+- **图像 disk 缓存 sidecar 修复（DATA-05）**：sidecar 命名从
+  `<stem>.npy` 改为 `<完整文件名>.npy`（`a.jpg` 与 `a.png` 不再共用
+  `a.npy` 互相踩踏）；新鲜度键加入来源字节大小（`cp -p` 保 mtime 的
+  内容替换可检出）；sidecar meta 版本升为 2，旧格式 sidecar 自动失效
+  重建（旧文件成为孤儿，可手工删除）。
+- **YOLO/OBB 标签加载加固（DATA-06/07/21）**："字段数合法但值非法"的行
+  改走与字段数错误相同的计数 + deprecation warning 通道（此前裸
+  `ValueError` 无文件/行号直接中断训练）；未知类别行计数并汇总
+  warning（此前静默丢标注；`ignore_classes` 命中的行保持静默）；二进制
+  /GBK 标签文件报错带文件名。
+- **重复 image_id 三面统一（DATA-08）**：实例分割与关键点加载器对重复
+  `image id` 报错（带两个来源文件名），与检测面 H3-2b 语义一致。
+- **`open_image` 通道契约（DATA-09）**：返回通道数强制等于
+  `num_channels`——`num_channels=1` 对 RGB/RGBA 源现在返回 1 通道
+  （此前随解码路径返回 3/4 通道）；`num_channels` 非 1/3 报
+  `AutoVisionError`。
+- **Label Studio 路径防逃逸（DATA-10）**：图像定位统一走
+  `resolve_under`，绝对路径或 `..` 穿越指向 `images_dir` 之外时报错
+  （此前 pathlib 前缀丢弃使外部文件被打开并原文写入 COCO `file_name`）。
+- **分割图-掩码尺寸校验（DATA-11）**：语义/全景分割在读取期校验
+  image/mask 空间尺寸一致（带两个文件名与尺寸），不再以 transform
+  深处的含混错误暴露。
+- **mmap overwrite 删除收敛 rank0（DATA-12）**：`overwrite=True` 下仅
+  rank0 删除 mmap + refcount（DDP 时序偏斜下慢 rank 不再删掉 rank0
+  刚发布的文件并拖满超时）。
+- **COCO 加载校验补强（DATA-20/29/30）**：非正 `width/height` 在检测/
+  实例分割面构造期报错（带文件名，此前裸 `ZeroDivisionError`）；孤儿
+  标注（`image_id` 未在 `images` 声明）计数并汇总 warning（与
+  `merge_coco` 对齐）；`ignore_classes` 中未声明 id 输出一次 warning。
+
+- **预训练 resume 漂移守卫 + 调度器两段式恢复（TRAIN-01）**：预训练
+  checkpoint 现携带 fit_args/数据指纹快照，resume 时复用 D17 漂移检查
+  （此前完全静默）；`CosineWarmupScheduler` 的恢复改为两段式——步计数
+  随 state dict 回灌、调度形状（max_epochs/warmup/end_value/base_lrs）
+  永远来自当前调用，续训调大 `max_epochs` 后 LR 按新终点继续衰减（此前
+  被旧形状冻结在 end_value）。resume 时更换 base LR 现在按"当前调用
+  governs"生效：首步仍用 checkpoint 的参数组 LR，其后按新 base 衰减
+  （修复前换 LR 被完全忽略）。fit_task 侧调度器形状漂移（resume 扩展
+  steps 而调度形状被 checkpoint 固定）输出指名 warning。
+- **pretrain 导出原子化（TRAIN-02）**：`exported_last.pt` 改走
+  tmp + fsync + `os.replace`（对齐任务导出的 H1-5 纪律），写入失败保留
+  旧导出且无 tmp 残留；导出段抽为 `_export_embedding_model` helper。
+- **多 rank resume 一致性对账（TRAIN-03）**：resume 后对
+  (start_step, best_metric) 做 MIN/MAX all_reduce——非共享文件系统导致的
+  跨 rank 状态分叉从"挂满集合通信超时"变为指名错误（含共享盘指引）。
+- **`best_metric.json` sidecar 原子写（TRAIN-04）**：改走与 checkpoint
+  相同的原子写路径，崩溃不再留下撕裂的 JSON（读取端本就容错，但撕裂
+  会静默重置 best 基线）。
+- **warm-start/resume 结构不匹配友好报错（TRAIN-05）**：类别数/query 数
+  变更后加载 checkpoint 报 key 级 diff 摘要（缺失/多出/形状不匹配计数与
+  首批键名），替代 torch 原生多行 size mismatch；删除了永远落空的
+  `load_train_state_dict` 实例属性赋值（hook 按是否有该属性保留）。
+- **resume 已完成 run 的可见性（TRAIN-12）**：预训练与 fit_task 对
+  "已跑满全部 epoch/step"的 resume 输出 info 提示与扩展指引（此前静默
+  返回 0 步结果）。
+- **杂项（TRAIN-07/09/11/15）**：删除 `accumulated_loss` 死代码；
+  `CheckpointMetadata` 新增无歧义的 `step` 字段（fit_task 的 `epoch`
+  历史上承载 step，字段向后兼容）；合并重复的引擎常量定义；
+  `Engine.fit` 对 batch_sampler 型 DataLoader 报 `AutoVisionError`
+  （此前在装配深处裸 TypeError/除零）。
+
+- **multi_stream 视频写手隔离（INFER-01）**：单源的
+  `AnnotatedVideoWriter` 创建/写入失败（磁盘满、编解码器故障）不再穿透
+  `run()` 终止整个多源运行——该源按既有熔断语义 abort、其余源继续，
+  summary.json 保证落盘（含未包容失败的最后兜底）。
+- **run_stream 逐帧隔离（INFER-03）**：新增 `on_frame_error`（默认
+  `"skip"`）——单帧畸形记录或非有限 tracker 输入记录到 JSONL
+  （`{"frame", "error"}` 行）并计入 `StreamRunResult.frames_failed`，
+  24/7 源不再因一帧死亡；`"raise"` 保留历史 fail-fast；连续超过 10 帧失败
+  仍中止（管线整体坏死不静默空转）。track=True + NaN 分数场景即此修复的
+  靶心。
+- **推理工件元数据闸门可选 fail-closed（INFER-04）**：`InferenceEngine`
+  新增 `require_metadata`——无元数据工件在 CLI predict 与 serving 入口
+  被拒绝（此前身份闸门对其整体空转），库用途默认保持宽松但升级为
+  warning。
+- **后端输出契约运行时校验（INFER-05/09）**：`run_batch` 校验记录数与
+  输入一致、每条记录至少携带一个 canonical 结果键、记录必须是 dict——
+  后端图与 torch 参考布局不一致从"静默错误坐标或晦涩异常"变为指名
+  backend 的错误；空批量报 `AutoVisionError`（此前裸 RuntimeError）。
+- **TraceAnnotator 历史上界（INFER-06）**：新增 `max_tracks`（默认
+  512，`None` 显式不设限）——长时服务每个出现过的 track_id 不再永久
+  占据一条轨迹历史；驱逐按"最后触达"顺序，当前帧 id 受保护。
+- **推理杂项（INFER-02/07/08/11/12/13/16）**：float 语义 label map 渲染
+  按四舍五入统一两条分支（此前随分辨率一崩一活，与序列化侧 H1-11 的
+  弃用路径对齐）；stream.py 的记录键改用 `autovision.keys` 常量；
+  label-less 记录的 Track 重建保留 `det_index`（join-back 契约修复）；
+  16-bit 帧按自身满量程归一（此前 /255 启发式回绕损坏）；
+  TraceAnnotator docstring 撤销"stream 会写 tracker_id 进 extra"的失真
+  声明；TrackSmoother 对同帧重复 id 报错；VideoFrameStream 并发二次
+  迭代报错（此前共享 capture 未定义行为）。
+
+- **registry CLI 先校验后变更（SERVE-01）**：`registry` 命令的未知键
+  校验移到分发之前（按动作白名单）——typo 键此前会**先执行
+  register/promote/rollback 再报 usage error**，留下已生效的变更与
+  重复审计风险。
+- **服务端故障返回 5xx（SERVE-02）**：跨越引擎/序列化边界的
+  `AutoVisionError` 从 400 改为 500（稳定短语 + request_id 的脱敏不变）；
+  客户端输入错误保持 400。修复重试策略、SLO 错误率区分与告警分诊语义。
+- **serve CLI 数值与布尔参数守卫（SERVE-03/11）**：`port=`/`workers=`
+  非法值从真实终端的 traceback 变为 usage error（exit 2，含合法范围）；
+  `strict=`/`maximize=`/`force=` 的布尔解析改为严格（`strict=False`
+  此前被 `bool("False")=True` 静默反转）。
+- **解码预算与推理预算分离（SERVE-04）**：新增 `decode_timeout_s`（默认
+  `min(10, inference_timeout_s / 2)`）——解码超时返回 504 并计数
+  （`autovision_decode_timeouts_total`），**不再毒化健康引擎**（此前纯
+  解码超时把 variant 永久置为 503 直到重启）；毒化契约保留给卡死的
+  forward（H2-3 语义不变）。
+- **warmup 超时（SERVE-05）**：新增 `warmup_timeout_s`（默认 60s）——
+  引擎在 warmup 中挂死（CUDA 停滞、NFS 工件）从"启动永久不进入
+  serving 状态"变为指名 variant 的启动失败；`0`/`None` 显式禁用
+  warmup（挂死线程无法取消，进程退出可能被阻塞——见 known_limits）。
+- **限流拓扑正确性（SERVE-06/08）**：桶键按端点命名空间化（`/metrics`
+  抓取不再与 `/predict` 互挤）；`trust_proxy_headers` 布尔弃用（0.7.0
+  移除），新参数 `trusted_proxy_hops=N` 按标准 XFF 链语义从右选第 N 项
+  为客户端（反代下全体客户端不再坍缩为一个桶）；predict 的 429 计入
+  延迟直方图（`error_class="rate_limited"`）。
+- **workers>1 父进程预校验（SERVE-07/09）**：新增
+  `validate_serve_config`（纯函数，覆盖 create_app 全部纯可校验参数）——
+  workers>1 的坏配置从"每个 worker 内爆炸 + uvicorn 重启循环"变为父进程
+  单条干净错误（未知键同样指名）；多 worker 启动后清理
+  `AUTOVISION_SERVE_CONFIG` 环境残留。
+- **CLI 辅助层异常家族统一（SERVE-12/13）**：`common_helpers`/
+  `train_helpers` 的配置错误统一抛 `ConfigValidationError`（此前裸
+  `ValueError`，调用方无法用单一 `except AutoVisionError` 收口）；
+  `epochs=` 的浮点/非法值从静默截断/裸崩变为指名错误。
+
+- **OBB mAP 两处正确性修复（METRIC-01/02，数字口径修正）**：PR 流改按
+  每图"GT∪预测类别并集"构建——无 GT 图像上的背景 FP 此前被静默丢弃，
+  AP 系统性虚高（审计复现：官方语义 0.5 的场景返回 1.0）；AP 积分改为
+  标准的"全序列单调包络 → 前向积分"（旧实现交错进行，同一 recall 的
+  高精度点无法回补，AP 系统性虚低，0.5 vs 1.0）；新增
+  `interpolation="all-point"|"coco101"` 两挡并建 golden 基线
+  （tests/golden/obb_ap.json，含两个审计复现向量）；预测/GT 记录数不匹配
+  响亮报错（zip 静默截断曾使审计场景成立）。**修复后所有历史 OBB 数字
+  与 0.6.x 之前不可比**（双向失真同时被纠正）。
+- **crowd（iscrowd）验证链路端到端接通（METRIC-03）**：COCO 行的 crowd
+  标志此前在 `__getitem__` 被丢弃、四个检测任务的 `update_targets` 均不
+  携带——评估器能力存在但主路径失效，训练期 mAP 把 crowd 框当普通 GT
+  计 FN（val2017 有 446 个）。现在 dataset→collate（含 mixup/copyblend/
+  小框过滤三处）→batch→train_model 全链携带；直接构造的 batch 缺键时
+  回退全零（pre-fix 语义）。**含 crowd 数据的训练期 mAP 数值上升
+  （修复目标）**。
+- **headline P/R/F1 改为单操作点读数（METRIC-04，设计 A）**：新增
+  `headline_score_threshold`（默认 0.50）——precision/recall/F1 在同一
+  score 操作点计算（IoU 0.5、crowd 忽略、按有 GT 类宏平均，复用误差分析
+  匹配器）；旧实现扫 pycocotools 的 recall 阈值轴与固定 recall 配对，
+  F1 系统性高于其配对 recall 且披露文案失真。`HEADLINE_PROTOCOL` 文案
+  重写为真实语义；**headline 三个数与 0.6.x 之前不可比**（AP/AR 不变）。
+- **指标健壮性（METRIC-07/08/09 + P3）**：深度指标改流式标量累计
+  （对齐先于累计，`merge_state` 加法合并——此前全量 (pred,gt) 深度图
+  驻留内存，NYU 级数十 GB）；误差分析 report.json 的 matches 改 top-K
+  截断（默认 1000，`matches_total`/`matches_truncated` 标记）并删除
+  重复存储的 confusion；分割指标对 target 越界/负值响亮报错（此前裸
+  bincount 崩溃）；COCO gt.json 的 categories 写真实类名；auto_raise
+  高水位随 reset 清零；`match_detections` 对 per-image 数量不匹配报错；
+  画廊文件名含父目录去重 + 单张失败跳过（此前互相覆盖/整体崩溃）；
+  混淆矩阵/误差分析拒绝重复类名；pose 评估在 DDP 下缺 `image_ids`
+  响亮报错；`TaskMetrics` 标量列可拼接；全景指标加 TP 匹配互斥（有效
+  输入下不可达，防御性保留）。
+- **合规包加固（METRIC-05 + P3）**：`compliance-report` CLI 默认
+  fail-closed（`fail_on="error"`，此前默认恒通过；`strict=` 弃用——
+  strict=False 不再关闭门禁，用 fail_on=none 显式旁路）；合规四件套
+  原子写；SBOM serialNumber 改确定性 uuid5（同内容同编号）；SBOM 无
+  timestamp 时省略字段（CycloneDX RFC-3339）；markdown 表格单元全面
+  转义；依赖清单按 PyPI 大小写不敏感名称去重；缺失模型文件/损坏快照
+  进 issue 清单而非中断报告。
+
+- **注册表孤儿条目自愈（EXPORT-01，P1）**：register/promote 被 kill 于
+  "目录已建、manifest 未写"窗口时留下的残目录此前永久卡死该
+  (name, version)（"versions are immutable" 误判）。现在三态处理：
+  已发布（manifest 存在）→ 不可变拒绝；新鲜孤儿（<10 分钟）→ 提示
+  可能有并发注册进行中；陈旧孤儿 → 自动清理 + warning 并重试成功。
+  `get()` 对无 manifest 目录报 "Incomplete registry entry"（与 list 的
+  跳过行为一致）。
+- **fp16 验证强度进工件元数据（EXPORT-02）**：新增
+  `autovision_verify_strength`（`full` / `smoke-only`）——fp16 在无 CUDA
+  EP 机器上 verify=True 只跑冒烟门禁时，工件携带机器可读的"未做数值
+  对拍"标记，加载侧输出 warning；新增 opt-in 的 `VerifyStrengthGate`
+  部署门禁（要求 full 才可晋升）。验证门禁先于元数据写入执行。
+- **注册表补齐 TRT/OV 身份 sidecar（EXPORT-03）**：`_copy_sidecars`
+  现按加载器的 `with_suffix` 语义复制 `model.meta.json`（TRT）与
+  `model.json`（OV）身份载体——此前从注册表路径加载 TRT/OV 工件时身份
+  门禁整体静默失效。
+- **注册表读路径瘦身（EXPORT-04）**：`get`/`current`/`rollback` 新增
+  `verify=` 参数（默认 True 保持现语义）；digest 记忆化
+  （(path,size,mtime) 键，与 downloadable 同方案）消除重复全量哈希。
+- **门禁稳健性（EXPORT-05/06/07）**：dynamic-spatial 第二探针输入种子化
+  （与第一输入同源，门禁不再 flaky）；int8 parity 门禁对输出数不匹配
+  显式报错 + `equal_nan=False`（NaN 参考不再过闸）；`gates=[]` 旁路
+  晋升在审计日志携带 `bypass: true` 与门禁清单（"explicit, audited
+  bypass" 承诺兑现）。
+- **发布原子性（EXPORT-09）**：三载体 sidecar 发布顺序统一为
+  "sidecar 先行、工件 rename 收尾"（TRT/OV 带旧 sidecar 备份恢复；
+  OV 为 json → bin → xml，entry-point 最后）——并发读者不再看到
+  新工件配旧身份 sidecar 的窗口。
+- **下载加固（EXPORT-08/18/19）**：`register_downloadable` 名称拒绝
+  穿越/NUL/绝对路径（HF 式命名空间斜杠保留）；OFFLINE 模式不再删除
+  校验失败的缓存文件（保留现场供人工修复）；单源下载增加有界重试
+  （3 次指数退避）后再换 mirror。
+- **杂项（EXPORT-10 + P3）**：>2GB external-data 图在 onnxslim 后
+  fail-fast（此前深陷 value_info 修复晦涩报错）；`list_entries` 跳过
+  损坏条目 + warning（此前整体崩溃）；`promote` 新增 `set_current=False`
+  （历史版本重晋升不再回拉生产指针，审计携带该标记）；benchmark 的
+  p90 改最近秩；GTR 根路径改为惰性读取（post-import env 生效）并移除
+  与 docstring 矛盾的 research 树默认候选；审计追加改尾部读取
+  （O(1) 而非 O(n²)）；动态 batch 上限 128 常量化并标注。
+
+### 变更
+
+- **数据加载严格性（H3-2a/b/d，弃用协议）**：COCO 重复
+  `image id` 加载期报错（此前静默覆盖）；未声明的 `category_id` 计数
+  并汇总 warning（此前静默丢弃）；YOLO/OBB 畸形行保持跳过但输出带
+  文件/行号的 deprecation warning（0.7.0 起默认报错）；目录穿越防护
+  统一到检测/实例分割/关键点加载器。COCO 实例分割加载器从
+  O(图×标注) 双重循环改为预分组（H3-2c）。
+- **float 语义 mask 弃用（H1-11）**：`to_json(masks="rle")` 对 float
+  label map 输出 deprecation warning（行为暂不变，0.7.0 拒绝）；
+  `masks="dense"` 增加 `max_elements×100` 资源硬闸（H3-1a）；
+  `mask_to_bool` 整数路径 `!= 0` → `> 0`（-1 unassigned 对齐 panoptic
+  约定，H3-1g）。
+- **训练看门狗与提示（H3-3f/g/h）**：`AUTOVISION_STEP_TIMEOUT_SEC`
+  接线为告警型看门狗（步超阈边沿告警，非取消机制）；resume 比对
+  数据集指纹（漂移告警不阻断）；DDP + batch_size=1 + BatchNorm 输出
+  SyncBN 建议 warning。
+- **混淆矩阵/质量报告（H3-1c/2j）**：显式 `class_ids` 遇未见类别输出
+  一次 warning（此前静默吞计数）；quality 报告 markdown 单元格转义
+  扩展到换行/反引号（异常 detail 不再破坏表格）。
+- **错误路径可观测性（H2-5d/e）**：429/4xx/503/504 全部计入延迟
+  直方图（`error_class` label）；优雅停机默认 30s（传 None 恢复无限
+  等待）。
+- **推理 poison 按变体隔离（H2-3）**：推理超时只标记被路由的 variant
+  （并发信号量同样按 variant 划分）——A/B 部署中非关键 variant 卡死不再
+  拖垮全进程；`/predict` 在健康变体内路由，`/readyz` 仅在**全部** variant
+  中毒时 503，响应体与 `/healthz` 携带 `poisoned_variants` 明细。
+- **相机索引语义澄清（H3-5g）**：`run_stream`/`VideoFrameStream`
+  docstring 明确相机索引必须传 int、字符串一律按文件/URL 解析。
+
+### 文档
+
+- 新增「工程加固计划」（`docs/hardening_plan.md`）：2026-11 全仓库审计的
+  修复设计与实施计划，含逐项设计、测试计划、验收标准、兼容性与回滚策略；
+  批次 0–3 的实施项均在文档中标注状态。
+- `docs/known_limits.md` 同步 serving 认证姿态、数据加载严格性、推理
+  序列化弃用项。
+- **命令数文档对账（H3-6h/H4-6）**：AGENTS.md/README/docs 的"30 条命令"
+  更正为 31 条（README 全表补漏 `tile-dataset`）；新增
+  `tests/test_infrastructure.py` 对账用例——AGENTS.md 声明的命令数与
+  `cli/_app.py` 实际注册数不一致即测试失败，防文档静默漂移。
+- **导出侧 golden 数值基线（H4-5）**：新增 `tests/test_export_golden.py`
+  与 8 个任务面的 ORT 输出快照（`tests/golden/export_<face>.json`，
+  atol 1e-5）——结构化 parity 门禁只比对同权重的 torch-vs-ORT，无法
+  捕获跨版本数值漂移；快照钉住 decode/后处理、opset、fp16 黑名单变化。
+  录制即失败一次（杜绝 golden 误删后 CI 首轮放行）。
+
+### 测试与工程
+
+- **恢复 8 个被嵌套吞掉的流式管线测试（H0-1）**：`tests/test_stream_pipeline.py`
+  的缩进事故使 zone 防护、NaN→null 等核心用例从未执行。
+- **机制化（批次 4）**：`scripts/check_test_layout.py`（测试布局守卫，
+  防嵌套事故复发）与 `scripts/check_design_anchors.py`（设计编号→测试
+  锚定检查，allowlist 带过期机制）进入 CI lint job；`tests/test_soak.py`
+  长时运行老化套件（`AUTOVISION_RUN_SOAK=1` 门控）；byte_track golden
+  缺失时从"录制并跳过"改为"录制并失败一次"（H4-5）。
+- 新增 `scripts/compute_dataset_pins.py`（H1-9 配套：从已下载工件计算
+  sha256/size 并输出 registry 片段；pin 值需有网环境填充）。
+- **批次 3 补齐约 90 个回归测试**：契约层 panoptic 启发式/异常类型/
+  可视化一致性、数据层损坏标注参数化用例/mmap 4 进程并发/快照原子性/
+  嵌套目录掩码匹配、引擎 strided sampler 划分数学/DDP 指标与单进程
+  一致性/空 shard 守卫/SyncBN 提示/step 看门狗、导出 Dim 缓存/多输入
+  拒绝/staged 清理/精度容差 6 场景/工具链元数据、registry 下载并发/
+  摘要缓存/晋升审计/许可证别名一致性、运行时丢帧计数/重连重置/
+  预算恢复/分段轮换/熔断、CLI 信封映射/HPO 透错/auto_raise 跨轮。
+
 ## [Unreleased]
 
-## [0.6.0] - 2026-11-05
+（无。下一个开发周期从本段开始记录。）
 
 ### 修复
 
@@ -77,6 +500,14 @@
   因 fla GLA / HF 外壳 / denoising nonzero 等 graph break 碎裂而无收益
   （whole/per_module/reduce-overhead 实测 1111/1149/2706 vs eager
   1169，已记录在 torch_compile.py docstring）。
+
+## [0.6.0] - 2026-11-05
+
+（发布于 PyPI；发布提交 138c2a3，未走 tag/CI 流程——见 known_limits 流程注记。）
+
+### 沿革
+
+本节正文与 0.6.1 前的 [Unreleased] 合并记录在上方 0.6.1 节（同一工作区两轮加固连续实施）。
 
 ## [0.5.0] - 2026-11-04
 

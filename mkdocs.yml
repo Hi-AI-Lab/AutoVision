@@ -94,6 +94,14 @@ plugins:
             支持政策: Support policy
             安全政策: Security policy
             变更日志: Changelog
+            模块设计实施: Module design & implementation
+            总览与整改路线: Overview & roadmap
+            数据层: Data layer
+            训练引擎与任务面: Training engine & tasks
+            推理运行时与跟踪: Inference runtime & tracking
+            导出与模型注册表: Export & model registry
+            服务面: Serving surface
+            指标与合规: Metrics & compliance
 
 nav:
   - 首页: index.md
@@ -113,6 +121,15 @@ nav:
   - 导入 EoMT 权重: import_eomt.md
   - 冒烟测试: smoke_test.md
   - 已知限制: known_limits.md
+  - 工程加固计划: hardening_plan.md
+  - 模块设计实施:
+      - 总览与整改路线: design/overview.md
+      - 数据层: design/data_layer.md
+      - 训练引擎与任务面: design/training_engine.md
+      - 推理运行时与跟踪: design/inference_runtime.md
+      - 导出与模型注册表: design/export_registry.md
+      - 服务面: design/serving_surface.md
+      - 指标与合规: design/metrics_compliance.md
   - 架构总览: framework_design.md
   - 贡献指南: contributing.md
   - 发布流程: release_process.md

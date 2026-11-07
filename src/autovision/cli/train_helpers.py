@@ -23,7 +23,7 @@ from autovision.config.validate import (
     assert_config_resolved,
     pydantic_model_validate,
 )
-from autovision.errors import UnresolvedAutoError
+from autovision.errors import ConfigValidationError, UnresolvedAutoError
 from autovision.pretext.recipe import PretextRecipe
 from autovision.scaling import (
     ScalingInfo,
@@ -78,14 +78,28 @@ def get_epochs(
 ) -> int:
     """Resolve ``epochs``: user value > step-based recipe > default epochs."""
     if epochs != "auto":
-        return int(epochs)
+        # SERVE-13: a float like 2.5 used to silently truncate and a
+        # non-numeric string died on a bare ValueError with no parameter
+        # name in the message.
+        try:
+            resolved = int(epochs)
+        except (TypeError, ValueError) as error:
+            raise ConfigValidationError(
+                f"epochs must be an integer or 'auto', got {epochs!r}."
+            ) from error
+        if str(epochs).strip() not in {str(resolved), f"+{resolved}"}:
+            raise ConfigValidationError(
+                f"epochs must be a whole number, got {epochs!r} "
+                f"(would truncate to {resolved})."
+            )
+        return resolved
     args_cls = method_cls.method_args_cls()
     recipe_steps = getattr(args_cls, "auto_steps", None)
     if recipe_steps is not None:
         return epochs_from_steps(recipe_steps, batch_size, dataset_size)
     recipe_epochs = getattr(args_cls, "auto_epochs", None)
     if recipe_epochs is None:
-        raise ValueError(
+        raise ConfigValidationError(
             f"{args_cls.__name__} defines neither 'auto_steps' nor "
             f"'auto_epochs'; set epochs explicitly."
         )
@@ -157,10 +171,16 @@ def get_dataloader(
     worker_init_fn = None
     generator = None
     if seed is not None:
-        from autovision.engine.engine import make_dataloader_generator, seed_worker
+        from autovision.engine.engine import (
+            dataloader_seed_rank,
+            make_dataloader_generator,
+            seed_worker,
+        )
 
         worker_init_fn = seed_worker
-        generator = make_dataloader_generator(seed)
+        # H1-4: offset the stream per rank so DDP ranks do not replay the
+        # same shuffle sequence.
+        generator = make_dataloader_generator(seed, rank=dataloader_seed_rank())
     return DataLoader(
         dataset,
         batch_size=batch_size_per_device,

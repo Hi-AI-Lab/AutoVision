@@ -314,6 +314,23 @@ class TestDocs:
         assert not any(p.startswith("docs/ok.md") for p in problems), problems
 
 
+class TestDocsReconciliation:
+    """H3-6h/H4-6: doc claims that drift silently must fail the suite."""
+
+    def test_agents_md_command_count_matches_cli_registration(self):
+        """The "N 条命令" claim in AGENTS.md equals the registered commands."""
+        app_source = (ROOT / "src" / "autovision" / "cli" / "_app.py").read_text()
+        registered = len(re.findall(r'@app\.command\("', app_source))
+        agents = (ROOT / "AGENTS.md").read_text()
+        match = re.search(r"(\d+) 条命令", agents)
+        assert match is not None, "AGENTS.md no longer states the command count"
+        claimed = int(match.group(1))
+        assert claimed == registered, (
+            f"AGENTS.md claims {claimed} CLI commands but {registered} are "
+            "registered; update the doc (or split the claim) when adding one."
+        )
+
+
 class TestRelease:
     """Release-package contract (E1): version source of truth, changelog,
     contributor entry points and issue/PR templates."""

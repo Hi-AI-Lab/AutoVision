@@ -1,5 +1,11 @@
 # DETR 谱系基准表（roadmap design doc 29 §4）
 
+> **口径变更提示（0.6.1）**：OBB mAP（PR 构建 + 包络积分修正）与
+> headline precision/recall/F1（单操作点，`headline_score_threshold`）
+> 两处口径在 0.6.1 修正——0.6.1 之前的 OBB 与 headline 数字不可与
+> 之后直接比较；AP/AR 与 bbox/pose 等其余协议不变（设计
+> docs/design/metrics_compliance.md METRIC-01/02/04）。
+
 > **协议（D5/D6/D7，不可变）**：AP 口径 = COCO 2017 val2017 + pycocotools
 > 标准；对外数字一律标注 schedule 档位与种子，关键档位 ≥2 seeds 报均值。
 > 延迟 = TensorRT，batch=1 与 batch=4 两档，含 H2D 拷贝与预处理，warmup 50

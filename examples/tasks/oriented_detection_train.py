@@ -40,7 +40,7 @@ def main() -> None:
 
     data = args.data or obb_demo(demo_root(args, "oriented_detection"))
     if args.dry_run:
-        dry_run("oriented_object_detection", data)
+        dry_run("oriented_object_detection", data, args)
         return
     ensure_out_available(args.out, overwrite=args.overwrite)
     gtr_requirement()

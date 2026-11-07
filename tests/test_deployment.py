@@ -1,6 +1,9 @@
 # Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Tests for the deployment layer: ONNX export, SAHI, benchmark, load_model."""
 
+import json
+from pathlib import Path
+
 import pytest
 import torch
 
@@ -372,3 +375,920 @@ class TestLoadTaskModel:
 
         with pytest.raises(CheckpointError, match="not an exported"):
             load_task_model(p)
+
+
+# ── H1-6: TensorRT engine atomic publish (mocked build + parity gate) ───────
+
+
+class TestTensorRTAtomicPublish:
+    """H1-6: the TRT engine is built and parity-gated under a staged
+    ``.tmp-<pid>`` name; ``os.replace`` publication and the sidecars happen
+    only after the gate. Build and verify are mocked — no TensorRT runtime
+    or GPU is involved."""
+
+    def test_verify_failure_preserves_previous_engine(
+        self, tiny_model, tmp_path, monkeypatch
+    ):
+        """Injected gate failure: the previous engine bytes survive and only
+        the staged engine is dropped."""
+        import autovision.export.tensorrt_helpers as trt_helpers
+
+        target = tmp_path / "model.engine"
+        target.write_bytes(b"previous-good-engine")
+        seen = {}
+
+        def fake_build(**kwargs):
+            seen["build_out"] = Path(kwargs["out"])
+            seen["build_out"].write_bytes(b"new-bad-engine")
+            return seen["build_out"]
+
+        monkeypatch.setattr(trt_helpers, "export_onnx_to_tensorrt", fake_build)
+
+        class _FailingRunner:
+            def __init__(self, engine_path, *, device="cuda"):
+                seen["verify_path"] = Path(engine_path)
+                raise RuntimeError("engine parity gate failed (injected)")
+
+        monkeypatch.setattr(trt_helpers, "TensorRTEngineRunner", _FailingRunner)
+
+        with pytest.raises(RuntimeError, match="injected"):
+            tiny_model.export_tensorrt(target, verify=True)
+
+        # The gate ran against the STAGED engine, not the published target.
+        assert seen["verify_path"] != target
+        assert ".tmp-" in seen["verify_path"].name
+        # A gate failure must not overwrite-then-delete the old engine.
+        assert target.read_bytes() == b"previous-good-engine"
+        assert not any(".tmp-" in p.name for p in tmp_path.iterdir())
+
+    def test_success_publishes_engine_and_sidecars_together(
+        self, tiny_model, tmp_path, monkeypatch
+    ):
+        """Success path: the staged engine is published with the identity and
+        decode-contract sidecars, with no staged residue left behind."""
+        import autovision.export.tensorrt_helpers as trt_helpers
+
+        target = tmp_path / "model.engine"
+        target.write_bytes(b"previous-good-engine")
+        seen = {}
+
+        def fake_build(**kwargs):
+            seen["build_out"] = Path(kwargs["out"])
+            seen["build_out"].write_bytes(b"new-good-engine")
+            return seen["build_out"]
+
+        monkeypatch.setattr(trt_helpers, "export_onnx_to_tensorrt", fake_build)
+
+        class _PassingRunner:
+            def __init__(self, engine_path, *, device="cuda"):
+                seen["verify_path"] = Path(engine_path)
+
+            def run(self, images):
+                return [images]
+
+        monkeypatch.setattr(trt_helpers, "TensorRTEngineRunner", _PassingRunner)
+        # The publish routing is what this test pins down; the real
+        # decode-contract comparison is covered by the model's own tests.
+        monkeypatch.setattr(tiny_model, "postprocess", None)
+        monkeypatch.setattr(
+            tiny_model, "verify_onnx_export_outputs", lambda *args, **kwargs: None
+        )
+
+        result = tiny_model.export_tensorrt(target, verify=True)
+
+        assert result == target
+        assert target.read_bytes() == b"new-good-engine"
+        assert seen["verify_path"] == seen["build_out"] != target
+        assert ".tmp-" in seen["build_out"].name
+        assert (tmp_path / "model.meta.json").exists()
+        assert (tmp_path / "model.engine.postprocess.json").exists()
+        assert not any(".tmp-" in p.name for p in tmp_path.iterdir())
+
+
+# ── H1-7: OpenVINO IR atomic publish (mocked conversion + parity gate) ──────
+
+
+class TestOpenVINOAtomicPublish:
+    """H1-7: the IR pair (.xml/.bin) is staged under temp names and
+    published (bin first, then xml) only after the parity gate; a gate
+    failure drops the staged pair and leaves the previous IR untouched.
+    Conversion/save/verify are mocked around the real orchestration."""
+
+    def test_verify_failure_preserves_previous_ir(
+        self, tiny_model, tmp_path, monkeypatch
+    ):
+        openvino = pytest.importorskip("openvino")
+        import autovision.export.openvino_helpers as ov_helpers
+
+        target_xml = tmp_path / "model.xml"
+        target_xml.write_bytes(b"previous-good-ir")
+        (tmp_path / "model.bin").write_bytes(b"previous-good-weights")
+        seen = {}
+
+        def fake_export_onnx(path, **kwargs):
+            Path(path).write_bytes(b"staged-onnx")
+            return Path(path)
+
+        def fake_save(ov_model, xml_path, compress_to_fp16=True):
+            staged = Path(xml_path)
+            staged.write_bytes(b"new-bad-ir")
+            staged.with_suffix(".bin").write_bytes(b"new-bad-weights")
+            seen["save_xml"] = staged
+
+        def failing_verify(openvino_mod, model, xml_path, device, precision="fp32"):
+            seen["verify_xml"] = Path(xml_path)
+            raise RuntimeError("OpenVINO parity gate failed (injected)")
+
+        monkeypatch.setattr(tiny_model, "export_onnx", fake_export_onnx)
+        monkeypatch.setattr(openvino, "convert_model", lambda path: object())
+        monkeypatch.setattr(openvino, "save_model", fake_save)
+        monkeypatch.setattr(ov_helpers, "_verify_openvino_parity", failing_verify)
+
+        with pytest.raises(RuntimeError, match="injected"):
+            tiny_model.export_openvino(target_xml, verify=True)
+
+        # The gate ran against the staged IR pair.
+        assert seen["save_xml"] != target_xml
+        assert ".tmp-" in seen["save_xml"].name
+        assert seen["verify_xml"] == seen["save_xml"]
+        # A gate failure must leave the previous IR pair byte-identical.
+        assert target_xml.read_bytes() == b"previous-good-ir"
+        assert (tmp_path / "model.bin").read_bytes() == b"previous-good-weights"
+        assert not any(".tmp-" in p.name for p in tmp_path.iterdir())
+
+    def test_success_publishes_ir_pair_and_sidecar(
+        self, tiny_model, tmp_path, monkeypatch
+    ):
+        openvino = pytest.importorskip("openvino")
+        import autovision.export.openvino_helpers as ov_helpers
+
+        target_xml = tmp_path / "model.xml"
+        target_xml.write_bytes(b"previous-good-ir")
+        (tmp_path / "model.bin").write_bytes(b"previous-good-weights")
+        seen = {}
+
+        def fake_export_onnx(path, **kwargs):
+            Path(path).write_bytes(b"staged-onnx")
+            return Path(path)
+
+        def fake_save(ov_model, xml_path, compress_to_fp16=True):
+            staged = Path(xml_path)
+            staged.write_bytes(b"new-good-ir")
+            staged.with_suffix(".bin").write_bytes(b"new-good-weights")
+            seen["save_xml"] = staged
+
+        def passing_verify(openvino_mod, model, xml_path, device, precision="fp32"):
+            seen["verify_xml"] = Path(xml_path)
+
+        monkeypatch.setattr(tiny_model, "export_onnx", fake_export_onnx)
+        monkeypatch.setattr(openvino, "convert_model", lambda path: object())
+        monkeypatch.setattr(openvino, "save_model", fake_save)
+        monkeypatch.setattr(ov_helpers, "_verify_openvino_parity", passing_verify)
+
+        result = tiny_model.export_openvino(target_xml, verify=True)
+
+        assert result == target_xml
+        assert seen["verify_xml"] == seen["save_xml"] != target_xml
+        assert ".tmp-" in seen["save_xml"].name
+        assert target_xml.read_bytes() == b"new-good-ir"
+        assert (tmp_path / "model.bin").read_bytes() == b"new-good-weights"
+        metadata = json.loads((tmp_path / "model.json").read_text())
+        assert metadata["backend"] == "openvino"
+        assert not any(".tmp-" in p.name for p in tmp_path.iterdir())
+
+
+# ── H1-8: parity-gate execution-provider routing ────────────────────────────
+
+
+class TestParityProviderSelection:
+    """H1-8: the fp16 gate's CUDA-EP promise is wired up — the parity
+    session routes through CUDAExecutionProvider when the installed
+    onnxruntime offers one, and the CPU-only path keeps its warning plus
+    smoke gate. Providers are simulated via monkeypatch (no real sessions)."""
+
+    def test_provider_selection_helper(self):
+        from autovision.export.export_onnx import _parity_session_providers
+
+        assert _parity_session_providers(
+            ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        ) == ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        assert _parity_session_providers(
+            ["AzureExecutionProvider", "CPUExecutionProvider"]
+        ) == ["CPUExecutionProvider"]
+
+    def _export_gate_target(self, tiny_model, tmp_path):
+        """A real (fp32) graph for the gate: provider routing is driven by
+        the precision ARGUMENT and the patched providers, not the graph's
+        own dtype."""
+        out = tiny_model.export_onnx(
+            tmp_path / "gate_probe.onnx",
+            verify=False,
+            format_args={"opset_version": 18},
+        )
+        spec = tiny_model.model_input_spec
+        example_name, example = next(iter(spec.example_inputs(batch_size=1).items()))
+        return out, example_name, example
+
+    def test_fp16_gate_uses_cuda_provider_when_available(
+        self, tiny_model, tmp_path, monkeypatch, caplog
+    ):
+        import logging
+
+        import onnxruntime as ort
+
+        out, example_name, example = self._export_gate_target(tiny_model, tmp_path)
+        captured = {}
+
+        class _Probe(Exception):
+            pass
+
+        def probe_session(path, *, providers=None):
+            captured["providers"] = providers
+            raise _Probe("stop before the parity compare")
+
+        monkeypatch.setattr(
+            ort,
+            "get_available_providers",
+            lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"],
+        )
+        monkeypatch.setattr(ort, "InferenceSession", probe_session)
+        with caplog.at_level(logging.INFO, logger="autovision"):
+            with pytest.raises(_Probe):
+                tiny_model._verify_onnx(out, example_name, example, "fp16")
+
+        assert captured["providers"] == [
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider",
+        ]
+        assert "CUDA execution provider" in caplog.text
+
+    def test_fp16_gate_without_cuda_keeps_warning_and_smoke(
+        self, tiny_model, tmp_path, monkeypatch, caplog
+    ):
+        import logging
+
+        out, example_name, example = self._export_gate_target(tiny_model, tmp_path)
+        smoke_calls = []
+        monkeypatch.setattr(
+            tiny_model,
+            "_smoke_verify_fp16",
+            lambda *args, **kwargs: smoke_calls.append(args),
+        )
+        with caplog.at_level(logging.WARNING, logger="autovision"):
+            tiny_model._verify_onnx(out, example_name, example, "fp16")
+
+        # The smoke gate ran instead of the parity session, and the warning
+        # naming the missing CUDA EP is preserved.
+        assert smoke_calls
+        assert "no CUDA execution provider" in caplog.text
+
+
+# ── H3-4e: dynamic-axis marker Dim identity ─────────────────────────────────
+
+
+class TestDimMarkerIdentity:
+    """H3-4e: same-NAME axis markers must resolve to the same ``Dim`` object
+    within one export — a fresh ``Dim`` with a reused name reads as a second
+    unrelated axis to torch.export."""
+
+    def test_same_marker_name_shares_one_dim(self):
+        from autovision.export.export_onnx import _dim_from_marker
+
+        cache: dict = {}
+        height = _dim_from_marker("same_size", 2, cache=cache)
+        width = _dim_from_marker("same_size", 3, cache=cache)
+
+        assert height is width
+
+    def test_different_marker_names_get_distinct_dims(self):
+        from autovision.export.export_onnx import _dim_from_marker
+
+        cache: dict = {}
+        first = _dim_from_marker("height", 2, cache=cache)
+        second = _dim_from_marker("width", 3, cache=cache)
+
+        assert first is not second
+
+    def test_cache_scopes_to_one_export(self):
+        """The cache is a per-export dict: two independent exports must not
+        share Dim objects (global caching would leak bounds across exports)."""
+        from torch.export import Dim
+
+        from autovision.export.export_onnx import _dim_from_marker
+
+        first = _dim_from_marker("axis", 2, cache={})
+        second = _dim_from_marker("axis", 2, cache={})
+
+        assert isinstance(first, Dim) and isinstance(second, Dim)
+        assert first is not second
+
+
+# ── H3-4f: multi-input parity refused loudly ────────────────────────────────
+
+
+class _FakeOrtInput:
+    """Stand-in for ``ort.InferenceSession.get_inputs()`` entries."""
+
+    def __init__(self, name: str, type_: str = "tensor(float)") -> None:
+        self.name = name
+        self.type = type_
+
+
+class _FakeOrtSession:
+    def __init__(self, inputs: list[_FakeOrtInput]) -> None:
+        self._inputs = inputs
+
+    def get_inputs(self) -> list[_FakeOrtInput]:
+        return self._inputs
+
+    def run(self, outputs: list[str], feeds: dict) -> list:
+        import numpy as np
+
+        return [np.zeros(1, dtype=np.float32)]
+
+
+def _write_tiny_onnx(path: Path) -> None:
+    """Smallest valid ONNX graph so ``onnx.checker`` passes before the gate."""
+    import onnx
+
+    value_info = onnx.helper.make_tensor_value_info
+    graph = onnx.helper.make_graph(
+        [onnx.helper.make_node("Identity", ["images"], ["outputs"])],
+        "identity",
+        [value_info("images", onnx.TensorProto.FLOAT, [1, 3, 8, 8])],
+        [value_info("outputs", onnx.TensorProto.FLOAT, [1, 3, 8, 8])],
+    )
+    model = onnx.helper.make_model(
+        graph,
+        opset_imports=[onnx.helper.make_opsetid("", 17)],
+        ir_version=9,
+    )
+    onnx.save(model, str(path))
+
+
+class TestParityMultiInput:
+    """H3-4f: feeding one tensor to every graph input verifies nothing for
+    the second input; the gate now refuses instead of pretending."""
+
+    def _verify_with_session(self, tiny_model, tmp_path, monkeypatch, inputs):
+        import onnxruntime as ort
+
+        path = tmp_path / "graph.onnx"
+        _write_tiny_onnx(path)
+        spec = tiny_model.model_input_spec
+        example_name, example = next(
+            iter(spec.example_inputs(batch_size=1).items())
+        )
+        # The fake session's canned outputs are not real detection tensors;
+        # the hook contract itself is covered by the task tests.
+        monkeypatch.setattr(
+            tiny_model,
+            "verify_onnx_export_outputs",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            ort,
+            "get_available_providers",
+            lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"],
+        )
+        monkeypatch.setattr(
+            ort, "InferenceSession", lambda p, providers=None: _FakeOrtSession(inputs)
+        )
+        tiny_model._verify_onnx(path, example_name, example, "fp32")
+
+    def test_two_graph_inputs_raise(self, tiny_model, tmp_path, monkeypatch):
+        from autovision.errors import AutoVisionError
+
+        with pytest.raises(AutoVisionError, match="多输入对拍"):
+            self._verify_with_session(
+                tiny_model, tmp_path, monkeypatch,
+                [_FakeOrtInput("images"), _FakeOrtInput("intrinsics")],
+            )
+
+    def test_single_graph_input_still_passes(self, tiny_model, tmp_path, monkeypatch):
+        """The supported contract (one image input) keeps working."""
+
+        self._verify_with_session(
+            tiny_model, tmp_path, monkeypatch, [_FakeOrtInput("images")]
+        )
+
+
+# ── H3-4c: verify hooks without a precision parameter ───────────────────────
+
+
+class TestVerifyHookPrecisionFallback:
+    """H3-4c: hooks that predate the ``precision`` keyword are called without
+    it (legacy plugins keep working) and warned about ONCE — their gate then
+    runs at fp32 tolerances even for an fp16 export."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_warned_hooks(self, monkeypatch):
+        """Isolate the module-level warn-once registry per test."""
+        from autovision.export import export_onnx
+
+        monkeypatch.setattr(export_onnx, "_FP32_TOLERANCE_WARNED", set())
+
+    def _run_fp16_gate(self, tiny_model, tmp_path, monkeypatch, hook):
+        import onnxruntime as ort
+
+        path = tmp_path / "graph.onnx"
+        _write_tiny_onnx(path)
+        spec = tiny_model.model_input_spec
+        example_name, example = next(
+            iter(spec.example_inputs(batch_size=1).items())
+        )
+        monkeypatch.setattr(tiny_model, "verify_onnx_export_outputs", hook)
+        monkeypatch.setattr(
+            ort,
+            "get_available_providers",
+            lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"],
+        )
+        monkeypatch.setattr(
+            ort,
+            "InferenceSession",
+            lambda p, providers=None: _FakeOrtSession([_FakeOrtInput("images")]),
+        )
+        tiny_model._verify_onnx(path, example_name, example, "fp16")
+
+    def test_hook_without_precision_warns_once(
+        self, tiny_model, tmp_path, monkeypatch, caplog
+    ):
+        import logging
+
+        calls = []
+
+        def hook_no_precision(torch_outputs, onnx_outputs):
+            """Legacy verify hook: no precision keyword, fp32 tolerances."""
+            calls.append((torch_outputs, onnx_outputs))
+
+        with caplog.at_level(logging.WARNING, logger="autovision"):
+            self._run_fp16_gate(tiny_model, tmp_path, monkeypatch, hook_no_precision)
+            self._run_fp16_gate(tiny_model, tmp_path, monkeypatch, hook_no_precision)
+
+        assert len(calls) == 2
+        assert "fp32 tolerance" in caplog.text
+        assert caplog.text.count("does not accept") == 1
+
+    def test_hook_with_precision_gets_it_and_stays_silent(
+        self, tiny_model, tmp_path, monkeypatch, caplog
+    ):
+        import logging
+
+        seen = []
+
+        def hook_with_precision(torch_outputs, onnx_outputs, *, precision="fp32"):
+            """Modern verify hook: consumes the precision keyword."""
+            seen.append(precision)
+
+        with caplog.at_level(logging.WARNING, logger="autovision"):
+            self._run_fp16_gate(
+                tiny_model, tmp_path, monkeypatch, hook_with_precision
+            )
+
+        assert seen == ["fp16"]
+        assert "does not accept" not in caplog.text
+
+
+# ── H3-4a/H3-4b: TensorRT resolved precision + staged ONNX lifecycle ───────
+
+
+def _install_fake_trt(monkeypatch, *, fp16_flag: bool = True, fast_fp16=None):
+    """Install a fake ``tensorrt`` module driving the REAL build pipeline:
+    Builder/Config/Profile/Parser no-ops, ``build_serialized_network``
+    returns a fixed blob. TensorRT and a GPU are not needed."""
+    import sys
+    import types
+
+    fake = types.ModuleType("tensorrt")
+    fake.__version__ = "10.14.2.2"
+
+    class Logger:
+        INFO = 3
+        VERBOSE = 4
+
+        def __init__(self, severity=None):
+            self.severity = severity
+
+    fake.Logger = Logger
+
+    class BuilderFlag:
+        TF32 = 1 << 11
+        DEBUG = 1 << 9
+
+    if fp16_flag:
+        BuilderFlag.FP16 = 1 << 5
+        BuilderFlag.OBEY_PRECISION_CONSTRAINTS = 1 << 7
+    fake.BuilderFlag = BuilderFlag
+
+    class MemoryPoolType:
+        WORKSPACE = 0
+
+    fake.MemoryPoolType = MemoryPoolType
+
+    class ProfilingVerbosity:
+        DETAILED = 1
+
+    fake.ProfilingVerbosity = ProfilingVerbosity
+
+    class NetworkDefinitionCreationFlag:
+        EXPLICIT_BATCH = 1
+        STRONGLY_TYPED = 2
+
+    fake.NetworkDefinitionCreationFlag = NetworkDefinitionCreationFlag
+
+    class ITensor:
+        def __init__(self, name, shape):
+            self.name = name
+            self.shape = shape
+
+    class INetworkDefinition:
+        def __init__(self):
+            self._inputs = [ITensor("images", (-1, 3, 64, 64))]
+            self.num_inputs = 1
+            self.num_outputs = 0
+            self.num_layers = 0
+
+        def get_input(self, index):
+            return self._inputs[index]
+
+        def get_output(self, index):
+            raise IndexError(index)
+
+        def get_layer(self, index):
+            raise IndexError(index)
+
+    class OnnxParser:
+        def __init__(self, network, logger):
+            self.network = network
+
+        def parse(self, blob):
+            return True
+
+    class OptimizationProfile:
+        def set_shape(self, name, **bounds):
+            pass
+
+    class BuilderConfig:
+        def clear_flag(self, flag):
+            pass
+
+        def set_flag(self, flag):
+            pass
+
+        def set_memory_pool_limit(self, kind, value):
+            pass
+
+        def add_optimization_profile(self, profile):
+            pass
+
+    class Builder:
+        platform_has_fast_fp16 = fast_fp16
+
+        def __init__(self, logger):
+            pass
+
+        def create_network(self, flags):
+            return INetworkDefinition()
+
+        def create_builder_config(self):
+            return BuilderConfig()
+
+        def create_optimization_profile(self):
+            return OptimizationProfile()
+
+        def build_serialized_network(self, network, config):
+            return Builder.serialized_blob
+
+    fake.Builder = Builder
+    fake.Builder.serialized_blob = b"engine-blob"
+    fake.OnnxParser = OnnxParser
+    monkeypatch.setitem(sys.modules, "tensorrt", fake)
+    return fake
+
+
+class TestTensorRTResolvedPrecision:
+    """H3-4a: ``precision="auto"`` used to be gated with the fp16 tolerance
+    band unconditionally — an fp32 engine got verified 10x looser than it
+    needs. The build decision point now reports the resolved precision and
+    the gate picks tolerances from it."""
+
+    @staticmethod
+    def _stub_export_onnx(payload: bytes):
+        def stub(out, **kwargs):
+            """Write the intermediate graph without running a real export."""
+            from pathlib import Path
+
+            Path(out).write_bytes(payload)
+            return Path(out)
+
+        return stub
+
+    @staticmethod
+    def _stub_postprocess():
+        """Well-formed detection records for the e2e gate. The engine
+        runner's canned output cannot go through the real decode, so the
+        postprocess is stubbed — the tolerance VALUES are what this pins."""
+        import torch
+
+        def stub_postprocess(raw, metadata, threshold=0.0):
+            return [
+                {
+                    "bboxes": torch.zeros(1, 4),
+                    "scores": torch.ones(1),
+                    "labels": torch.zeros(1, dtype=torch.long),
+                }
+            ]
+
+        return stub_postprocess
+
+    @staticmethod
+    def _patch_gate(monkeypatch, captured):
+        """Passing engine runner + captured e2e tolerance comparison."""
+        import types
+
+        import autovision.export.tensorrt_helpers as trt_helpers
+
+        class _PassingRunner:
+            def __init__(self, engine_path, *, device="cuda"):
+                pass
+
+            def run(self, images):
+                return [images]
+
+        monkeypatch.setattr(trt_helpers, "TensorRTEngineRunner", _PassingRunner)
+
+        import autovision.export.e2e_parity as e2e_parity
+
+        def capture_compare(reference_records, engine_records, **kwargs):
+            captured.update(kwargs)
+            return types.SimpleNamespace(passed=True)
+
+        monkeypatch.setattr(
+            e2e_parity, "compare_detection_records", capture_compare
+        )
+
+    def _export_with_gate_capture(
+        self, tiny_model, tmp_path, monkeypatch, *, precision
+    ) -> dict:
+        _install_fake_trt(monkeypatch)
+        captured: dict = {}
+        self._patch_gate(monkeypatch, captured)
+        monkeypatch.setattr(
+            tiny_model,
+            "export_onnx",
+            self._stub_export_onnx(b"staged-graph"),
+        )
+        monkeypatch.setattr(tiny_model, "postprocess", self._stub_postprocess())
+        monkeypatch.setattr(
+            tiny_model,
+            "verify_onnx_export_outputs",
+            lambda *args, **kwargs: None,
+        )
+        tiny_model.export_tensorrt(
+            tmp_path / "model.engine", precision=precision, verify=True
+        )
+        return captured
+
+    def test_auto_with_fp32_weights_gates_at_fp32_tolerance(
+        self, tiny_model, tmp_path, monkeypatch
+    ):
+        """auto + fp32 model: the engine really is fp32, so the score
+        tolerance must be the fp32 band (1e-2), not the fp16 band (5e-2)."""
+        captured = self._export_with_gate_capture(
+            tiny_model, tmp_path, monkeypatch, precision="auto"
+        )
+
+        assert captured["score_tolerance"] == 1e-2
+        assert captured["box_tolerance_px"] == 1.0
+
+    def test_explicit_fp16_gates_at_fp16_tolerance(
+        self, tiny_model, tmp_path, monkeypatch
+    ):
+        """Explicit fp16: the wide band is kept."""
+        captured = self._export_with_gate_capture(
+            tiny_model, tmp_path, monkeypatch, precision="fp16"
+        )
+
+        assert captured["score_tolerance"] == 5e-2
+
+    def test_pipeline_reports_resolved_precision_per_scenario(
+        self, tmp_path, monkeypatch
+    ):
+        """Unit sweep of the resolution contract over the flag/precision
+        matrix (no model, no export): auto+fp32->fp32, auto+fp16->fp16,
+        explicit fp16->fp16, platform downgrade->fp32, TRT11 graph
+        route->fp16, int8->int8."""
+        import torch
+
+        from autovision.export import tensorrt_helpers as th
+
+        def stub_export(out, **kwargs):
+            from pathlib import Path
+
+            Path(out).write_bytes(b"staged")
+            return Path(out)
+
+        for fake_kwargs, call_kwargs, expected in (
+            (
+                dict(fp16_flag=True, fast_fp16=None),
+                dict(precision="auto", model_dtype=torch.float32),
+                "fp32",
+            ),
+            (
+                dict(fp16_flag=True, fast_fp16=None),
+                dict(precision="auto", model_dtype=torch.float16),
+                "fp16",
+            ),
+            (
+                dict(fp16_flag=True, fast_fp16=None),
+                dict(precision="fp16", model_dtype=torch.float32),
+                "fp16",
+            ),
+            (
+                dict(fp16_flag=True, fast_fp16=False),
+                dict(precision="fp16", model_dtype=torch.float32),
+                "fp32",
+            ),
+            (
+                dict(fp16_flag=False, fast_fp16=None),
+                dict(precision="auto", model_dtype=torch.float16),
+                "fp16",
+            ),
+            (
+                dict(fp16_flag=True, fast_fp16=None),
+                dict(precision="int8", model_dtype=torch.float32),
+                "int8",
+            ),
+        ):
+            fake = _install_fake_trt(monkeypatch, **fake_kwargs)
+            fake.Builder.serialized_blob = b"engine-blob"
+            resolved: dict = {}
+            extra: dict = {}
+            if call_kwargs["precision"] == "int8":
+                # int8 consumes a caller-staged QDQ graph (lifecycle owned
+                # by the caller, so the helper must not delete it). The QDQ
+                # sanitizer loads the graph, so it must be a valid ONNX.
+                staged = tmp_path / "model.int8.onnx"
+                _write_tiny_onnx(staged)
+                extra["pre_staged_onnx"] = staged
+            th.export_onnx_to_tensorrt(
+                out=tmp_path / "model.engine",
+                export_onnx_fn=stub_export,
+                resolved_precision_out=resolved,
+                **extra,
+                **call_kwargs,
+            )
+            assert resolved["precision"] == expected, call_kwargs
+
+
+class TestTensorRTStagedOnnx:
+    """H3-4b: a self-staged intermediate ONNX (exported with verify=False)
+    used to live on next to the parity-verified engine under the same stem.
+    After a successful build it is removed; explicit keeps and failed
+    builds keep it."""
+
+    @staticmethod
+    def _stub_export(payload: bytes = b"staged-onnx-bytes"):
+        def stub(out, **kwargs):
+            from pathlib import Path
+
+            path = Path(out)
+            path.write_bytes(payload)
+            path.with_suffix(path.suffix + ".data").write_bytes(b"sidecar")
+            return path
+
+        return stub
+
+    def test_success_removes_staged_graph_and_sidecar(self, tmp_path, monkeypatch):
+        from autovision.export import tensorrt_helpers as th
+
+        _install_fake_trt(monkeypatch)
+
+        th.export_onnx_to_tensorrt(
+            out=tmp_path / "model.engine",
+            export_onnx_fn=self._stub_export(),
+            precision="fp32",
+        )
+
+        assert (tmp_path / "model.engine").read_bytes() == b"engine-blob"
+        assert not (tmp_path / "model.onnx").exists()
+        assert not (tmp_path / "model.onnx.data").exists()
+
+    def test_keep_staged_onnx_preserves_the_graph(self, tmp_path, monkeypatch):
+        from autovision.export import tensorrt_helpers as th
+
+        _install_fake_trt(monkeypatch)
+
+        th.export_onnx_to_tensorrt(
+            out=tmp_path / "model.engine",
+            export_onnx_fn=self._stub_export(),
+            precision="fp32",
+            keep_staged_onnx=True,
+        )
+
+        assert (tmp_path / "model.onnx").read_bytes() == b"staged-onnx-bytes"
+
+    def test_failed_build_keeps_the_staged_graph(self, tmp_path, monkeypatch):
+        """A failed build is debugged against its staged graph, so only the
+        SUCCESS path cleans it."""
+        from autovision.export import tensorrt_helpers as th
+
+        fake = _install_fake_trt(monkeypatch)
+        fake.Builder.serialized_blob = None
+
+        with pytest.raises(RuntimeError, match="engine building failed"):
+            th.export_onnx_to_tensorrt(
+                out=tmp_path / "model.engine",
+                export_onnx_fn=self._stub_export(),
+                precision="fp32",
+            )
+
+        assert (tmp_path / "model.onnx").exists()
+
+    def test_pre_staged_int8_graph_is_not_touched(self, tmp_path, monkeypatch):
+        """The int8 route stages its QDQ graph explicitly (caller-owned
+        lifecycle with keep_int8_onnx); the helper must never delete it."""
+        from autovision.export import tensorrt_helpers as th
+
+        fake = _install_fake_trt(monkeypatch)
+        fake.Builder.serialized_blob = b"int8-engine"
+        staged = tmp_path / "model.int8.onnx"
+        _write_tiny_onnx(staged)
+
+        th.export_onnx_to_tensorrt(
+            out=tmp_path / "model.engine",
+            export_onnx_fn=self._stub_export(),
+            precision="int8",
+            pre_staged_onnx=staged,
+        )
+
+        assert staged.exists()
+
+    def test_public_export_tensorrt_cleans_the_staged_graph(
+        self, tiny_model, tmp_path, monkeypatch
+    ):
+        """Wiring through the public path: after a successful build the
+        intermediate graph next to the target is gone."""
+
+        import autovision.export.tensorrt_helpers as trt_helpers
+
+        _install_fake_trt(monkeypatch)
+        monkeypatch.setattr(
+            tiny_model,
+            "export_onnx",
+            TestTensorRTResolvedPrecision._stub_export_onnx(b"staged-graph"),
+        )
+
+        class _PassingRunner:
+            def __init__(self, engine_path, *, device="cuda"):
+                pass
+
+            def run(self, images):
+                return [images]
+
+        monkeypatch.setattr(trt_helpers, "TensorRTEngineRunner", _PassingRunner)
+        monkeypatch.setattr(tiny_model, "postprocess", None)
+        monkeypatch.setattr(
+            tiny_model,
+            "verify_onnx_export_outputs",
+            lambda *args, **kwargs: None,
+        )
+
+        tiny_model.export_tensorrt(tmp_path / "model.engine", verify=True)
+
+        assert (tmp_path / "model.engine").exists()
+        # Staged name derived from the tmp engine ("model.engine.tmp-<pid>"
+        # -> ".onnx"): it must not survive the success.
+        assert not list(tmp_path.glob("*.onnx"))
+        assert not list(tmp_path.glob("*.onnx.data"))
+
+
+# ── H3-4d: exported ONNX carries the toolchain record ───────────────────────
+
+
+class TestOnnxToolchainMetadata:
+    """H3-4d: the ONNX carrier records the producing toolchain in-graph,
+    with the REAL graph opset (not the argument default guess)."""
+
+    def test_export_records_toolchain_with_graph_opset(
+        self, tiny_model, tmp_path
+    ):
+        import json
+
+        import onnx
+
+        out = tiny_model.export_onnx(
+            tmp_path / "model.onnx",
+            precision="fp32",
+            verify=False,
+            format_args={"opset_version": 18},
+        )
+        model = onnx.load(str(out), load_external_data=False)
+        metadata = {prop.key: prop.value for prop in model.metadata_props}
+
+        payload = json.loads(metadata["autovision_toolchain"])
+        assert payload["onnx_opset"] == 18
+        assert payload["torch"]
+        assert set(payload) == {
+            "torch", "onnx", "onnx_opset", "onnxruntime", "tensorrt", "openvino",
+        }

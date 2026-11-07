@@ -155,16 +155,22 @@ def dependency_inventory(
     entries: dict[tuple[str, str], LicenseEntry] = {}
     for distribution in importlib.metadata.distributions():
         metadata = distribution.metadata
-        name = metadata.get("Name")
+        # PackageMetadata is a Message (email): `get` via the mapping shim.
+        name = metadata["Name"] if "Name" in metadata else None
         if not name:
             continue
         normalized_name = name.lower().replace("_", "-")
         if normalized_name in skipped:
             continue
-        version = metadata.get("Version") or ""
-        entries[(name, version)] = LicenseEntry(
-            name=name,
-            version=version,
-            license=_license_from_metadata(metadata),
-        )
+        version = metadata["Version"] if "Version" in metadata else ""
+        # METRIC audit P3-20: PyPI names are case-insensitive — "Some-Pkg"
+        # and "some_pkg" resolve to the same distribution, so the dedup key
+        # normalizes (the first-seen display form is kept).
+        key = (normalized_name, version)
+        if key not in entries:
+            entries[key] = LicenseEntry(
+                name=name,
+                version=version,
+                license=_license_from_metadata(metadata),
+            )
     return [entries[key] for key in sorted(entries)]

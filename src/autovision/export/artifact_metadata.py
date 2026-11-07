@@ -25,6 +25,7 @@ import logging
 import os
 import uuid
 from collections.abc import Mapping, Sequence
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,8 @@ __all__ = [
     "build_metadata",
     "infer_task_name",
     "read_metadata",
+    "record_onnx_opset",
+    "toolchain_versions",
     "verify_engine_artifact",
     "verify_metadata",
     "write_artifact_metadata",
@@ -54,6 +57,56 @@ _SIDECAR_SUFFIX = {"openvino": ".json", "tensorrt": ".meta.json"}
 #: Class names above this count are truncated (open-vocabulary heads can
 #: carry thousands; metadata is for humans and sanity checks, not lookups).
 _NAMES_LIMIT = 512
+
+#: Toolchain packages recorded in the ``autovision_toolchain`` payload
+#: (H3-4d). tensorrt/openvino are optional deps and stay ``None`` when
+#: absent — a payload written without them must still compare cleanly.
+_TOOLCHAIN_PACKAGES = ("torch", "onnx", "onnxruntime", "tensorrt", "openvino")
+
+
+def _package_version(module_name: str) -> str | None:
+    """``__version__`` of an (optionally installed) package, else ``None``."""
+    try:
+        module = import_module(module_name)
+    except ImportError:
+        return None
+    version = getattr(module, "__version__", None)
+    return str(version) if version else None
+
+
+def toolchain_versions(*, onnx_opset: int | None = None) -> dict[str, Any]:
+    """Installed toolchain versions for artifact provenance (H3-4d).
+
+    ``onnx_opset`` records the graph's real opset when known (the exporter
+    default wins when the argument is ``None``); ``None`` otherwise.
+    Optional packages (onnxruntime/tensorrt/openvino) are ``None`` when not
+    installed so the payload stays comparable across machines.
+    """
+    payload: dict[str, Any] = {
+        name: _package_version(name) for name in _TOOLCHAIN_PACKAGES
+    }
+    payload["onnx_opset"] = onnx_opset
+    return payload
+
+
+def record_onnx_opset(metadata: dict[str, str], opset: int) -> None:
+    """Fill the toolchain payload's ``onnx_opset`` in place (H3-4d).
+
+    Called by the ONNX exporter after the graph is written, when the real
+    opset is readable from the graph instead of guessed from arguments.
+    Missing toolchain key (legacy writer) is left alone.
+    """
+    payload_json = metadata.get("autovision_toolchain")
+    if payload_json is None:
+        return
+    try:
+        payload = json.loads(payload_json)
+        if not isinstance(payload, dict):
+            return
+    except json.JSONDecodeError:
+        return
+    payload["onnx_opset"] = int(opset)
+    metadata["autovision_toolchain"] = json.dumps(payload, sort_keys=True)
 
 
 def infer_task_name(network: Any) -> str:
@@ -145,6 +198,12 @@ def build_metadata(network: Any) -> dict[str, str]:
                 "truncated": len(names) > _NAMES_LIMIT,
             }
         )
+    # H3-4d: every carrier (ONNX in-graph, TRT/OV sidecars) records the
+    # toolchain that produced it. The opset is filled in by the exporter
+    # from the written graph (:func:`record_onnx_opset`).
+    metadata["autovision_toolchain"] = json.dumps(
+        toolchain_versions(), sort_keys=True
+    )
     return metadata
 
 
@@ -229,6 +288,18 @@ def verify_metadata(
     if not metadata:
         logger.debug("No artifact metadata; skipping the identity check.")
         return
+    # EXPORT-02: a machine-readable verify strength — downstream gate
+    # consumers must be able to see that an artifact never had its numbers
+    # compared on the exporting machine (fp16 without a CUDA EP), instead
+    # of trusting a warning lost in a build log.
+    strength = metadata.get("autovision_verify_strength")
+    if strength == "smoke-only":
+        logger.warning(
+            "Artifact '%s' was exported with verify=smoke-only (fp16 "
+            "without a CUDA execution provider): numerical parity was NOT "
+            "verified. Re-verify on a CUDA-enabled onnxruntime build.",
+            Path(artifact).name,
+        )
     version = metadata.get("autovision_meta_version", "")
     if version.isdigit() and int(version) > META_SCHEMA_VERSION:
         logger.warning(
@@ -236,6 +307,7 @@ def verify_metadata(
             "v%s); the identity check may be incomplete.",
             Path(artifact).name, version, META_SCHEMA_VERSION,
         )
+    _warn_toolchain_mismatch(metadata, artifact=artifact)
 
     actual_task = metadata.get("autovision_task")
     expected_task = infer_task_name(network)
@@ -275,6 +347,47 @@ def verify_metadata(
                 f"uses {expected_size[0]}x{expected_size[1]}. Re-export the "
                 "artifact or pass a network with the matching image_size."
             )
+
+
+def _warn_toolchain_mismatch(metadata: Mapping[str, str], *, artifact: Path | str) -> None:
+    """Warn when the artifact's toolchain differs from the loading runtime
+    (H3-4d).
+
+    Recorded-only until now: the check rides the existing
+    ``verify_metadata`` path (``InferenceEngine`` construction calls it),
+    so no runtime code had to change. Version skew is a warning, never an
+    error — engines/graphs routinely stay loadable across minor versions
+    and identity/parity gates own the hard failures. Only packages known
+    on BOTH sides are compared; absent or ``None`` entries skip.
+    """
+    payload_json = metadata.get("autovision_toolchain")
+    if not payload_json:
+        return
+    try:
+        recorded = json.loads(payload_json)
+    except json.JSONDecodeError:
+        return
+    if not isinstance(recorded, dict):
+        return
+    installed = toolchain_versions()
+    mismatches = []
+    for name in _TOOLCHAIN_PACKAGES:
+        artifact_version = recorded.get(name)
+        runtime_version = installed.get(name)
+        if (
+            artifact_version
+            and runtime_version
+            and str(artifact_version) != str(runtime_version)
+        ):
+            mismatches.append(
+                f"{name}: artifact {artifact_version}, runtime {runtime_version}"
+            )
+    if mismatches:
+        logger.warning(
+            "Artifact '%s' was produced with a different toolchain (%s); "
+            "re-export or re-verify on this runtime if numerics matter.",
+            Path(artifact).name, "; ".join(mismatches),
+        )
 
 
 def _class_path(network: Any) -> str:

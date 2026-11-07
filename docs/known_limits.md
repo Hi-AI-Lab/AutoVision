@@ -5,11 +5,18 @@
 ## 定位
 
 训练 + 参考推理框架。训练、评测、导出是生产路径；跟踪与 serving 是参考实现。
-serving 支持可选 API key（`AUTOVISION_SERVING_API_KEY` 或 `api_key=`）、请求体/像素
-上限、线程池推理、有界排队（`queue_timeout_s`，饱和返回 503）、单次引擎调用
+serving 的认证自 0.6.1 起**默认 fail-closed**：非回环地址（非
+`127.0.0.1`/`::1`/`localhost`）且未提供 `api_key=` 与
+`AUTOVISION_SERVING_API_KEY` 时拒绝启动；显式设置
+`AUTOVISION_SERVE_ALLOW_INSECURE=1` 可接受开放端点（`create_app` 作为库
+入口保持原有 opt-in 语义）。其余能力：请求体/像素上限（单图默认 16M 像素，
+一次请求总像素默认 `max_batch × max_image_pixels`，超限 413）、连接层上限
+（`limit_concurrency`，默认 64）、优雅停机默认 30s、线程池推理、有界排队
+（`queue_timeout_s`，饱和返回 503）、单次引擎调用
 超时（`inference_timeout_s`，默认 120s；超时返回 504 并将该实例标记为不可再用，
 此后 `/readyz` 返回 503（`poisoned=true`）、`/healthz` 携带 `poisoned` 字段，
-编排器应摘除流量并重启进程）、`/readyz`、TLS、多 worker、进程内 token-bucket
+编排器应摘除流量并重启进程）、`/readyz`、TLS、多 worker（`api_key=` 在
+workers>1 下被拒绝，key 必须走环境变量）、进程内 token-bucket
 限流、预测分布漂移
 （PSI，`/drift`）与 A/B/canary 分流；`/docs` 与 `/openapi.json` 默认关闭。
 全局配额、告警、跨进程一致限流、A/B 统计显著性与金丝雀自动回滚仍属生产网关职责。
@@ -38,18 +45,97 @@ serving 支持可选 API key（`AUTOVISION_SERVING_API_KEY` 或 `api_key=`）、
   数据集条目没有官方摘要，默认只告警。设置
   `AUTOVISION_REQUIRE_DATASET_HASHES=1` 可拒绝未钉摘要的数据集下载；
   `AUTOVISION_OFFLINE=1` 同时拒绝数据集与权重下载。
+  `scripts/compute_dataset_pins.py` 可从已下载工件计算 sha256/size 并输出
+  可粘贴的 registry 片段（加固计划 H1-9；补齐 pin 前条目列在
+  `tests/test_data_hardening.py` 的 `UNPINNED_ALLOWLIST`，清空该表是目标状态）。
+- **数据加载严格性（0.6.1 起）**：COCO 注释中的重复 `image id` 现在在加载期
+  报错（此前静默覆盖）——检测/实例分割/关键点三个面统一（DATA-08）；
+  `category_id` 未在 `categories` 声明的标注会计数并汇总 warning（此前静默
+  丢弃）；引用未声明 `image_id` 的孤儿标注同样计数告警（DATA-29）；
+  `ignore_classes` 中未声明的 id 输出一次 warning（DATA-30）；YOLO/OBB
+  标签的字段数不符行与"字段数合法但值非法"的行仍被跳过，但会同通道计数并
+  输出带文件与行号的 deprecation warning，0.7.0 起默认改为报错
+  （DATA-06）；命名未知类别的行计数并汇总 warning（DATA-07）；
+  二进制/GBK 标签文件报错带文件名（DATA-21）；声明 `width/height <= 0`
+  的图像在构造期报错（DATA-20）；COCO `file_name` 的目录穿越防护
+  （`resolve_under`）统一到检测/实例分割/关键点三个加载器与 Label Studio
+  interchange（DATA-10）。`resolve_under` 的包含判断按解析后真实路径
+  （`Path.resolve()`，跟随符号链接）计算：**指向数据根之外的符号链接
+  图像/掩码会被拒绝**——用符号链接挂载共享存储的图像树需要把真实目录
+  作为 `images_dir` 传入。分割任务在读取期校验图-掩码空间尺寸一致
+  （语义/全景，DATA-11）。分割掩码解码保持宽松（允许历史截断掩码），但该
+  宽松旗标不再泄漏到图片解码——截断图片始终响亮报错（H1-10）。
+  `open_image` 的返回通道数强制等于 `num_channels`（1 通道请求对 RGB/RGBA
+  源返回 1 通道；非法通道数报错，DATA-09）。
+- **推理结果序列化**：`to_json(masks="rle")` 对 float dtype 的语义分割
+  label map 会输出 deprecation warning（当前仍按 `> 0.5` 二值化；0.7.0 起
+  拒绝，请转整数 dtype 或改用 `masks="dense"`/`"none"`）；`masks="dense"`
+  在元素数超过 `max_elements×100` 时直接报错而不是构造无界 JSON
+  （加固计划 H1-11/H3-1a）。
 - **旧 teacher checkpoint**：当前导出的 task model 可被 pickle-free 加载器读取；
   旧导出若嵌入 `__class__` 等对象，默认拒绝。只有可信本地产物才可设置
   `AUTOVISION_TRUST_TEACHER_CHECKPOINT=1` 启用完整 unpickler（RCE 风险自担）。
-- **mmap 缓存键**：包含标签文件（COCO JSON / YOLO `.txt` 等）的路径、大小与
-  mtime，以及 `ignore_classes` 指纹；编辑标签或改变忽略类别会重建缓存，
-  `overwrite=True` 会强制重建。user-held 权重解析现在强制校验 sha256（按
-  路径/大小/mtime 缓存摘要）。
+- **mmap 缓存键**：包含标签文件（COCO JSON / YOLO `.txt` 等）与图像文件
+  （路径、大小与 mtime）的双指纹，以及 `ignore_classes` 指纹——编辑标签或
+  增删图像都会重建缓存（DATA-03；修复前 YOLO 增删图像不失效）；
+  `overwrite=True` 会强制重建，删除动作仅由 rank0 执行（DATA-12）。残余
+  边界：DDP + `overwrite=True` 下早于 rank0 到达的非 0 rank 可能在删除前
+  打开**旧** mmap 并 pin 引用——该 rank 本轮训练的行集合与 rank0 静默
+  分叉（挂死已闭合，分叉窗口未根治；根治需要版本化发布协议，见
+  `docs/design/data_layer.md` §4 P3 登记）。
+  user-held 权重解析现在强制校验 sha256（按路径/大小/mtime 缓存摘要）。
+- **指标口径（METRIC 系列）**：OBB mAP 的 PR 构建（背景 FP 计入）与
+  AP 包络积分均已修正，**历史 OBB 数字与 0.6.x 之前不可比**；headline
+  precision/recall/F1 为单操作点读数（`headline_score_threshold`，默认
+  0.50），**与 0.6.x 之前的 argmax-F1 扫描读数不可比**（AP/AR 不变）；
+  含 crowd 数据的训练期 mAP 因链路接通而上升。合规 CLI 默认
+  fail-closed（`fail_on="error"`），`strict=` 弃用。
+- **导出/注册表边界（EXPORT 系列）**：fp16 在无 CUDA EP 机器上导出的
+  工件携带 `autovision_verify_strength=smoke-only`（数值未对拍；
+  `VerifyStrengthGate` 可选强制 full）；TRT/OV 的身份 sidecar 按
+  加载器 `with_suffix` 命名（`model.meta.json` / `model.json`）；>2GB
+  external-data 导出在 onnxslim 后 fail-fast（管线不支持该规模）；
+  `register_downloadable` 名称穿越/NUL/绝对路径拒绝（命名空间斜杠
+  合法）；OFFLINE 下损坏缓存保留现场不删除；`promote` 支持
+  `set_current=False`（默认行为不变）。TRT 失败路径保留 staged ONNX
+  是 H3-4b 的已测试决策（调试工作流），与 EXPORT-11 审计建议冲突、
+  未实施失败清理。
+- **serving 语义（SERVE 系列）**：引擎/序列化边界故障返回 **500**
+  （客户端输入错误保持 400；依赖 400 的监控规则需迁移）；解码与推理
+  超时分离（`decode_timeout_s` 默认 `min(10, inference_timeout_s / 2)`，
+  解码超时不毒化）；`warmup_timeout_s` 默认 60s（0 禁用 warmup）；
+  限流桶键按端点命名空间化，`trust_proxy_headers` 弃用（0.6.1 告警、
+  0.7.0 移除），改用 `trusted_proxy_hops`；registry CLI 对未知键在
+  执行前拒绝；CLI 辅助层配置错误统一 `ConfigValidationError`
+  （其是 `AutoVisionError` 子类，既有 `except AutoVisionError` 不变）。
+  warmup 超时命名启动失败，但 `asyncio.to_thread` 中的挂死线程无法被
+  取消——**永不返回的 wedge（CUDA 停滞）会使进程退出本身被默认执行器的
+  join 阻塞**，编排器最终需要 SIGKILL；就绪探针在该窗口内保持失败。
+- **数据快照规格**：`dataset_snapshot` 原生理解 Ultralytics `data.yaml`
+  （`path` 锚定相对根、`names` 只作元数据记录）；带显式 `format:` 键的
+  spec 走通用规则（DATA-01）。校验会检出"快照后新增的 split"
+  （`added_split`，DATA-02）。
+- **训练引擎边界（TRAIN 系列）**：任务调度器由各模型自有实现，resume
+  扩展 `steps` 时其衰减形状被 checkpoint 固定（指名 warning，不会静默）；
+  预训练 `CosineWarmupScheduler` 的续训扩展 `max_epochs` 按新终点衰减。
+  训练进程**无 SIGTERM/SIGINT 优雅停机**：被杀的 run 依赖最近一次周期
+  checkpoint（原子写保证可用），正在写的 tmp 依赖 1 小时龄期清扫；
+  dataloader worker 崩溃（非 OOM）终止整个 run。`CheckpointMetadata`
+  的新增 `step` 字段在旧 checkpoint 上为 None；fit_task 的 `epoch`
+  字段历史上承载 0-based step（TRAIN-09）。
 - **EoMT 权重**：`load_weights=True` 强制 DINOv2/DINOv3 许可 opt-in；
   hub checkpoint 未在 `WEIGHT_MANIFEST` 中钉 sha256 时默认拒绝，只有显式
   `AUTOVISION_ALLOW_UNPINNED_WEIGHTS=1` 才加载（可信镜像）。class head 会按
   目标类别数/query 数重建；EoMT 现可走 ONNX 导出（legacy TorchScript 路径，
   动态 batch 关闭）。
+- **推理运行时边界（INFER 系列）**：`run_stream` 默认
+  `on_frame_error="skip"`——坏帧被跳过并写入 JSONL 错误行（连续超过 10 帧失败
+  仍中止；计数在健康帧与重连时重置）；需要旧行为传 `on_frame_error="raise"`。CLI predict 与 serving
+  对**无元数据**的 ONNX/TRT/OpenVINO 工件拒绝构建引擎（`InferenceEngine`
+  直接构造仍可用但输出 warning）；float 语义 label map 的渲染按四舍五入
+  容忍（0.7.0 随序列化一起拒绝）；multi_stream 的 JSONL 时间戳是
+  `time.time()` 墙钟（NTP 回拨可乱序——单调时钟会破坏工件的绝对时间
+  语义，属有意取舍）。
 - **可视化/视频工具**：`visualize/effects.py` 与 `geometry/boxes.py` /
   `geometry/masks.py` 的框、mask、polygon 工具只依赖 NumPy/Pillow；
   `mask_to_polygons` 惰性依赖 OpenCV（`video` extra）。`process_video` /
@@ -115,8 +201,12 @@ serving 支持可选 API key（`AUTOVISION_SERVING_API_KEY` 或 `api_key=`）、
   每路渲染 writer 在该路分辨率变化时重建。`LineZone` / `PolygonZone` /
   `TrackSmoother` 与 reader/infer/writer 三段式管线也只接入单路
   `run_stream`；`run_multi_stream` 保持每源独立批处理。
-- serving 的 `max_image_pixels` 按单图限制，不限制一次请求的总像素与 RLE
-  响应字节数；高并发大图 / 稠密 mask 场景需在网关层再加总预算。
+- serving 的 `max_image_pixels` 按单图限制，`max_request_pixels`（默认
+  `max_batch × max_image_pixels`）限制一次请求的解码总像素（超限 413）；
+  RLE 响应字节数无上限，高并发大图 / 稠密 mask 场景需在网关层再加总预算。
+  depth 任务的深度图超过 `max_json_elements` 时只返回 shape/dtype 摘要并在
+  每条结果上标记 `depth_truncated: true`——完整深度图应走文件 / 对象存储
+  通道（H2-5f），JSON 通道不承载像素级深度数据。
 
 ## 检测谱系状态
 

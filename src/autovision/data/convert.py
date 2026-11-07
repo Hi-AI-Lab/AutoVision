@@ -20,6 +20,8 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from autovision.errors import AutoVisionError
+
 logger = logging.getLogger("autovision")
 
 __all__ = [
@@ -32,6 +34,67 @@ __all__ = [
 ]
 
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+
+#: YOLO label text is read with ``utf-8-sig`` so UTF-8 files — including
+#: the BOM some Windows annotation tools prepend — parse identically
+#: (H3-2f).
+_LABEL_ENCODING = "utf-8-sig"
+
+
+def _load_coco_payload(path: Path) -> dict[str, Any]:
+    """Read a COCO json payload, wrapping parse failures with the path (H3-2e).
+
+    A 0-byte or truncated json used to surface as a bare
+    ``json.JSONDecodeError`` (or ``OSError``) with no file name; the
+    conversion entry points go through this wrapper instead (same style
+    as ``versioning.py``).
+    """
+    try:
+        text = path.read_text()
+    except OSError as error:
+        raise AutoVisionError(
+            f"Could not read COCO annotations '{path}': {error}."
+        ) from error
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise AutoVisionError(
+            f"COCO annotations '{path}' is not valid JSON: {error}."
+        ) from error
+    if not isinstance(payload, dict):
+        raise AutoVisionError(f"COCO annotations '{path}' must hold a JSON object.")
+    return payload
+
+
+def _require_normalized_coordinate(
+    value: float,
+    *,
+    label_path: Path,
+    line_number: int,
+    name: str,
+) -> float:
+    """Check one normalized YOLO coordinate, naming file and line (H3-2f).
+
+    Values outside ``[0, 1]`` (and NaN, which fails the comparison) would
+    silently produce off-image boxes after the scale multiply.
+    """
+    if not 0.0 <= value <= 1.0:
+        raise AutoVisionError(
+            f"'{label_path}' line {line_number}: normalized {name} {value!r} "
+            "is outside [0, 1]."
+        )
+    return value
+
+
+def _require_positive_box_size(
+    width: float, height: float, *, label_path: Path, line_number: int
+) -> None:
+    """YOLO boxes must have strictly positive ``w``/``h`` (H3-2f)."""
+    if width <= 0 or height <= 0:
+        raise AutoVisionError(
+            f"'{label_path}' line {line_number}: box size (w, h) = "
+            f"({width}, {height}) must both be > 0."
+        )
 
 
 def _sorted_categories(
@@ -60,8 +123,10 @@ def yolo_to_coco(
 
     ``names`` maps YOLO class indices to names (dict) or is a list whose
     positions are the indices. Label lines are ``cls cx cy w h`` with
-    boxes normalized to [0, 1]; missing label files yield images with no
-    annotations (valid for a background-heavy split).
+    boxes normalized to [0, 1] — coordinates outside that range (and
+    non-positive sizes) fail loudly with the label file and line number
+    (H3-2f); missing label files yield images with no annotations (valid
+    for a background-heavy split).
     """
     images_dir = Path(images_dir)
     labels_dir = Path(labels_dir) if labels_dir is not None else images_dir.parent / "labels"
@@ -89,19 +154,42 @@ def yolo_to_coco(
         label_path = labels_dir / f"{image_path.stem}.txt"
         if not label_path.exists():
             continue
-        for line in label_path.read_text().splitlines():
+        for line_number, line in enumerate(
+            label_path.read_text(encoding=_LABEL_ENCODING).splitlines(), 1
+        ):
             parts = line.split()
             if len(parts) != 5:
                 raise ValueError(
-                    f"'{label_path}': expected 'cls cx cy w h', got '{line}'"
+                    f"'{label_path}' line {line_number}: expected "
+                    f"'cls cx cy w h', got '{line}'"
                 )
-            class_index = int(parts[0])
+            try:
+                class_index = int(parts[0])
+                cx, cy, w, h = (float(v) for v in parts[1:])
+            except ValueError as error:
+                raise AutoVisionError(
+                    f"'{label_path}' line {line_number}: malformed numeric "
+                    f"field ({error})."
+                ) from error
             if not 0 <= class_index < len(category_pairs):
                 raise ValueError(
-                    f"'{label_path}': class index {class_index} is outside "
-                    f"'names' ({len(category_pairs)} entries)."
+                    f"'{label_path}' line {line_number}: class index "
+                    f"{class_index} is outside 'names' "
+                    f"({len(category_pairs)} entries)."
                 )
-            cx, cy, w, h = (float(v) for v in parts[1:])
+            _require_normalized_coordinate(
+                cx, label_path=label_path, line_number=line_number, name="cx"
+            )
+            _require_normalized_coordinate(
+                cy, label_path=label_path, line_number=line_number, name="cy"
+            )
+            _require_normalized_coordinate(
+                w, label_path=label_path, line_number=line_number, name="w"
+            )
+            _require_normalized_coordinate(
+                h, label_path=label_path, line_number=line_number, name="h"
+            )
+            _require_positive_box_size(w, h, label_path=label_path, line_number=line_number)
             x = (cx - w / 2) * width
             y = (cy - h / 2) * height
             annotations.append(
@@ -155,7 +243,7 @@ def merge_coco(
     next_annotation_id = 1
 
     for path in inputs:
-        payload = json.loads(path.read_text())
+        payload = _load_coco_payload(path)
         # Union categories by name (ids are arbitrary in COCO).
         id_map: dict[int, int] = {}
         for category in payload.get("categories", []):
@@ -227,7 +315,7 @@ def coco_to_yolo(
     receives one class name per line in that same order. Image ids with
     no annotations produce no file, mirroring ultralytics-style layouts.
     """
-    payload = json.loads(Path(annotations_json).read_text())
+    payload = _load_coco_payload(Path(annotations_json))
     category_pairs = _categories_from_payload(payload)
     id_to_index = {category_id: index for index, (category_id, _) in enumerate(category_pairs)}
 
@@ -269,7 +357,7 @@ def coco_to_yolo(
 def _read_image_list(split_file: Path) -> list[str]:
     """Image stems from a VOC ``ImageSets/Main/*.txt`` style list file."""
     stems = []
-    for line in split_file.read_text().splitlines():
+    for line in split_file.read_text(encoding=_LABEL_ENCODING).splitlines():
         line = line.strip()
         if line:
             stems.append(line.split()[0])
@@ -458,10 +546,16 @@ def _shoelace_area(points: Sequence[float]) -> float:
 
 
 def _yolo_rows(images_dir: Path, labels_dir: Path, expected_extra: int | None = None):
-    """Yield ``(image_path, width, height, class_index, values)`` per label row.
+    """Yield ``(image_path, width, height, class_index, values, label_path,
+    line_number)`` per label row.
 
     ``expected_extra`` pins the per-row value count when the format fixes
-    it (pose: ``4 + 3K``); segmentation rows vary (2 * num_points).
+    it (pose: ``4 + 3K`` — a leading box followed by ``x, y, v`` triplets);
+    segmentation rows vary (2 * num_points) and every value is a
+    normalized coordinate. Normalized coordinates are range-checked here —
+    boxes additionally require positive ``w``/``h`` — so violations report
+    the label file and line number (H3-2f). Keypoint visibility flags are
+    not coordinates and are not range-checked.
     """
     paths = sorted(
         path for path in images_dir.iterdir() if path.suffix.lower() in _IMAGE_SUFFIXES
@@ -475,18 +569,69 @@ def _yolo_rows(images_dir: Path, labels_dir: Path, expected_extra: int | None = 
         label_path = labels_dir / f"{image_path.stem}.txt"
         if not label_path.exists():
             continue
-        for line_number, line in enumerate(label_path.read_text().splitlines(), 1):
+        for line_number, line in enumerate(
+            label_path.read_text(encoding=_LABEL_ENCODING).splitlines(), 1
+        ):
             parts = line.split()
             if not parts:
                 continue
-            class_index = int(parts[0])
-            values = [float(value) for value in parts[1:]]
+            try:
+                class_index = int(parts[0])
+                values = [float(value) for value in parts[1:]]
+            except ValueError as error:
+                raise AutoVisionError(
+                    f"'{label_path}' line {line_number}: malformed numeric "
+                    f"field ({error})."
+                ) from error
             if expected_extra is not None and len(values) != expected_extra:
                 raise ValueError(
                     f"'{label_path}' line {line_number}: expected "
                     f"{expected_extra} values after the class index, got {len(values)}."
                 )
-            rows.append((image_path, width, height, class_index, values))
+            if expected_extra is not None:
+                # Box row (pose): the leading cx cy w h — then the keypoint
+                # x/y pairs; every third value is a visibility flag, not a
+                # coordinate, and is left alone.
+                _require_normalized_coordinate(
+                    values[0], label_path=label_path, line_number=line_number, name="cx"
+                )
+                _require_normalized_coordinate(
+                    values[1], label_path=label_path, line_number=line_number, name="cy"
+                )
+                _require_normalized_coordinate(
+                    values[2], label_path=label_path, line_number=line_number, name="w"
+                )
+                _require_normalized_coordinate(
+                    values[3], label_path=label_path, line_number=line_number, name="h"
+                )
+                _require_positive_box_size(
+                    values[2], values[3], label_path=label_path, line_number=line_number
+                )
+                for index in range(4, len(values), 3):
+                    _require_normalized_coordinate(
+                        values[index],
+                        label_path=label_path,
+                        line_number=line_number,
+                        name=f"keypoint {index - 4} x",
+                    )
+                    _require_normalized_coordinate(
+                        values[index + 1],
+                        label_path=label_path,
+                        line_number=line_number,
+                        name=f"keypoint {index - 4} y",
+                    )
+            else:
+                # Polygon row (segmentation): every value is a coordinate.
+                for index, value in enumerate(values):
+                    _require_normalized_coordinate(
+                        value,
+                        label_path=label_path,
+                        line_number=line_number,
+                        name=f"coordinate {index}",
+                    )
+            rows.append(
+                (image_path, width, height, class_index, values, label_path, line_number)
+            )
     return rows
 
 
@@ -517,10 +662,11 @@ def yolo_pose_to_coco(
     annotations: list[dict[str, Any]] = []
     image_ids: dict[str, int] = {}
     annotation_id = 1
-    for image_path, width, height, class_index, values in rows:
+    for image_path, width, height, class_index, values, label_path, line_number in rows:
         if not 0 <= class_index < len(category_pairs):
             raise ValueError(
-                f"class index {class_index} is outside 'names' "
+                f"'{label_path}' line {line_number}: class index "
+                f"{class_index} is outside 'names' "
                 f"({len(category_pairs)} entries)."
             )
         image_id = image_ids.get(image_path.name)
@@ -599,16 +745,17 @@ def yolo_seg_to_coco(
     annotations: list[dict[str, Any]] = []
     image_ids: dict[str, int] = {}
     annotation_id = 1
-    for image_path, width, height, class_index, values in rows:
+    for image_path, width, height, class_index, values, label_path, line_number in rows:
         if not 0 <= class_index < len(category_pairs):
             raise ValueError(
-                f"class index {class_index} is outside 'names' "
+                f"'{label_path}' line {line_number}: class index "
+                f"{class_index} is outside 'names' "
                 f"({len(category_pairs)} entries)."
             )
         if len(values) % 2 != 0 or len(values) < 6:
             raise ValueError(
-                f"'{image_path.stem}.txt': segmentation rows need >= 3 "
-                f"normalized (x, y) points, got {len(values)} values."
+                f"'{label_path}' line {line_number}: segmentation rows need "
+                f">= 3 normalized (x, y) points, got {len(values)} values."
             )
         image_id = image_ids.get(image_path.name)
         if image_id is None:

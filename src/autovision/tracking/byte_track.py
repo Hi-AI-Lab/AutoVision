@@ -586,8 +586,10 @@ class BYTETracker:
         self, unconfirmed: list[_STrack], remaining: _FrameDetections
     ) -> _FrameDetections:
         """Stage 3: unconfirmed tracks vs the leftovers of stage 1; an
-        unmatched unconfirmed track is removed WITHOUT ever being
-        published (the confirmation gate). Returns ``remaining``."""
+        unmatched unconfirmed track is removed WITHOUT ever being published
+        (the confirmation gate) and leaves ``self.tracks`` at once (H1-3):
+        ``_retire_tracks`` only filters ``_LOST``, so a zombie here would be
+        Kalman-predicted every frame forever. Returns ``remaining``."""
         pairs, unmatched_new, _ = self._match(
             unconfirmed, remaining, 1.0 - _UNCONFIRMED_DIST_THRESH, fuse_score=True
         )
@@ -599,8 +601,16 @@ class BYTETracker:
                 det_index=int(remaining.det_indices[det_index]),
                 confidence=self._kalman_confidence(remaining.scores[det_index]),
             )
-        for track_index in unmatched_new:
-            unconfirmed[track_index].state = _REMOVED
+        if unmatched_new:
+            for track_index in unmatched_new:
+                unconfirmed[track_index].state = _REMOVED
+            # Collect the ids first and filter once: ``self.tracks`` is the
+            # shared list the other stage pools were built from, so it must
+            # not shrink mid-association.
+            removed_ids = {unconfirmed[i].track_id for i in unmatched_new}
+            self.tracks = [
+                track for track in self.tracks if track.track_id not in removed_ids
+            ]
         return remaining
 
     def _spawn_new_tracks(self, remaining: _FrameDetections) -> None:
@@ -626,9 +636,10 @@ class BYTETracker:
 
     def _retire_tracks(self) -> None:
         """Retire tracks missing beyond the buffer. A retired track HAS
-        been published before, so it is queued for
-        ``drain_removed_tracks`` (design D2); unconfirmed removals were
-        never published and are dropped silently."""
+        been published before, so it is queued for ``drain_removed_tracks``
+        (design D2). Unconfirmed tracks that failed stage 3 never reached
+        publication: ``_unconfirmed_association`` drops them from
+        ``self.tracks`` directly and they are not queued for the drain."""
         surviving: list[_STrack] = []
         for track in self.tracks:
             if track.state == _LOST and track.time_since_update > self.max_time_lost:

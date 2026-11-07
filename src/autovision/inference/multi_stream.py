@@ -9,7 +9,15 @@ rendering); a dropping policy bounds memory when a source outruns the GPU.
 
 Reconnect is for live sources only (``rtsp://`` / ``http(s)://``); a file
 source ends at EOF. Backoff is exponential (0.5s, 1s, 2s, ... capped at
-10s) with a per-source reconnect budget.
+10s) with a per-source reconnect budget that RECOVERS (H3-5d): once a
+reconnected source stays healthy for ~30 s of frames (300 when its fps is
+unknown), the give-up budget and backoff restart from zero — the
+cumulative ``reconnects`` count in the stats keeps the run's history and
+is never reset.
+
+A source whose inference keeps failing is aborted by a per-source circuit
+breaker (H3-5f) instead of silently dragging the run into a partial
+"success"; the other sources keep running.
 
 ``reader_factory`` is injectable so tests can exercise scheduling,
 reconnect and backpressure without cameras or OpenCV; the default reader
@@ -23,6 +31,7 @@ import logging
 import queue
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator, Sequence
@@ -51,6 +60,15 @@ __all__ = [
 ]
 
 _LIVE_SCHEMES = {"rtsp", "rtmp", "http", "https"}
+
+# H3-5f: per-source circuit breaker. A source whose last
+# ``_FAILURE_WINDOW`` processed frames contain at least
+# ``_FAILURE_MIN_FAILURES`` failures at a rate above ``_FAILURE_RATE`` is
+# aborted (marked error, artifacts closed, removed from the rotation);
+# persistent inference faults must not masquerade as a successful run.
+_FAILURE_WINDOW = 20
+_FAILURE_MIN_FAILURES = 10
+_FAILURE_RATE = 0.5
 
 logger = logging.getLogger("autovision.inference.multi_stream")
 
@@ -81,6 +99,9 @@ class StreamStats:
     frames_dropped: int = 0
     frames_failed: int = 0
     reconnects: int = 0
+    #: H3-5f: set when the failure circuit breaker aborted this source
+    #: mid-run — the source's artifacts are partial, not a clean run.
+    aborted: bool = False
     errors: list[str] = field(default_factory=list)
     jsonl: Path | None = None
     video: Path | None = None
@@ -95,6 +116,7 @@ class StreamStats:
             "frames_dropped": self.frames_dropped,
             "frames_failed": self.frames_failed,
             "reconnects": self.reconnects,
+            "aborted": self.aborted,
             "errors": list(self.errors[-5:]),
             "jsonl": str(self.jsonl) if self.jsonl else None,
             "video": str(self.video) if self.video else None,
@@ -241,6 +263,14 @@ class MultiStreamRunner:
         self.reader_factory = reader_factory or _OpenCVReader
 
     def run(self, *, max_seconds: float | None = None) -> MultiStreamResult:
+        """Run every source until EOF / budget and write per-source artifacts.
+
+        Each round assembles a mixed-source batch of up to ``batch_size``
+        frames per still-active source (bounded by the current queue depth),
+        then runs one ``engine.run_batch`` call over the whole batch — so a
+        single fast source fills batches while the others are idle, and no
+        source gets more than ``batch_size`` frames per round.
+        """
         if max_seconds is not None and max_seconds <= 0:
             raise AutoVisionError("max_seconds must be > 0.")
         started = time.perf_counter()
@@ -295,14 +325,27 @@ class MultiStreamRunner:
 
         def _reader(source_index: int, source: StreamSource) -> None:
             stat = stats_list[source_index]
+            # H3-5d: consecutive reconnects without a proven recovery. This
+            # drives both the backoff delay and the give-up budget, and is
+            # reset after a healthy stretch; ``stat.reconnects`` stays the
+            # cumulative lifetime count (history — never reset).
             attempts = 0
             try:
                 while not stop.is_set():
                     reader: _ReaderProtocol | None = None
+                    healthy = 0
+                    recovery_frames = 300
                     try:
                         reader = self.reader_factory(source.url)
                         with lock:
                             stat.fps = float(reader.info.fps or 25.0)
+                        # H3-5d: ~30 s of healthy frames at the source's
+                        # reported rate proves the reconnect stuck; a fixed
+                        # 300 frames when the rate is unknown.
+                        fps_value = float(reader.info.fps or 0.0)
+                        recovery_frames = (
+                            int(fps_value * 30) if fps_value > 0 else 300
+                        )
                         for _frame_index, frame in reader.frames():
                             if stop.is_set():
                                 break
@@ -311,6 +354,12 @@ class MultiStreamRunner:
                                     if stat.frames_read >= self.max_frames_per_source:
                                         break
                             _inc(stat, "frames_read")
+                            healthy += 1
+                            if attempts and healthy >= recovery_frames:
+                                # The source recovered, so it may spend its
+                                # reconnect budget again (and the backoff
+                                # restarts from the first step).
+                                attempts = 0
                             _put(
                                 _FramePacket(
                                     source_index=source_index,
@@ -330,7 +379,9 @@ class MultiStreamRunner:
                         _record_error(stat, f"{type(error).__name__}: {error}")
                         if stop.is_set() or not source.is_live:
                             break
-                        if stat.reconnects >= source.max_reconnects:
+                        if attempts >= source.max_reconnects:
+                            # H3-5d: the give-up budget counts reconnects
+                            # since the last recovery, not the run total.
                             break
                         _inc(stat, "reconnects")
                         attempts += 1
@@ -357,6 +408,73 @@ class MultiStreamRunner:
         jsonl_handles: dict[int, Any] = {}
         videos: dict[int, AnnotatedVideoWriter] = {}
         active = set(range(len(self.sources)))
+        # H3-5f: sliding failure window per source (1 = failed frame).
+        failure_windows: dict[int, deque[int]] = {
+            index: deque(maxlen=_FAILURE_WINDOW)
+            for index in range(len(self.sources))
+        }
+        aborted: set[int] = set()
+        # H3-5e: per-source rotation counter for resolution changes.
+        rotations: dict[int, int] = {}
+
+        def _abort_source(index: int, stat: StreamStats, reason: str) -> None:
+            """H3-5f: trip the source's circuit breaker.
+
+            The source stops being consumed, its artifacts are closed and
+            it is marked in the summary; the other sources keep running.
+            Its reader winds down through its own EOF/reconnect budget.
+            """
+            aborted.add(index)
+            stat.aborted = True
+            _record_error(stat, reason)
+            active.discard(index)
+            handle = jsonl_handles.get(index)
+            if handle is not None:
+                try:
+                    handle.close()
+                except OSError:  # noqa: BLE001 - cleanup must not outrun containment
+                    logger.debug("Closing the aborted source's JSONL failed.")
+            writer = videos.pop(index, None)
+            if writer is not None:
+                try:
+                    writer.close()
+                except Exception:  # noqa: BLE001 - MP4 finalize fails exactly
+                    # when the disk is full / codec wedged — the very fault
+                    # that tripped this abort. Escaping the except handler
+                    # would re-kill the whole run (review P2-1).
+                    logger.warning(
+                        "Finalizing the aborted source's video failed; the "
+                        "partial segment stays on disk."
+                    )
+            logger.warning(
+                "Source '%s' aborted by the failure circuit breaker: %s",
+                stat.name,
+                reason,
+            )
+
+        def _note_frame_failure(index: int, stat: StreamStats, message: str) -> None:
+            """Account one failed frame; trip the breaker past the threshold."""
+            _inc(stat, "frames_failed")
+            _record_error(stat, message)
+            window = failure_windows[index]
+            window.append(1)
+            failures = sum(window)
+            if (
+                failures >= _FAILURE_MIN_FAILURES
+                and failures / len(window) > _FAILURE_RATE
+            ):
+                _abort_source(
+                    index,
+                    stat,
+                    f"{failures} failed frames in the last {len(window)} "
+                    f"({failures / len(window):.0%} > "
+                    f"{_FAILURE_RATE:.0%})",
+                )
+
+        def _note_frame_success(index: int) -> None:
+            failure_windows[index].append(0)
+        # INFER-01: last-resort net — see the except around the main loop.
+        run_error: Exception | None = None
         try:
             for index, source in enumerate(self.sources):
                 source_dir = self.out_dir / source.name
@@ -370,12 +488,16 @@ class MultiStreamRunner:
                 if max_seconds is not None and time.perf_counter() - started >= max_seconds:
                     stop.set()
                     break
+                # Each round takes up to ``batch_size`` frames per source
+                # (H3-5a), bounded by what is queued right now — a fast source
+                # fills batches while idle sources contribute nothing.
                 batch: list[_FramePacket] = []
                 for index in list(active):
-                    try:
-                        batch.append(queues[index].get_nowait())
-                    except queue.Empty:
-                        continue
+                    for _ in range(self.batch_size):
+                        try:
+                            batch.append(queues[index].get_nowait())
+                        except queue.Empty:
+                            break
                 if not batch:
                     if all(done[index] for index in active):
                         break
@@ -389,9 +511,13 @@ class MultiStreamRunner:
                         "Inference batch failed (%d frames): %s", len(batch), error
                     )
                     for packet in batch:
-                        stat = stats_list[packet.source_index]
-                        _inc(stat, "frames_failed")
-                        _record_error(stat, f"inference failed: {error}")
+                        if packet.source_index in aborted:
+                            continue
+                        _note_frame_failure(
+                            packet.source_index,
+                            stats_list[packet.source_index],
+                            f"inference failed: {error}",
+                        )
                     continue
                 if len(records) != len(batch):
                     logger.warning(
@@ -400,10 +526,11 @@ class MultiStreamRunner:
                         len(batch),
                     )
                     for packet in batch:
-                        stat = stats_list[packet.source_index]
-                        _inc(stat, "frames_failed")
-                        _record_error(
-                            stat,
+                        if packet.source_index in aborted:
+                            continue
+                        _note_frame_failure(
+                            packet.source_index,
+                            stats_list[packet.source_index],
                             "engine returned "
                             f"{len(records)} records for {len(batch)} frames",
                         )
@@ -411,63 +538,131 @@ class MultiStreamRunner:
                 for packet, record in zip(batch, records):
                     index = packet.source_index
                     stat = stats_list[index]
-                    payload = {
-                        "source": stat.name,
-                        "frame_index": packet.frame_index,
-                        "timestamp": packet.timestamp,
-                        "predictions": InferenceResult.from_record(record).to_json(
-                            masks=self.mask_format,
-                            max_elements=self.max_json_elements,
-                        ),
-                    }
-                    jsonl_handles[index].write(json.dumps(payload, allow_nan=False) + "\n")
-                    jsonl_handles[index].flush()
+                    if index in aborted:
+                        # H3-5f: the breaker tripped mid-batch — the source's
+                        # artifacts are closed, so skip its stragglers.
+                        continue
+                    # Record validation/serialization is isolated per source
+                    # (H3-1e): one malformed record must not kill the whole
+                    # multi-source run, so the failure lands in that source's
+                    # stats and the remaining packets proceed.
+                    try:
+                        payload = {
+                            "source": stat.name,
+                            "frame_index": packet.frame_index,
+                            "timestamp": packet.timestamp,
+                            "predictions": InferenceResult.from_record(
+                                record
+                            ).to_json(
+                                masks=self.mask_format,
+                                max_elements=self.max_json_elements,
+                            ),
+                        }
+                        jsonl_handles[index].write(
+                            json.dumps(payload, allow_nan=False) + "\n"
+                        )
+                        jsonl_handles[index].flush()
+                    except Exception as error:  # noqa: BLE001 - keep other sources alive
+                        _note_frame_failure(
+                            index, stat, f"serialization failed: {error}"
+                        )
+                        continue
                     _inc(stat, "frames_written")
+                    _note_frame_success(index)
                     if self.render:
-                        writer = videos.get(index)
-                        height, width = packet.frame.shape[:2]
-                        if writer is None or writer.frame_size != (width, height):
-                            if writer is not None:
-                                writer.close()
-                            source_dir = self.out_dir / stat.name
-                            writer = AnnotatedVideoWriter(
-                                source_dir / "annotated.mp4",
-                                fps=stat.fps,
-                                frame_size=(width, height),
-                            )
-                            videos[index] = writer
-                            stat.video = writer.path
-                        from PIL import Image
-
+                        # INFER-01: writer setup/writes are isolated per
+                        # source like every other failure mode here — a
+                        # single source's disk-full/codec failure used to
+                        # propagate out of run() and take down the whole
+                        # multi-source job with the summary lost. The
+                        # failed source trips its breaker; the rest run on.
                         try:
-                            rendered = draw_prediction(
-                                Image.fromarray(packet.frame),
-                                record,
-                                class_names=self.class_names,
+                            writer = videos.get(index)
+                            height, width = packet.frame.shape[:2]
+                            if writer is None or writer.frame_size != (width, height):
+                                if writer is not None:
+                                    writer.close()
+                                    # H3-5e: a resolution change rotates the
+                                    # file name instead of overwriting the
+                                    # earlier segment; JSONL is unaffected.
+                                    rotations[index] = rotations.get(index, 0) + 1
+                                    segment = f"annotated-{rotations[index]:04d}.mp4"
+                                else:
+                                    segment = "annotated.mp4"
+                                source_dir = self.out_dir / stat.name
+                                writer = AnnotatedVideoWriter(
+                                    source_dir / segment,
+                                    fps=stat.fps,
+                                    frame_size=(width, height),
+                                )
+                                videos[index] = writer
+                                stat.video = writer.path
+                            from PIL import Image
+
+                            try:
+                                rendered = draw_prediction(
+                                    Image.fromarray(packet.frame),
+                                    record,
+                                    class_names=self.class_names,
+                                )
+                            except Exception as error:  # noqa: BLE001
+                                _record_error(stat, f"render failed: {error}")
+                                rendered = packet.frame
+                            writer.write(np.asarray(rendered))
+                        except Exception as error:  # noqa: BLE001 - keep other sources alive
+                            _abort_source(
+                                index,
+                                stat,
+                                f"video writer failed: "
+                                f"{type(error).__name__}: {error}",
                             )
-                        except Exception as error:  # noqa: BLE001
-                            _record_error(stat, f"render failed: {error}")
-                            rendered = packet.frame
-                        writer.write(np.asarray(rendered))
+                            continue
                 for index in list(active):
                     if done[index] and queues[index].empty():
                         active.discard(index)
                 if not active:
                     break
+        except Exception as error:  # noqa: BLE001 - INFER-01: an uncontained
+            # failure (e.g. the artifact setup loop above) must still leave
+            # a summary on disk — per-source failures are contained at their
+            # own level, this is the last-resort net.
+            run_error = error
         finally:
             stop.set()
             for thread in threads:
                 thread.join(timeout=5.0)
             for handle in jsonl_handles.values():
-                handle.close()
+                try:
+                    handle.close()
+                except OSError:  # noqa: BLE001 - review P2-1: best-effort
+                    logger.debug("Closing a JSONL handle failed during cleanup.")
             for writer in videos.values():
-                writer.close()
+                try:
+                    writer.close()
+                except Exception:  # noqa: BLE001 - review P2-1: best-effort
+                    logger.warning(
+                        "Finalizing a video writer failed during cleanup; the "
+                        "partial segment stays on disk."
+                    )
         elapsed = time.perf_counter() - started
         result = MultiStreamResult(
             out_dir=self.out_dir,
             sources=stats,
             elapsed_s=elapsed,
         )
+        if run_error is not None:
+            # INFER-01: the summary is saved even on an uncontained failure —
+            # and a failing SAVE must not mask the original error (review
+            # P2-1: disk exhaustion is exactly when both fail).
+            try:
+                result.save()
+            except Exception as save_error:  # noqa: BLE001
+                logger.error(
+                    "Saving the multi-stream summary failed (%s); the "
+                    "original run error follows.", save_error,
+                )
+                raise run_error from save_error
+            raise run_error
         result.save()
         return result
 

@@ -9,7 +9,7 @@ backbone covering six tasks, with all 26 official weights registered and
 ready to download. The Python API and `autovision-cli` (30 commands) share
 one strict Pydantic validation surface.
 
-Current version: **0.6.0**. It targets teams that need self-hosted training,
+Current version: **0.6.1**. It targets teams that need self-hosted training,
 evaluation, export and private deployment; it is not a hosted API and does
 not replace a production gateway. Core code is Apache-2.0; weight licenses
 are registered per asset in the [model zoo](docs/model_zoo.md), and

@@ -10,12 +10,15 @@ single-process runs need no setup.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
+import numbers
 import os
 import random
 import time
+from collections.abc import Iterator
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -25,16 +28,21 @@ from typing import Any
 import numpy as np
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
+from torch.utils.data import DataLoader, RandomSampler, Sampler, SequentialSampler
 
 from autovision.engine.amp_check import resolve_amp_precision
 from autovision.engine.callbacks import CallbackRegistry
+from autovision.errors import AutoVisionError
 from autovision.observability.otel import end_span, otel_span, start_span
 from autovision.runtime.accelerator import (
     ddp_backend_for,
     npu_available,
 )
-from autovision.runtime.checkpoint import Checkpoint, CheckpointMetadata
+from autovision.runtime.checkpoint import (
+    Checkpoint,
+    CheckpointMetadata,
+    _write_atomic,
+)
 from autovision.runtime.distributed import get_local_rank
 from autovision.runtime.env import Env
 
@@ -90,6 +98,62 @@ def _restore_rng_state(state: Any) -> None:
         # A checkpoint moved across CUDA device counts should not fail the
         # resume outright; reproducibility is degraded, not training.
         logger.warning("Could not restore RNG state from checkpoint: %s", error)
+
+
+def _gather_per_rank_rng(world_size: int) -> list[Any] | None:
+    """Gather every rank's RNG state at a checkpoint write point (H3-3a).
+
+    Rank zero used to save only its own RNG stream, so a DDP resume (or a
+    D32 rollback, which reads the same checkpoint) restored the SAME stream
+    on every rank and the per-rank augmentation diversity collapsed. Every
+    rank posts one ``all_gather_object`` of its own state (python / numpy /
+    torch CPU / torch CUDA — same shape as the legacy ``rng`` key); the
+    rank-ordered list lands in ``engine_state["rng_per_rank"]``.
+
+    Collective: every rank must call this exactly once per write. The cost
+    is one object round trip per periodic save, never per step. A gather
+    failure degrades to ``None`` (legacy single-stream checkpoint): the
+    write barrier right after this call posts the next collective anyway,
+    so a broken process group still fails the job — the fallback only
+    spares healthy mocked/single-rank setups an avoidable exception.
+    """
+    if world_size <= 1 or not torch.distributed.is_initialized():
+        return None
+    gathered: list[Any] = [None] * world_size
+    try:
+        torch.distributed.all_gather_object(gathered, _capture_rng_state())
+    except Exception:  # noqa: BLE001 - degraded RNG fidelity, not a crash
+        logger.debug("Per-rank RNG gather failed; saving the local stream only.")
+        return None
+    return gathered
+
+
+def _rng_state_for_this_rank(engine_state: dict[str, Any]) -> Any:
+    """Pick this rank's RNG state out of a restored engine_state (H3-3a).
+
+    Checkpoints written by a multi-rank run carry ``rng_per_rank`` (one RNG
+    state per rank, in rank order) and each rank must resume its OWN stream.
+    Old checkpoints (single process or pre-H3-3a) and world-size mismatches
+    fall back to the legacy shared ``rng`` stream — degraded per-rank
+    diversity, never a crash.
+    """
+    shards = engine_state.get("rng_per_rank")
+    if (
+        isinstance(shards, list)
+        and torch.distributed.is_available()
+        and torch.distributed.is_initialized()
+    ):
+        world_size = int(torch.distributed.get_world_size())
+        rank = int(torch.distributed.get_rank())
+        if len(shards) == world_size:
+            return shards[rank]
+        logger.warning(
+            "Checkpoint carries %d RNG shards but world_size is %d; "
+            "restoring the shared RNG stream instead (per-rank augmentation "
+            "diversity may differ from the original run).",
+            len(shards), world_size,
+        )
+    return engine_state.get("rng")
 
 
 def _validate_ddp_sampler(dataloader: DataLoader) -> None:
@@ -344,6 +408,61 @@ def _rank_zero_write_barrier(
         )
 
 
+def _merge_ranked_val_loss(
+    loss_sum: float, batch_count: int, device: torch.device
+) -> float:
+    """Weighted validation-loss mean across ranks (H3-3d).
+
+    Numerator (loss sum) and denominator (batch count) are reduced as two
+    separate tensors, so a rank whose val shard produced zero batches
+    contributes to neither instead of diluting the global mean with a
+    phantom ``0.0`` loss. Requires an initialized process group; callers
+    guard on ``world_size > 1``.
+    """
+    loss_num = torch.tensor([float(loss_sum)], device=device)
+    loss_den = torch.tensor([float(batch_count)], device=device)
+    torch.distributed.all_reduce(loss_num)
+    torch.distributed.all_reduce(loss_den)
+    total_count = float(loss_den.item())
+    return float(loss_num.item()) / total_count if total_count > 0 else 0.0
+
+
+class _StridedValSampler(Sampler[int]):
+    """Un-padded deterministic cross-rank validation sharding (H3-3c).
+
+    ``DistributedSampler(shuffle=False, drop_last=False)`` pads every shard
+    to equal length by REPEATING indices from the head of the list, so the
+    rank-zero metric merge counts those images two or more times and the
+    DDP val metric drifts from the single-process one. ``range(rank, N,
+    world)`` partitions the val set exactly: the union of the shards is the
+    full index set with each sample counted exactly once, and the DDP
+    metric therefore equals the single-process metric by construction.
+
+    A rank's shard may be empty (``world_size > len(dataset)``) — that is
+    legitimate for validation: the ranked val-loss merge (H3-3d) treats an
+    empty shard as no contribution, and merging an empty metric state is a
+    no-op on the collector side.
+    """
+
+    def __init__(self, dataset_size: int, rank: int, world_size: int) -> None:
+        self.dataset_size = int(dataset_size)
+        self.rank = int(rank)
+        self.world_size = int(world_size)
+        # The shard order is deterministic (no shuffle); the attribute
+        # exists only because the engine calls set_epoch per val round.
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int) -> None:
+        """Sampler-epoch hook kept for engine compatibility (no reordering)."""
+        self.epoch = int(epoch)
+
+    def __iter__(self) -> Iterator[int]:
+        return iter(range(self.rank, self.dataset_size, self.world_size))
+
+    def __len__(self) -> int:
+        return len(range(self.rank, self.dataset_size, self.world_size))
+
+
 def seed_everything(seed: int) -> None:
     """Seed python, numpy, and torch globally.
 
@@ -415,10 +534,7 @@ _OOM_MESSAGE_MARKERS: tuple[str, ...] = (
     "cudnn_status_internal_error",
     "unable to find an engine",
 )
-#: D21: how many automatic batch halvings one run may attempt.
-_OOM_MAX_ATTEMPTS = 3
-#: D20: rolling retention count for ``epoch{N}.ckpt`` archives.
-_EPOCH_ARCHIVE_KEEP = 3
+# (_OOM_MAX_ATTEMPTS / _EPOCH_ARCHIVE_KEEP live once at module top, TRAIN-11.)
 
 
 def _is_oom_error(error: BaseException) -> bool:
@@ -441,6 +557,18 @@ def make_dataloader_generator(seed: int, rank: int = 0) -> torch.Generator:
     generator = torch.Generator()
     generator.manual_seed((int(seed) + int(rank)) % (2**63))
     return generator
+
+
+def dataloader_seed_rank() -> int:
+    """Distributed rank used to offset dataloader seed streams (H1-4).
+
+    ``torch.distributed.get_rank()`` inside an initialized process group,
+    ``0`` otherwise: loader builders may run before the group exists (or in
+    single-process runs), where the unoffset stream is the correct one.
+    """
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return int(torch.distributed.get_rank())
+    return 0
 
 
 def seed_worker(worker_id: int) -> None:  # pragma: no cover - runs in workers
@@ -742,6 +870,15 @@ class Engine:
             raise ValueError(
                 f"save_period_num_epochs must be >= 0, got {save_period_num_epochs}"
             )
+        if getattr(dataloader, "batch_size", None) is None:
+            # len(dataloader) and batch-size arithmetic below assume an
+            # index-based loader; a batch_sampler loader yields
+            # batch_size=None and would die on a bare TypeError/ZeroDivision
+            # mid-setup (TRAIN-15).
+            raise AutoVisionError(
+                "Engine.fit requires a DataLoader with an explicit "
+                "batch_size; batch_sampler loaders are not supported."
+            )
         if len(dataloader) == 0:
             raise ValueError(
                 "Training dataloader is empty; check the dataset root, filters, "
@@ -758,6 +895,17 @@ class Engine:
         ddp_method: nn.Module = method
         sampler = None
         if world_size > 1:
+            # H3-3e: drop_last=True leaves floor(N/world) samples per rank;
+            # with world > N every shard is empty and each epoch would
+            # silently train zero steps.
+            if len(dataloader.dataset) < world_size:
+                raise AutoVisionError(
+                    f"WORLD_SIZE={world_size} exceeds the training dataset "
+                    f"size ({len(dataloader.dataset)} samples): every rank's "
+                    "training shard would be empty and each epoch would "
+                    f"train zero steps. Provide at least {world_size} "
+                    "training samples, or run on fewer devices."
+                )
             if not torch.distributed.is_initialized():
                 torch.distributed.init_process_group(
                     backend=ddp_backend_for(device.type),
@@ -777,8 +925,10 @@ class Engine:
                 find_unused_parameters=Env.DDP_FIND_UNUSED.value,
             )
             _validate_ddp_sampler(dataloader)
+            # H1-4: the run seed must drive the shuffle, otherwise multi-rank
+            # data order is decoupled from the seed (default seed=0 always).
             sampler = torch.utils.data.distributed.DistributedSampler(
-                dataloader.dataset, shuffle=True, drop_last=True
+                dataloader.dataset, shuffle=True, drop_last=True, seed=seed
             )
 
         # Total steps must match the *distributed* loader length so the
@@ -818,12 +968,61 @@ class Engine:
             raise ValueError(
                 "'checkpoint' and 'resume_interrupted' cannot be set at the same time."
             )
+        # TRAIN-01: identity snapshot of this run, written into every
+        # checkpoint and compared on resume (fit_task's D17/H3-3g pattern,
+        # which the pretraining path previously lacked entirely). ``None``
+        # fingerprint (dataset without a serializable spec) skips the
+        # data check, matching fit_task.
+        fit_args_snapshot = {
+            "max_epochs": max_epochs,
+            "steps_per_epoch": steps_per_epoch,
+            "seed": seed,
+            "precision": precision,
+            "save_period_num_epochs": save_period_num_epochs,
+            "log_every_n_steps": log_every_n_steps,
+            "data_fingerprint": _dataset_fingerprint(dataloader.dataset),
+        }
         if resume_interrupted:
             last_path = out_dir / "checkpoints" / "last.ckpt"
             if last_path.exists():
-                start_epoch, global_step = self._resume(
+                start_epoch, global_step, resume_state = self._resume(
                     last_path, method, optimizer, scheduler, device, scaler=scaler
                 )
+                # Same loud-never-blocking drift report as fit_task: the
+                # current call governs, the resume just must not be silent.
+                resume_fit_args = dict(resume_state.get("fit_args") or {})
+                checkpoint_fingerprint = resume_fit_args.pop(
+                    "data_fingerprint", None
+                )
+                if (
+                    fit_args_snapshot["data_fingerprint"] is not None
+                    and checkpoint_fingerprint is not None
+                    and checkpoint_fingerprint != fit_args_snapshot["data_fingerprint"]
+                ):
+                    logger.warning(
+                        "Resume dataset drift: the pretraining data differs "
+                        "from the one the checkpoint was trained on "
+                        "(fingerprint %s… vs %s…); the current dataset "
+                        "governs — verify this resume is intended.",
+                        str(checkpoint_fingerprint)[:12],
+                        str(fit_args_snapshot["data_fingerprint"])[:12],
+                    )
+                check_resume_fit_args(
+                    resume_fit_args,
+                    max_epochs=max_epochs,
+                    steps_per_epoch=steps_per_epoch,
+                    seed=seed,
+                    precision=precision,
+                    save_period_num_epochs=save_period_num_epochs,
+                    log_every_n_steps=log_every_n_steps,
+                )
+                if start_epoch >= max_epochs:
+                    logger.info(
+                        "Resumed run already completed %d epoch(s) "
+                        "(max_epochs=%d) — nothing to train; pass a larger "
+                        "max_epochs to extend the schedule.",
+                        start_epoch, max_epochs,
+                    )
             else:
                 logger.info("No last.ckpt found; starting from scratch.")
         elif checkpoint is not None:
@@ -855,18 +1054,12 @@ class Engine:
                 with otel_span("engine.epoch", {"epoch": epoch}):
                     if sampler is not None:
                         sampler.set_epoch(epoch)
+                    # H1-4: the per-epoch rebuild must carry the same
+                    # worker-seeding fields as fit_task's rebuild — dropping
+                    # worker_init_fn/generator replays one augmentation
+                    # sequence across all DDP ranks.
                     epoch_loader = (
-                        DataLoader(
-                            dataloader.dataset,
-                            batch_size=dataloader.batch_size,
-                            sampler=sampler,
-                            shuffle=False,
-                            num_workers=dataloader.num_workers,
-                            drop_last=True,
-                            collate_fn=dataloader.collate_fn,
-                            timeout=dataloader.timeout,
-                            pin_memory=dataloader.pin_memory,
-                        )
+                        self._with_sampler(dataloader, sampler, drop_last=True)
                         if sampler is not None
                         else dataloader
                     )
@@ -982,7 +1175,7 @@ class Engine:
                             global_step, nan_attempts,
                             _NAN_RECOVERY_MAX_ATTEMPTS, last_path,
                         )
-                        resumed_epoch, resumed_step = self._resume(
+                        resumed_epoch, resumed_step, _rollback_state = self._resume(
                             last_path,
                             method,
                             optimizer,
@@ -1024,6 +1217,10 @@ class Engine:
                     save_period_num_epochs > 0
                     and (epoch + 1) % save_period_num_epochs == 0
                 )
+                # H3-3a: the per-rank RNG gather runs on ALL ranks before
+                # the rank-zero gate (it is a collective) and is consumed
+                # only by the rank-zero write below.
+                rng_per_rank = _gather_per_rank_rng(world_size)
                 if world_size == 1 or torch.distributed.get_rank() == 0:
                     try:
                         with otel_span("engine.checkpoint", {"epoch": epoch}):
@@ -1042,6 +1239,8 @@ class Engine:
                                     global_step=global_step,
                                     normalize_args=normalize_args,
                                     scaler=scaler,
+                                    rng_per_rank=rng_per_rank,
+                                    fit_args=fit_args_snapshot,
                                 )
                                 payload = archive.serialize()
                                 checkpoints_dir = out_dir / "checkpoints"
@@ -1065,6 +1264,8 @@ class Engine:
                                     global_step=global_step,
                                     normalize_args=normalize_args,
                                     scaler=scaler,
+                                    rng_per_rank=rng_per_rank,
+                                    fit_args=fit_args_snapshot,
                                 )
                     except Exception as error:  # noqa: BLE001 - propagated below
                         write_ok = False
@@ -1105,6 +1306,36 @@ class Engine:
         return out
 
     @staticmethod
+    def _with_sampler(
+        loader: DataLoader, sampler: Any, *, drop_last: bool | None = None
+    ) -> DataLoader:
+        """Rebuild ``loader`` with a distributed sampler (same semantics).
+
+        Every per-rank field the original loader carried is copied: the
+        D23a seeding pair (``worker_init_fn``/``generator``), the worker
+        pool tuning (``prefetch_factor``/``persistent_workers``) and the
+        I/O contract (``collate_fn``/``timeout``/``pin_memory``). A dropped
+        field here silently decouples multi-rank runs from the single-rank
+        behavior (H1-4). ``drop_last`` overrides ``loader.drop_last`` when
+        given (``Engine.fit`` pins it to True for its per-epoch rebuild).
+        """
+        return DataLoader(
+            loader.dataset,
+            batch_size=loader.batch_size,
+            sampler=sampler,
+            shuffle=False,
+            num_workers=loader.num_workers,
+            worker_init_fn=loader.worker_init_fn,
+            generator=loader.generator,
+            prefetch_factor=loader.prefetch_factor,
+            drop_last=loader.drop_last if drop_last is None else drop_last,
+            collate_fn=loader.collate_fn,
+            timeout=loader.timeout,
+            pin_memory=loader.pin_memory,
+            persistent_workers=loader.persistent_workers,
+        )
+
+    @staticmethod
     def _resume(
         path: Path,
         method: nn.Module,
@@ -1114,7 +1345,7 @@ class Engine:
         *,
         scaler: Any | None = None,
         validate_finite: bool = False,
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, dict[str, Any]]:
         ckpt = Checkpoint.from_path(path, map_location=str(device))
         if validate_finite:
             # D32: a NaN-recovery resume must not reinstall the very NaN it
@@ -1130,15 +1361,33 @@ class Engine:
         if "optimizer" in engine_state:
             optimizer.load_state_dict(engine_state["optimizer"])
         if "scheduler" in engine_state:
+            # TRAIN-01: two-stage restore. ``load_state_dict`` replays the
+            # scheduler's whole __dict__ — including SHAPE attributes such
+            # as CosineWarmupScheduler.max_epochs — so a resume that
+            # extends max_epochs silently kept the old decay endpoint and
+            # froze the LR at end_value for the added epochs. The step
+            # counter (last_epoch) rides the state dict; the schedule
+            # shape always comes from the CURRENT call.
+            shape = {
+                key: getattr(scheduler, key)
+                for key in (
+                    "warmup_epochs", "max_epochs", "end_value", "base_lrs",
+                )
+                if hasattr(scheduler, key)
+            }
             scheduler.load_state_dict(engine_state["scheduler"])
+            for key, value in shape.items():
+                setattr(scheduler, key, value)
         if scaler is not None and "scaler" in engine_state:
             scaler.load_state_dict(engine_state["scaler"])
-        _restore_rng_state(engine_state.get("rng"))
+        # H3-3a: each rank restores its OWN RNG shard from a multi-rank
+        # checkpoint; the legacy shared stream is the fallback.
+        _restore_rng_state(_rng_state_for_this_rank(engine_state))
         logger.info(
             "Resumed from '%s' at epoch %d (step %d).",
             path, ckpt.autovision.epoch + 1, ckpt.autovision.global_step,
         )
-        return ckpt.autovision.epoch + 1, ckpt.autovision.global_step
+        return ckpt.autovision.epoch + 1, ckpt.autovision.global_step, engine_state
 
     @staticmethod
     def _load_weights(path: Path, method: nn.Module, device: torch.device) -> None:
@@ -1157,8 +1406,18 @@ class Engine:
         global_step: int,
         normalize_args: dict | None = None,
         scaler: Any | None = None,
+        rng_per_rank: list[Any] | None = None,
+        fit_args: dict | None = None,
     ) -> Checkpoint:
-        """Assemble the Checkpoint object with D20 serialization hygiene."""
+        """Assemble the Checkpoint object with D20 serialization hygiene.
+
+        ``rng_per_rank`` (H3-3a) carries one RNG state per rank, gathered by
+        :func:`_gather_per_rank_rng` at the save point; ``None`` (single
+        process or failed gather) keeps the legacy single-stream payload.
+        ``fit_args`` (TRAIN-01) snapshots the run's fit knobs so a resume
+        can warn on drift the way fit_task's D17 check does; ``None``
+        keeps checkpoints written before this field existed loadable.
+        """
         # D33: a NaN EMA must not enter the file — resync from live weights
         # first (pretraining has no FSDP, so the comparison is always safe).
         _repair_ema_if_present(method)
@@ -1169,8 +1428,12 @@ class Engine:
             "scheduler": scheduler.state_dict(),
             "rng": _capture_rng_state(),
         }
+        if rng_per_rank is not None:
+            engine_state["rng_per_rank"] = rng_per_rank
         if scaler is not None:
             engine_state["scaler"] = scaler.state_dict()
+        if fit_args is not None:
+            engine_state["fit_args"] = dict(fit_args)
         metadata = CheckpointMetadata(
             epoch=epoch,
             global_step=global_step,
@@ -1195,6 +1458,8 @@ class Engine:
         global_step: int,
         normalize_args: dict | None = None,
         scaler: Any | None = None,
+        rng_per_rank: list[Any] | None = None,
+        fit_args: dict | None = None,
     ) -> None:
         cls._build_checkpoint(
             method=method,
@@ -1204,6 +1469,8 @@ class Engine:
             global_step=global_step,
             normalize_args=normalize_args,
             scaler=scaler,
+            rng_per_rank=rng_per_rank,
+            fit_args=fit_args,
         ).save(path)
 
 
@@ -1220,12 +1487,120 @@ class TaskFitResult:
     stop_step: int | None = None
 
 
+#: Attribute names that carry a dataset's sample identity across the data
+#: layer: classification file lists, segmentation pairs, and the mmap-backed
+#: detection rows (``TaskDataset.image_info``).
+_DATASET_SPEC_ATTRS: tuple[str, ...] = (
+    "filenames",
+    "labels",
+    "classes",
+    "pairs",
+    "image_filenames",
+    "image_info",
+)
+
+#: Sentinel marking "this value cannot be serialized into a stable spec".
+#: A repr must NEVER be embedded as a fallback: object reprs carry memory
+#: addresses, which would make the same dataset fingerprint differently
+#: in every process and fire a false drift warning on every resume.
+_UNSERIALIZABLE_SPEC: Any = object()
+
+
+def _jsonable_spec(value: Any) -> Any:
+    """Normalize a data-spec value into JSON-serializable data (H3-3g).
+
+    Paths become strings, numpy scalars become Python numbers, sets sort
+    (JSON has no set order). Anything else (transforms, callables, tensors)
+    returns the :data:`_UNSERIALIZABLE_SPEC` sentinel, which bubbles up so
+    the caller drops that attribute instead of embedding an unstable repr.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, str):
+        return str(value)
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, numbers.Integral):
+        return int(value)
+    if isinstance(value, numbers.Real):
+        return float(value)
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            normalized = _jsonable_spec(item)
+            if normalized is _UNSERIALIZABLE_SPEC:
+                return _UNSERIALIZABLE_SPEC
+            out[str(key)] = normalized
+        return out
+    if isinstance(value, (list, tuple)):
+        items = [_jsonable_spec(item) for item in value]
+        if any(item is _UNSERIALIZABLE_SPEC for item in items):
+            return _UNSERIALIZABLE_SPEC
+        return items
+    if isinstance(value, (set, frozenset)):
+        items = [_jsonable_spec(item) for item in value]
+        if any(item is _UNSERIALIZABLE_SPEC for item in items):
+            return _UNSERIALIZABLE_SPEC
+        return sorted(items, key=repr)
+    return _UNSERIALIZABLE_SPEC
+
+
+def _dataset_fingerprint(dataset: Any) -> str | None:
+    """Stable sha256 over the dataset's JSON-serialized data spec (H3-3g).
+
+    Snapshotted into every checkpoint's ``fit_args`` and compared on resume
+    so a dataset change between checkpoint and resume becomes a loud event
+    (D17 style: warn, never block). ``pydantic`` dataset configs dump via
+    ``model_dump(mode="json")``; sample lists (``filenames``/``pairs``/
+    ``image_info``) serialize in bulk — ``MemoryMappedSequence.__getitem__``
+    slices bulk-convert on ``[:]``, so no per-row Python loop is paid on
+    large datasets. Returns ``None`` when no stable spec can be extracted
+    (duck datasets), which disables the drift check (backward compatible).
+    """
+    spec: dict[str, Any] = {}
+    dataset_args = getattr(dataset, "dataset_args", None)
+    model_dump = getattr(dataset_args, "model_dump", None)
+    if callable(model_dump):
+        try:
+            dumped: Any = model_dump(mode="json")
+        except Exception:  # noqa: BLE001 - fingerprinting is best-effort
+            dumped = _UNSERIALIZABLE_SPEC
+        normalized = _jsonable_spec(dumped)
+        if normalized is not _UNSERIALIZABLE_SPEC:
+            spec["dataset_args"] = normalized
+    for attr in _DATASET_SPEC_ATTRS:
+        value = getattr(dataset, attr, None)
+        if value is None:
+            continue
+        try:
+            if isinstance(value, dict):
+                normalized = _jsonable_spec(value)
+            else:
+                # ``[:]`` hits MemoryMappedSequence's bulk-conversion fast
+                # path; plain sequences copy.
+                normalized = _jsonable_spec(list(value[:]))  # type: ignore[index]
+        except TypeError:
+            continue
+        if normalized is not _UNSERIALIZABLE_SPEC:
+            spec[attr] = normalized
+    if not spec:
+        return None
+    payload = json.dumps(spec, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 #: Fit knobs a resumed run may legitimately change without a warning
 #: (schedule tuning mid-run); any other drift against the checkpoint is
-#: reported loudly (design doc D17).
+#: reported loudly (design doc D17). ``max_epochs``/``steps`` extensions
+#: are the documented resume pattern (TRAIN-01: the LR schedule now
+#: follows the CURRENT call instead of the checkpoint's frozen shape).
 RESUME_OVERRIDABLE_KEYS: frozenset[str] = frozenset(
     {
         "steps",
+        "max_epochs",
+        "save_period_num_epochs",
         "early_stopping_patience",
         "early_stopping_min_delta",
         "val_every_num_steps",
@@ -1271,18 +1646,127 @@ def check_resume_fit_args(
             )
 
 
+def _load_state_dict_with_context(
+    model: nn.Module, state_dict: dict[str, Any], *, context: str
+) -> None:
+    """Load model state with a key-level diff when the shapes drift (TRAIN-05).
+
+    Resuming/warm-starting a model whose class/query/head configuration
+    changed used to surface torch's raw multi-line "size mismatch" dump.
+    The error now summarizes missing / unexpected / shape-mismatched keys
+    and points at the configuration that usually caused it; anything that
+    is not a key/shape mismatch re-raises untouched.
+    """
+    try:
+        model.load_state_dict(state_dict)
+        return
+    except RuntimeError as error:
+        message = str(error)
+        if not any(
+            marker in message
+            for marker in ("size mismatch", "Missing key", "Unexpected key")
+        ):
+            raise
+        mismatch_error: RuntimeError = error
+    model_shapes = {
+        key: tuple(value.shape)
+        for key, value in model.state_dict().items()
+        if hasattr(value, "shape")
+    }
+    checkpoint_shapes = {
+        key: tuple(value.shape)
+        for key, value in state_dict.items()
+        if hasattr(value, "shape")
+    }
+    missing = sorted(set(model_shapes) - set(checkpoint_shapes))
+    unexpected = sorted(set(checkpoint_shapes) - set(model_shapes))
+    mismatched = sorted(
+        key
+        for key in set(model_shapes) & set(checkpoint_shapes)
+        if model_shapes[key] != checkpoint_shapes[key]
+    )
+    raise AutoVisionError(
+        f"{context}: the checkpoint does not match this model — "
+        f"{len(missing)} missing, {len(unexpected)} unexpected, "
+        f"{len(mismatched)} shape-mismatched key(s); first mismatches: "
+        f"{mismatched[:5]}{' ...' if len(mismatched) > 5 else ''}. If the "
+        "model configuration (classes/queries/heads) changed since the "
+        "checkpoint, rebuild the model to match it or start from a fresh "
+        "init."
+    ) from mismatch_error
+
+
+def _verify_resume_consistency(
+    device: torch.device, world_size: int, start_step: int, best_metric: float | None
+) -> None:
+    """TRAIN-03: cross-rank resume ledger — fail fast instead of hanging.
+
+    Every rank reads ``last.ckpt`` for itself; two divergences are caught:
+
+    - state divergence: ranks restored different (start_step, best_metric)
+      from the same-looking file (stale replicas, partial writes);
+    - presence divergence: a rank that MISSED the file (non-shared
+      filesystem) resumes at step 0 with no best baseline while its peers
+      resume mid-run — its ``None`` baseline rides the ledger as ``-inf``
+      and cannot mask the divergence.
+
+    The MIN/MAX all_reduce on (start_step, best_metric) costs two tiny
+    collectives once per resume and turns either divergence into a named
+    error pointing at the likely filesystem cause. A fresh run where NO
+    rank has a checkpoint is consistent (all zeros / all ``None``) and
+    passes; single-process runs skip the collectives entirely.
+    """
+    if world_size <= 1 or not torch.distributed.is_initialized():
+        return
+    steps = torch.tensor([start_step], dtype=torch.int64, device=device)
+    best = torch.tensor(
+        [float("-inf") if best_metric is None else float(best_metric)],
+        dtype=torch.float32,
+        device=device,
+    )
+    mins = (steps.clone(), best.clone())
+    maxs = (steps.clone(), best.clone())
+    torch.distributed.all_reduce(mins[0], op=torch.distributed.ReduceOp.MIN)
+    torch.distributed.all_reduce(mins[1], op=torch.distributed.ReduceOp.MIN)
+    torch.distributed.all_reduce(maxs[0], op=torch.distributed.ReduceOp.MAX)
+    torch.distributed.all_reduce(maxs[1], op=torch.distributed.ReduceOp.MAX)
+    diverged: list[str] = []
+    if int(mins[0].item()) != int(maxs[0].item()):
+        diverged.append(f"start_step {int(mins[0].item())} vs {int(maxs[0].item())}")
+    best_lo = float(mins[1].item())
+    best_hi = float(maxs[1].item())
+    if best_lo != best_hi:
+        diverged.append(f"best_metric {best_lo} vs {best_hi}")
+    if diverged:
+        raise AutoVisionError(
+            "Ranks resumed inconsistent state ("
+            + "; ".join(diverged)
+            + "): every rank reads last.ckpt from the output directory "
+            "for itself — verify all ranks mount the SAME shared "
+            "filesystem for out_dir, or run single-device."
+        )
+
+
 class _InfiniteCycleIterator:
     """Cycles a dataloader forever, supporting mid-training re-creation.
 
     With a (distributed) sampler, every restart advances the sampler epoch so
     the shuffle changes across cycles — otherwise each epoch would repeat the
-    exact same data order and partition.
+    exact same data order and partition. ``start_epoch`` continues the saved
+    epoch on resume instead of rewinding the shuffle to epoch 0 (H3-3b).
     """
 
-    def __init__(self, dataloader: DataLoader, sampler: Any = None) -> None:
+    def __init__(
+        self, dataloader: DataLoader, sampler: Any = None, start_epoch: int = 0
+    ) -> None:
         self.dataloader = dataloader
         self.sampler = sampler
-        self._epoch = 0
+        self._epoch = int(start_epoch)
+        # Sync the sampler with a restored epoch. Epoch 0 is skipped: it is
+        # the sampler's default, and calling set_epoch(0) unconditionally
+        # would add a spurious advance to epoch-tracking samplers/tests.
+        if self.sampler is not None and self._epoch:
+            self.sampler.set_epoch(self._epoch)
         self._iterator = iter(dataloader)
 
     def _advance_epoch(self) -> None:
@@ -1471,6 +1955,17 @@ class TaskEngine(Engine):
         train_sampler = None
         val_sampler = None
         if world_size > 1:
+            # H3-3e: drop_last=True leaves floor(N/world) samples per rank;
+            # with world > N every shard is empty and the run would
+            # silently train zero steps.
+            if len(train_dataloader.dataset) < world_size:
+                raise AutoVisionError(
+                    f"WORLD_SIZE={world_size} exceeds the training dataset "
+                    f"size ({len(train_dataloader.dataset)} samples): every "
+                    "rank's training shard would be empty and the run "
+                    f"would train zero steps. Provide at least {world_size} "
+                    "training samples, or run on fewer devices."
+                )
             if not torch.distributed.is_initialized():
                 torch.distributed.init_process_group(
                     backend=ddp_backend_for(device.type),
@@ -1497,19 +1992,47 @@ class TaskEngine(Engine):
                     find_unused_parameters=Env.DDP_FIND_UNUSED.value,
                 )
             _validate_ddp_sampler(train_dataloader)
+            # H1-4: the run seed must drive the shuffle (see Engine.fit).
             train_sampler = torch.utils.data.distributed.DistributedSampler(
-                train_dataloader.dataset, shuffle=True, drop_last=True
+                train_dataloader.dataset, shuffle=True, drop_last=True, seed=seed
             )
             train_dataloader = self._with_sampler(train_dataloader, train_sampler)
             if val_dataloader is not None:
-                val_sampler = torch.utils.data.distributed.DistributedSampler(
-                    val_dataloader.dataset, shuffle=False, drop_last=False
+                # H3-3c: DistributedSampler pads a val shard by REPEATING head
+                # samples, which the rank-zero metric merge then counts twice.
+                # The stride partition covers every val sample exactly once
+                # across ranks (empty shards are legitimate — see the class).
+                val_sampler = _StridedValSampler(
+                    len(val_dataloader.dataset),
+                    rank=dataloader_seed_rank(),
+                    world_size=world_size,
                 )
                 val_dataloader = self._with_sampler(val_dataloader, val_sampler)
+            # H3-3h: batch_size=1 under DDP computes every BatchNorm layer's
+            # running statistics from a SINGLE sample per rank. Advisory only
+            # — SyncBN changes the training numerics and must stay an
+            # explicit user conversion.
+            if train_dataloader.batch_size == 1 and any(
+                isinstance(module, nn.modules.batchnorm._BatchNorm)
+                for module in train_model.modules()
+            ):
+                logger.warning(
+                    "Per-device batch_size=1 with BatchNorm layers under "
+                    "DDP: per-rank BN running statistics are computed from "
+                    "a single sample and will be noisy/biased. Consider "
+                    "nn.SyncBatchNorm.convert_sync_batchnorm(model) or a "
+                    "larger per-device batch (no automatic conversion was "
+                    "applied)."
+                )
             logger.info(
                 "Task training in DDP mode: world_size=%d, per-rank batches=%d",
                 world_size, len(train_dataloader),
             )
+
+        # H3-3g: stable identity of the training data spec — snapshotted into
+        # every checkpoint's fit_args and compared on resume (drift warns,
+        # never blocks). ``None`` (no serializable spec) skips the check.
+        data_fingerprint = _dataset_fingerprint(train_dataloader.dataset)
 
         optimizer, scheduler = train_model.get_optimizer(
             total_steps=steps,
@@ -1574,14 +2097,52 @@ class TaskEngine(Engine):
                     engine_state.get("optimizer"),
                 )
             else:
-                train_model.load_state_dict(checkpoint_obj.state_dict)
+                # TRAIN-05: a resumed run whose model configuration changed
+                # gets a named key diff instead of torch's raw dump.
+                _load_state_dict_with_context(
+                    train_model, checkpoint_obj.state_dict, context="resume"
+                )
                 if "optimizer" in engine_state:
                     optimizer.load_state_dict(engine_state["optimizer"])
             if "scheduler" in engine_state:
+                # TRAIN-01 (fit_task visibility): task schedulers are
+                # arbitrary per-model objects, so the shape cannot be
+                # re-derived here the way the pretraining path resets
+                # CosineWarmupScheduler — but the drift is no longer
+                # silent: resuming with an extended ``steps`` under a
+                # schedule whose shape is baked into the state dict gets a
+                # named warning instead of a frozen LR tail.
+                shape_before = {
+                    key: getattr(scheduler, key)
+                    for key in (
+                        "warmup_epochs", "max_epochs", "end_value", "base_lrs",
+                        "warmup_steps", "flat_steps", "no_aug_steps",
+                        "total_steps", "milestones", "min_factor",
+                    )
+                    if hasattr(scheduler, key)
+                }
                 scheduler.load_state_dict(engine_state["scheduler"])
+                drifted = {
+                    key: (value, getattr(scheduler, key, None))
+                    for key, value in shape_before.items()
+                    if getattr(scheduler, key, None) != value
+                }
+                if drifted:
+                    logger.warning(
+                        "Resume scheduler shape drift: %s — the CHECKPOINT's "
+                        "schedule shape governs (load_state_dict replays "
+                        "it); extending steps on resume will NOT extend "
+                        "this scheduler's decay endpoint. Verify the "
+                        "resulting LR curve is intended (TRAIN-01).",
+                        {
+                            key: f"current={current} -> checkpoint={restored}"
+                            for key, (current, restored) in drifted.items()
+                        },
+                    )
             if scaler is not None and "scaler" in engine_state:
                 scaler.load_state_dict(engine_state["scaler"])
-            _restore_rng_state(engine_state.get("rng"))
+            # H3-3a: each rank restores its OWN RNG shard (see Engine._resume).
+            _restore_rng_state(_rng_state_for_this_rank(engine_state))
             resumed_step = int(engine_state.get("step", -1)) + 1
             # Restore the best-metric baseline: without it the first
             # post-resume validation resets tracking and a WORSE metric
@@ -1612,14 +2173,39 @@ class TaskEngine(Engine):
                 train_model.on_load_checkpoint({"ema": engine_state.get("ema")})
             return resumed_step, engine_state
 
+        # H3-3b: the sampler epoch the infinite iterator resumes from.
+        # Old checkpoints without the key start at 0 (previous behavior).
+        sampler_start_epoch = 0
         start_step = 0
         if resume_interrupted:
             if last_path.exists():
                 start_step, resume_state = _restore_last_state()
+                # H3-3g: dataset drift check — loud, never blocking (same
+                # style as the D17 fit-args drift below). Old checkpoints
+                # and datasets without a serializable spec skip the check;
+                # the fingerprint key is popped so the generic D17 check
+                # does not repeat the warning with an opaque hash message.
+                resume_fit_args = dict(resume_state.get("fit_args") or {})
+                checkpoint_fingerprint = resume_fit_args.pop(
+                    "data_fingerprint", None
+                )
+                if (
+                    data_fingerprint is not None
+                    and checkpoint_fingerprint is not None
+                    and checkpoint_fingerprint != data_fingerprint
+                ):
+                    logger.warning(
+                        "Resume dataset drift: the training data differs "
+                        "from the one the checkpoint was trained on "
+                        "(fingerprint %s… vs %s…); the current dataset "
+                        "governs — verify this resume is intended.",
+                        str(checkpoint_fingerprint)[:12],
+                        str(data_fingerprint)[:12],
+                    )
                 # Fit-args drift check (D17): loud, never blocking — the
                 # current call's values govern.
                 check_resume_fit_args(
-                    resume_state.get("fit_args"),
+                    resume_fit_args,
                     steps=steps,
                     precision=precision,
                     gradient_accumulation_steps=gradient_accumulation_steps,
@@ -1629,7 +2215,19 @@ class TaskEngine(Engine):
                     save_every_num_steps=save_every_num_steps,
                     log_every_n_steps=log_every_n_steps,
                 )
+                sampler_start_epoch = int(resume_state.get("sampler_epoch", 0))
                 logger.info("Resumed task training at step %d.", start_step)
+            # TRAIN-03: the ledger runs whether or not THIS rank saw
+            # last.ckpt. A rank that missed the file (non-shared
+            # filesystem) resumes at step 0 with no best baseline while its
+            # peers resume mid-run — the (start_step, best_metric)
+            # MIN/MAX ledger turns that divergence into a named error
+            # instead of a hang in the next collective. A fresh run where
+            # NO rank has a checkpoint is consistent (all zeros/None) and
+            # passes.
+            _verify_resume_consistency(
+                device, world_size, start_step, best_metric
+            )
         elif checkpoint is not None:
             ckpt = Checkpoint.from_path(checkpoint, map_location="cpu")
             if fsdp_train_model is not None:
@@ -1639,18 +2237,30 @@ class TaskEngine(Engine):
                     fsdp_train_model, optimizer, ckpt.state_dict, None
                 )
             else:
-                train_model.load_train_state_dict = getattr(  # hook if available
-                    train_model, "load_train_state_dict", train_model.load_state_dict
+                # TRAIN-05: a warm start whose model configuration changed
+                # (class/query/head count) used to die on torch's raw
+                # "size mismatch" dump; the diff helper names the keys.
+                _load_state_dict_with_context(
+                    train_model, ckpt.state_dict, context="warm start"
                 )
-                train_model.load_train_state_dict(ckpt.state_dict)  # type: ignore[misc]
 
         step_hooks = step_hooks or []
-        infinite_loader = _InfiniteCycleIterator(train_dataloader, sampler=train_sampler)
+        infinite_loader = _InfiniteCycleIterator(
+            train_dataloader,
+            sampler=train_sampler,
+            start_epoch=sampler_start_epoch,
+        )
         train_window = _TrainWindow()
         oom_attempts = 0
         nan_attempts = 0
         stopped_early = False
         last_completed_step = start_step - 1
+        # H3-3f: alerting-only per-step watchdog. 0 (the default) disables
+        # it. This is NOT a cancellation mechanism — a hung step is only
+        # logged; a truly stuck job is failed by the DDP process-group
+        # watchdog (AUTOVISION_DDP_TIMEOUT_SEC) instead.
+        step_timeout_sec = Env.STEP_TIMEOUT_SEC.value
+        step_over_threshold = False
         best_metrics: dict[str, float] = {}
         watch_key = getattr(train_model, "watch_metric", None) or "val_metric/map"
         result = TaskFitResult(out_dir=out_dir, steps_run=0)
@@ -1687,6 +2297,10 @@ class TaskEngine(Engine):
                 # weights first. FSDP shards the live model, so the per-
                 # tensor comparison is skipped there (recorded deviation).
                 _repair_ema_if_present(train_model, allow=fsdp_train_model is None)
+                # H3-3a: the per-rank RNG gather runs on ALL ranks before the
+                # rank-zero gate (it is a collective); one object round trip
+                # per checkpoint write, never per step.
+                rng_per_rank = _gather_per_rank_rng(world_size)
                 # FSDP gathers collectively on every rank; the other ranks
                 # return empty dicts and must not write. Non-FSDP only
                 # materializes the (potentially large) state on rank zero;
@@ -1720,6 +2334,11 @@ class TaskEngine(Engine):
                             # already exhausted its patience survive many
                             # more validations.
                             "no_improve": no_improve,
+                            # H3-3b: the iterator's current sampler epoch so a
+                            # resume continues the shuffle stream instead of
+                            # rewinding it to epoch 0. Old checkpoints lack
+                            # the key and resume at 0, as before.
+                            "sampler_epoch": infinite_loader._epoch,
                             # Fit-args snapshot (D17): the resume path warns
                             # on out-of-whitelist drift against this.
                             "fit_args": {
@@ -1734,15 +2353,25 @@ class TaskEngine(Engine):
                                 "val_every_num_steps": val_every_num_steps,
                                 "save_every_num_steps": save_every_num_steps,
                                 "log_every_n_steps": log_every_n_steps,
+                                # H3-3g: identity of the training data spec
+                                # (None for datasets without a serializable
+                                # spec — the resume check then skips).
+                                "data_fingerprint": data_fingerprint,
                             },
                         }
+                        if rng_per_rank is not None:
+                            engine_state["rng_per_rank"] = rng_per_rank
                         if "ema" in checkpoint_dict:
                             engine_state["ema"] = checkpoint_dict["ema"]
                         if scaler is not None:
                             engine_state["scaler"] = scaler.state_dict()
                         metadata = CheckpointMetadata(
                             epoch=step,
+                            # TRAIN-09: ``epoch`` historically carries the
+                            # step for task checkpoints; ``step`` is the
+                            # unambiguous field for new consumers.
                             global_step=step,
+                            step=step,
                             normalize_args=normalize_args,
                             engine_state=engine_state,
                         )
@@ -1785,17 +2414,26 @@ class TaskEngine(Engine):
                 # Full FSDP state keys are ``model.*``; the task-model
                 # loaders accept that prefix.
                 export_state = state if state is not None else last_full_state or {}
-            torch.save(
-                {
-                    "schema_version": 1,
-                    "kind": "task_model",
-                    "model_class_path": model_class_path,
-                    "model_init_args": model_init_args or {},
-                    "train_model": export_state,
-                    "normalize_args": normalize_args,
-                    "version": __import__("autovision", fromlist=["__version__"]).__version__,
-                },
+            # H1-5: publish through the same tmp + fsync + os.replace path
+            # as checkpoints — a failed write (disk full, permissions) must
+            # never leave a half-written export on the final path while the
+            # other ranks wait on the process group.
+            _write_atomic(
                 path,
+                lambda tmp: torch.save(
+                    {
+                        "schema_version": 1,
+                        "kind": "task_model",
+                        "model_class_path": model_class_path,
+                        "model_init_args": model_init_args or {},
+                        "train_model": export_state,
+                        "normalize_args": normalize_args,
+                        "version": __import__(
+                            "autovision", fromlist=["__version__"]
+                        ).__version__,
+                    },
+                    tmp,
+                ),
             )
             return path
 
@@ -1822,7 +2460,17 @@ class TaskEngine(Engine):
             # D32: while (not for) so NaN recovery can rewind `step` and
             # re-run from the last checkpoint's step.
             step = start_step
+            if start_step >= steps:
+                # TRAIN-12: resuming a completed run used to return a
+                # zero-step result with no hint why; name the condition and
+                # the way out.
+                logger.info(
+                    "Run already completed %d step(s) (steps=%d) — nothing "
+                    "to train; pass a larger steps= to extend the schedule.",
+                    start_step, steps,
+                )
             while step < steps:
+                step_started = time.perf_counter()
                 with otel_span("engine.step", {"step": step}):
                     for hook in step_hooks:
                         hook.set_step(step)
@@ -1871,7 +2519,6 @@ class TaskEngine(Engine):
                             else nullcontext()
                         )
                         optimizer.zero_grad(set_to_none=True)
-                        accumulated_loss = 0.0
                         for accumulation_index in range(gradient_accumulation_steps):
                             batch_i = (
                                 self._to_device(next(infinite_loader), device)
@@ -1903,7 +2550,6 @@ class TaskEngine(Engine):
                                 loss.backward()
                             # Kept on-device: one sync at logging time instead
                             # of one per microbatch.
-                            accumulated_loss = accumulated_loss + step_result.loss.detach()
                         # D32: window-level corruption verdict. Single-process
                         # checks locally; under DDP a 4-byte MIN-reduce (the
                         # grad reduction already synchronized the ranks this
@@ -2045,13 +2691,37 @@ class TaskEngine(Engine):
                             train_dataloader, halved
                         )
                         infinite_loader = _InfiniteCycleIterator(
-                            train_dataloader, sampler=train_sampler
+                            train_dataloader,
+                            sampler=train_sampler,
+                            # H3-3b: a rebuilt iterator must not rewind the
+                            # shuffle to epoch 0 mid-run — continue the cycle
+                            # the previous iterator was in.
+                            start_epoch=infinite_loader._epoch,
                         )
                         optimizer.zero_grad(set_to_none=True)
                         # The while loop advances only at its bottom; the
                         # skipped step must increment explicitly here.
                         step += 1
                         continue
+                # H3-3f: the watchdog window covers the training compute only
+                # (dataload → optimizer step); periodic validation and
+                # checkpoint/export I/O are excluded — they legitimately run
+                # minutes and have their own progress signals. Edge-triggered:
+                # one warning when a step ENTERS the over-threshold state,
+                # silence while consecutive steps stay over it, and a new
+                # warning only after a step returns under the threshold.
+                if step_timeout_sec > 0:
+                    elapsed = time.perf_counter() - step_started
+                    over = elapsed > step_timeout_sec
+                    if over and not step_over_threshold:
+                        logger.warning(
+                            "Step %d took %.2fs, above the step watchdog "
+                            "threshold of %.2fs "
+                            "(AUTOVISION_STEP_TIMEOUT_SEC; alerting only — "
+                            "the step is NOT cancelled).",
+                            step + 1, elapsed, step_timeout_sec,
+                        )
+                    step_over_threshold = over
                 if (
                     fsdp_train_model is not None
                     and getattr(train_model, "ema_model", None) is not None
@@ -2122,12 +2792,26 @@ class TaskEngine(Engine):
                 )
                 if is_save_step or (is_last_step and save_last):
                     save_checkpoint(step, "last")
+                    # H1-5: the export runs on rank zero only, so its failure
+                    # must reach the other ranks through the write barrier
+                    # instead of letting them hang on the next collective.
+                    last_export_ok = True
+                    last_export_error: Exception | None = None
                     if is_rank_zero:
-                        result.checkpoint_path = out_dir / "checkpoints" / "last.ckpt"
-                        result.exported_model_path = export_weights(
-                            step, "last", last_full_state
-                        )
-                        logger.info("Saved last checkpoint at step %d.", step + 1)
+                        try:
+                            result.checkpoint_path = (
+                                out_dir / "checkpoints" / "last.ckpt"
+                            )
+                            result.exported_model_path = export_weights(
+                                step, "last", last_full_state
+                            )
+                            logger.info("Saved last checkpoint at step %d.", step + 1)
+                        except Exception as error:  # noqa: BLE001 - via barrier
+                            last_export_ok = False
+                            last_export_error = error
+                    _rank_zero_write_barrier(device, world_size, last_export_ok)
+                    if last_export_error is not None:
+                        raise last_export_error
 
                 # One validation ahead of schedule (D17 possible_stop): when
                 # exactly one non-improving validation short of the patience
@@ -2180,7 +2864,14 @@ class TaskEngine(Engine):
                                 val_batch = self._to_device(val_batch, device)
                                 val_result = train_model.validation_step(val_batch, step)
                                 val_losses.append(float(val_result.loss.detach()))
-                        val_loss = sum(val_losses) / len(val_losses) if val_losses else 0.0
+                        # H3-3d: keep the raw sum/count so the cross-rank
+                        # merge can weight by batch count instead of ranking
+                        # an empty shard's phantom 0.0 loss.
+                        val_loss_sum = float(sum(val_losses))
+                        val_loss_count = len(val_losses)
+                        val_loss = (
+                            val_loss_sum / val_loss_count if val_loss_count else 0.0
+                        )
                         if world_size > 1:
                             # Gather per-rank metric state; the metric is computed
                             # once on rank zero over the union of all predictions.
@@ -2196,9 +2887,13 @@ class TaskEngine(Engine):
                                     train_model.merge_metric_state("val", rank_state)
                             else:
                                 train_model.reset_metrics("val")
-                            loss_tensor = torch.tensor([val_loss], device=device)
-                            torch.distributed.all_reduce(loss_tensor)
-                            val_loss = float(loss_tensor.item()) / world_size
+                            # H3-3d: reduce numerator and denominator
+                            # separately — a rank with zero val batches (its
+                            # shard is smaller than the val batch size) must
+                            # not dilute the global mean with a 0.0 loss.
+                            val_loss = _merge_ranked_val_loss(
+                                val_loss_sum, val_loss_count, device
+                            )
                         if not math.isfinite(val_loss):
                             # D32 boundary: a non-finite VALIDATION loss is a
                             # measurement-side fault (training windows verify
@@ -2299,13 +2994,26 @@ class TaskEngine(Engine):
                                 # engine_state lags its own validation (the
                                 # final save precedes it), so the freshest
                                 # baseline lives here, written at each improve.
+                                # TRAIN-04: same tmp + fsync + os.replace
+                                # discipline as every durable artifact — a
+                                # crash mid-write must not leave a torn JSON
+                                # for the resume reader to choke on (its
+                                # reader tolerates it, but the baseline loss
+                                # would silently reset best tracking).
                                 sidecar = out_dir / "checkpoints" / "best_metric.json"
                                 sidecar.parent.mkdir(parents=True, exist_ok=True)
-                                sidecar.write_text(
-                                    json.dumps(
-                                        {"best_metric": watch_value, "step": step + 1}
+
+                                def _write_sidecar(tmp: Path) -> None:
+                                    tmp.write_text(
+                                        json.dumps(
+                                            {
+                                                "best_metric": watch_value,
+                                                "step": step + 1,
+                                            }
+                                        )
                                     )
-                                )
+
+                                _write_atomic(sidecar, _write_sidecar)
                             except Exception as error:  # noqa: BLE001
                                 export_ok = False
                                 export_error = error
@@ -2322,6 +3030,11 @@ class TaskEngine(Engine):
                             last_completed_step = step
                             if save_last:
                                 save_checkpoint(step, "last")
+                            # H1-5: same failure propagation as the best /
+                            # scheduled exports — the early-stop export is
+                            # rank-zero-only and must not strand its peers.
+                            stop_export_ok = True
+                            stop_export_error: Exception | None = None
                             if is_rank_zero:
                                 logger.info(
                                     "Early stopping at step %d: %s did not "
@@ -2332,15 +3045,24 @@ class TaskEngine(Engine):
                                 # Persist the latest weights even when this is
                                 # not a scheduled save step (unless the user
                                 # disabled last-checkpoint retention).
-                                if save_last:
-                                    result.checkpoint_path = out_dir / "checkpoints" / "last.ckpt"
-                                    result.exported_model_path = export_weights(
-                                        step, "last", last_full_state
-                                    )
+                                try:
+                                    if save_last:
+                                        result.checkpoint_path = (
+                                            out_dir / "checkpoints" / "last.ckpt"
+                                        )
+                                        result.exported_model_path = export_weights(
+                                            step, "last", last_full_state
+                                        )
+                                except Exception as error:  # noqa: BLE001 - via barrier
+                                    stop_export_ok = False
+                                    stop_export_error = error
                                 _invoke(
                                     "on_early_stop",
                                     step + 1, best_metric, no_improve,
                                 )
+                            _rank_zero_write_barrier(device, world_size, stop_export_ok)
+                            if stop_export_error is not None:
+                                raise stop_export_error
                             train_model.train()
                             break
                     train_model.train()
@@ -2367,21 +3089,3 @@ class TaskEngine(Engine):
         if is_rank_zero_run:
             _invoke("on_train_end", result)
         return result
-
-    @staticmethod
-    def _with_sampler(loader: DataLoader, sampler: Any) -> DataLoader:
-        """Rebuild ``loader`` with a distributed sampler (same semantics)."""
-        return DataLoader(
-            loader.dataset,
-            batch_size=loader.batch_size,
-            sampler=sampler,
-            shuffle=False,
-            num_workers=loader.num_workers,
-            worker_init_fn=loader.worker_init_fn,
-            generator=loader.generator,
-            drop_last=loader.drop_last,
-            collate_fn=loader.collate_fn,
-            timeout=loader.timeout,
-            pin_memory=loader.pin_memory,
-            persistent_workers=loader.persistent_workers,
-        )

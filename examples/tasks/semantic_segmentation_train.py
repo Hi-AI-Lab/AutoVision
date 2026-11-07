@@ -33,7 +33,7 @@ def main() -> None:
 
     data = args.data or semantic_demo(demo_root(args, "semantic_segmentation"))
     if args.dry_run:
-        dry_run("semantic_segmentation", data)
+        dry_run("semantic_segmentation", data, args)
         return
     ensure_out_available(args.out, overwrite=args.overwrite)
     gtr_requirement()

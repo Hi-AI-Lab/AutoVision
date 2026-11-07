@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -166,7 +167,7 @@ def benchmark_inference(
         images_per_sec=batch_size * steps / total,
         latency_ms_mean=sum(latencies_ms) / len(latencies_ms),
         latency_ms_p50=latencies_ms[max(0, (len(latencies_ms) + 1) // 2 - 1)],
-        latency_ms_p90=latencies_ms[int(len(latencies_ms) * 0.9)],
+        latency_ms_p90=latencies_ms[max(0, math.ceil(0.9 * len(latencies_ms)) - 1)],
         extra=extra,
     )
     logger.info(
@@ -470,13 +471,13 @@ def _normalize_backends(
         raise ValueError(
             f"Unknown backends: {sorted(unknown)}. Supported: {list(_BACKEND_KEYS)}"
         )
-    normalized: dict[str, BackendArgs] = {}
     args_classes: dict[str, type] = {
         "torch": TorchBackendArgs,
         "onnx": ONNXBackendArgs,
         "tensorrt": TensorRTBackendArgs,
         "openvino": OpenVINOBackendArgs,
     }
+    normalized: dict[str, Any] = {}
     for key, value in backends.items():
         args_cls = args_classes[key]
         if isinstance(value, args_cls):
@@ -763,7 +764,7 @@ def _result_from_timings(
         images_per_sec=batch_size * len(latencies) / sum(latencies),
         latency_ms_mean=sum(latencies_ms) / len(latencies_ms),
         latency_ms_p50=latencies_ms[max(0, (len(latencies_ms) + 1) // 2 - 1)],
-        latency_ms_p90=latencies_ms[int(len(latencies_ms) * 0.9)],
+        latency_ms_p90=latencies_ms[max(0, math.ceil(0.9 * len(latencies_ms)) - 1)],
         extra={"backend": backend, "precision": precision},
     )
 

@@ -99,7 +99,14 @@ def _write_atomic(path: Path, payload_writer: Callable[[Path], None]) -> None:
 
 @dataclass
 class CheckpointMetadata:
-    """Framework metadata embedded in every checkpoint."""
+    """Framework metadata embedded in every checkpoint.
+
+    ``epoch`` semantic note (TRAIN-09): the pretraining engine stores a
+    0-based epoch here, while fit_task reuses the field for its 0-based
+    STEP (the loop counter it resumes from). Consumers that need the
+    unambiguous value should prefer ``step`` for task checkpoints; the
+    field is ``None`` for checkpoints written before it existed.
+    """
 
     version: str = __version__
     date: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -108,6 +115,7 @@ class CheckpointMetadata:
     epoch: int = -1
     global_step: int = -1
     engine_state: dict[str, Any] = field(default_factory=dict)
+    step: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -118,6 +126,7 @@ class CheckpointMetadata:
             "epoch": self.epoch,
             "global_step": self.global_step,
             "engine_state": self.engine_state,
+            "step": self.step,
         }
 
     @classmethod

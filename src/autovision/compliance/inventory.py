@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any
 
 from autovision._version import __version__
-from autovision.errors import AutoVisionError
 from autovision.registry.model_card import load_model_card
 
 __all__ = ["dataset_inventory", "framework_inventory", "model_inventory"]
@@ -55,7 +54,16 @@ def model_inventory(
         return None, []
     path = Path(model)
     if not path.is_file():
-        raise AutoVisionError(f"Model file not found: '{path}'.")
+        # METRIC audit P3-21: a missing model file used to abort the whole
+        # compliance report; a missing input is an ISSUE to report, exactly
+        # like the missing-snapshot info entry beside it.
+        return None, [
+            {
+                "severity": "error",
+                "kind": "missing_model_file",
+                "detail": f"Model file not found: '{path}'.",
+            }
+        ]
     entry: dict[str, Any] = {
         "path": str(path),
         "sha256": _sha256(path),
@@ -126,11 +134,24 @@ def dataset_inventory(
     try:
         payload = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as error:
-        raise AutoVisionError(
-            f"Cannot read dataset snapshot '{path}': {error}"
-        ) from error
+        # METRIC audit P3-21: parity with the missing-snapshot info entry —
+        # a CORRUPT snapshot is exactly the case that belongs in the issue
+        # list, not a bare raise that killed the whole report.
+        return None, [
+            {
+                "severity": "error",
+                "kind": "unreadable_dataset_snapshot",
+                "detail": f"Cannot read dataset snapshot '{path}': {error}",
+            }
+        ]
     if not isinstance(payload, dict):
-        raise AutoVisionError("Dataset snapshot must be a JSON object.")
+        return None, [
+            {
+                "severity": "error",
+                "kind": "invalid_dataset_snapshot",
+                "detail": "Dataset snapshot must be a JSON object.",
+            }
+        ]
     issues: list[dict[str, str]] = []
     try:
         from autovision.data.versioning import verify_dataset_snapshot

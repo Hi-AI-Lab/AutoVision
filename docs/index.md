@@ -1,7 +1,7 @@
 # AutoVision
 
 企业级视觉模型训练框架：**自监督预训练 / 蒸馏 → 微调 → 评测 → 导出**一条链走完。
-Python API 与 `autovision-cli`（30 条命令）共享同一套 Pydantic 严格校验，覆盖
+Python API 与 `autovision-cli`（31 条命令）共享同一套 Pydantic 严格校验，覆盖
 检测、旋转框、实例 / 全景 / 语义分割、姿态、深度、分类的完整任务面。
 
 框架的三条差异化主线：

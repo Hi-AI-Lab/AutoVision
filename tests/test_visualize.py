@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import pytest
 import torch
 from PIL import Image
 
+from autovision.errors import AutoVisionError, ConfigValidationError
 from autovision.inference import InferenceResult
 from autovision.visualize import draw_prediction
 from autovision.visualize.annotators import (
@@ -18,6 +21,7 @@ from autovision.visualize.annotators import (
     PanopticAnnotator,
     PolygonAnnotator,
     SemanticMaskAnnotator,
+    _label_text,
     annotate_result,
 )
 
@@ -113,6 +117,54 @@ class TestAnnotatorLayers:
         rendered = PanopticAnnotator().annotate(image, result)
         assert _changed(_base(), rendered)
         assert tuple(np.asarray(rendered)[10, 32]) == (255, 255, 255)
+
+
+class TestAnnotatorHardening:
+    def test_mask_annotator_resizes_mismatched_masks(self, caplog) -> None:
+        """H3-1i: 网络分辨率 mask 栈在源分辨率帧上仍被渲染，并记一次 debug 日志。"""
+        caplog.set_level(logging.DEBUG, logger="autovision.visualize.annotators")
+        masks = torch.zeros(1, 32, 32, dtype=torch.bool)
+        masks[0, 5:27, 5:27] = True
+        result = InferenceResult(
+            bboxes=torch.tensor([[10, 10, 50, 50]], dtype=torch.float32),
+            scores=torch.tensor([0.9]),
+            labels=torch.tensor([0]),
+            masks=masks,
+        )
+        rendered = MaskAnnotator().annotate(_base(), result)
+        assert _changed(_base(), rendered)
+        assert tuple(np.asarray(rendered)[30, 30]) != (0, 0, 0)
+        debug_records = [
+            record
+            for record in caplog.records
+            if record.name == "autovision.visualize.annotators"
+            and record.levelno == logging.DEBUG
+        ]
+        assert len(debug_records) == 1
+
+    def test_nan_score_renders_as_n_a(self) -> None:
+        """H3-1j: NaN 分数渲染 "cat n/a" 而非 "cat nan"，有限分数格式不变。"""
+        nan_result = InferenceResult(
+            bboxes=torch.tensor([[10, 10, 50, 50]], dtype=torch.float32),
+            scores=torch.tensor([float("nan")]),
+            labels=torch.tensor([1]),
+        )
+        assert _label_text(nan_result, 0, {1: "cat"}) == "cat n/a"
+        finite_result = InferenceResult(
+            bboxes=torch.tensor([[10, 10, 50, 50]], dtype=torch.float32),
+            scores=torch.tensor([0.9]),
+            labels=torch.tensor([1]),
+        )
+        assert _label_text(finite_result, 0, {1: "cat"}) == "cat 0.90"
+        rendered = annotate_result(_base(), nan_result, class_names={1: "cat"})
+        assert _changed(_base(), rendered)
+
+    def test_invalid_skeleton_raises_config_validation_error(self) -> None:
+        """H3-1h: annotator 构造参数校验抛 ConfigValidationError 具体子类。"""
+        with pytest.raises(ConfigValidationError, match="Unknown skeleton"):
+            KeypointAnnotator(skeleton="not-a-skeleton")
+        with pytest.raises(AutoVisionError, match="zero-based"):
+            KeypointAnnotator(skeleton=[(0, -1)])
 
 
 class TestDrawPredictionDispatch:

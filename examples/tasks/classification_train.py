@@ -30,7 +30,7 @@ def main() -> None:
 
     data = args.data or classification_demo(demo_root(args, "classification"))
     if args.dry_run:
-        dry_run("classification", data)
+        dry_run("classification", data, args)
         return
     ensure_out_available(args.out, overwrite=args.overwrite)
 

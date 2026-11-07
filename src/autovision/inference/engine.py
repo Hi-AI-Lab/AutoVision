@@ -12,17 +12,31 @@ re-implemented.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Sequence
 
 import torch
 
 from autovision.errors import AutoVisionError
+from autovision.keys import (
+    BBOXES,
+    DEPTH,
+    KEYPOINTS,
+    LABELS,
+    MASK,
+    MASKS,
+    POLYGONS,
+    SCORES,
+    SEGMENT_IDS,
+)
 from autovision.tasks.task_model import TaskNetwork
 from autovision.tasks.task_model_helpers import load_task_model
 from autovision.types import PathLike
 
 __all__ = ["InferenceEngine"]
+
+logger = logging.getLogger("autovision.inference.engine")
 
 _BACKENDS = ("torch", "onnx", "tensorrt", "openvino")
 
@@ -37,6 +51,12 @@ class InferenceEngine:
     backend mirrors the export-path reference semantics (``eval`` +
     ``deploy`` hooks), so its outputs sit inside the same numerical band as
     the exported graph.
+
+    ``require_metadata=True`` (INFER-04, review P3-6) refuses artifacts
+    that carry no AutoVision identity metadata — for the torch backend the
+    whole metadata block is skipped and the flag is a no-op. The CLI
+    predict and serving entry points pass ``True``; library callers keep
+    the lenient default (warning only).
     """
 
     def __init__(
@@ -48,6 +68,7 @@ class InferenceEngine:
         device: str | torch.device | None = None,
         providers: Sequence[str] | None = None,
         openvino_device: str = "CPU",
+        require_metadata: bool = False,
     ) -> None:
         if backend not in _BACKENDS:
             raise AutoVisionError(
@@ -70,13 +91,46 @@ class InferenceEngine:
         self.artifact = Path(artifact) if artifact is not None else None
         self.openvino_device = openvino_device if backend == "openvino" else None
 
+        if backend != "torch" and self.artifact is not None and (
+            not self.artifact.exists()
+        ):
+            # Examples-review P2: the identity metadata gate below used to
+            # warn FIRST for a non-existent artifact ("carries no metadata
+            # — construction proceeds"), followed only then by the real
+            # "artifact does not exist" error from the forward factory —
+            # the scary wrong message before the useful one. Existence is
+            # checked before anything that reads the file.
+            raise AutoVisionError(
+                f"The {backend} artifact does not exist: '{self.artifact}'."
+            )
+
         if backend != "torch":
             # Identity gate (design D1): the artifact must have been
             # exported from THIS network. Legacy artifacts without
-            # metadata pass through unchanged.
-            from autovision.export.artifact_metadata import verify_engine_artifact
+            # metadata pass through unchanged — unless the caller runs a
+            # production entry point (INFER-04): ``require_metadata=True``
+            # refuses metadata-stripped artifacts outright, because the
+            # identity gate is otherwise vacuous for them.
+            from autovision.export.artifact_metadata import (
+                read_metadata,
+                verify_engine_artifact,
+            )
 
+            assert self.artifact is not None  # the guard above rejects None
             verify_engine_artifact(self.network, self.artifact, backend=backend)
+            if read_metadata(self.artifact, backend=backend) == {}:
+                message = (
+                    f"The {backend} artifact '{self.artifact}' carries no "
+                    "AutoVision identity metadata — re-export it from this "
+                    "network (export verify=True writes the metadata)."
+                )
+                if require_metadata:
+                    raise AutoVisionError(message)
+                logger.warning(
+                    "%s Construction proceeds without the identity gate "
+                    "(pass require_metadata=True to refuse such artifacts).",
+                    message,
+                )
 
         if backend == "torch":
             if device is not None:
@@ -112,6 +166,7 @@ class InferenceEngine:
         import numpy as np
         import onnxruntime as ort
 
+        assert self.artifact is not None  # the constructor guard guarantees it
         if not self.artifact.exists():
             raise AutoVisionError(f"ONNX artifact does not exist: '{self.artifact}'.")
         session = ort.InferenceSession(
@@ -145,6 +200,7 @@ class InferenceEngine:
     def _make_openvino_forward(self, openvino_device: str):
         from autovision.export.openvino_helpers import OpenVINOEngineRunner
 
+        assert self.artifact is not None  # the constructor guard guarantees it
         if self.artifact.suffix.lower() != ".xml":
             raise AutoVisionError(
                 "The OpenVINO backend needs an .xml IR artifact (and its "
@@ -164,6 +220,7 @@ class InferenceEngine:
     def _make_tensorrt_forward(self, device: str | torch.device | None):
         from autovision.export.tensorrt_helpers import TensorRTEngineRunner
 
+        assert self.artifact is not None  # the constructor guard guarantees it
         if not self.artifact.exists():
             raise AutoVisionError(
                 f"TensorRT artifact does not exist: '{self.artifact}'."
@@ -192,7 +249,20 @@ class InferenceEngine:
         accepts: paths, PIL images, or CHW tensors. Pre/post-processing is
         the network's own (same as evaluation); only the forward differs
         per backend.
+
+        Output contract (INFER-05): the backend returns exactly one record
+        per input, and every record carries at least one canonical
+        ``autovision.keys`` field — a backend graph whose output layout
+        disagrees with the torch reference used to surface as silently
+        wrong coordinates or an opaque error deep inside postprocess; both
+        now fail here with the backend named.
         """
+        if len(images) == 0:
+            # INFER-09: an empty batch used to die on a bare
+            # "stack expects a non-empty TensorList" RuntimeError.
+            raise AutoVisionError(
+                "run_batch received an empty image list; nothing to infer."
+            )
         tensors, metadata = [], []
         for image in images:
             tensor, meta = self.network.preprocess_image(image)
@@ -200,7 +270,37 @@ class InferenceEngine:
             metadata.append(meta)
         batch = self.network.preprocess_batch(torch.stack(tensors))
         raw = self._forward(batch)
-        return self.network.postprocess(raw, metadata, threshold=threshold)
+        records = self.network.postprocess(raw, metadata, threshold=threshold)
+        if len(records) != len(images):
+            raise AutoVisionError(
+                f"The {self.backend} backend returned {len(records)} "
+                f"record(s) for {len(images)} input image(s) — the graph's "
+                "output layout disagrees with the torch reference; "
+                "re-export the artifact or check the postprocess contract."
+            )
+        # INFER-05 (review P3-2): the known-key set comes from keys.py —
+        # the same contract the consumers use — so a new canonical key can
+        # never be wrongly rejected here. An EMPTY record is equally a
+        # layout failure: it means postprocess returned nothing usable.
+        known = {
+            BBOXES, SCORES, LABELS, MASKS, KEYPOINTS, POLYGONS,
+            MASK, DEPTH, SEGMENT_IDS,
+        }
+        for index, record in enumerate(records):
+            if not isinstance(record, dict):
+                raise AutoVisionError(
+                    f"The {self.backend} backend's postprocess returned "
+                    f"{type(record).__name__} at position {index}; expected "
+                    "a dict record (INFER-05)."
+                )
+            if not (set(record) & known):
+                raise AutoVisionError(
+                    f"The {self.backend} backend's postprocess record at "
+                    f"position {index} carries none of the canonical "
+                    f"result keys (got {sorted(record)}) — the output "
+                    "layout disagrees with the torch reference (INFER-05)."
+                )
+        return records
 
     def run(self, image: Any, *, threshold: float = 0.5) -> dict[str, Any]:
         """Single-image convenience (see :meth:`run_batch`)."""

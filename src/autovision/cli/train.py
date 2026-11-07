@@ -24,7 +24,7 @@ from autovision.encoders import FeatureExtractor, get_wrapped_model
 from autovision.engine import Engine, seed_everything
 from autovision.pretext.teachers import get_method_cls
 from autovision.runtime.accelerator import accelerator_supports_bf16
-from autovision.runtime.checkpoint import CheckpointMetadata
+from autovision.runtime.checkpoint import CheckpointMetadata, _write_atomic
 from autovision.runtime.distributed import is_global_rank_zero
 from autovision.runtime.logging import set_up_file_logging
 from autovision.types import PathLike
@@ -36,6 +36,43 @@ logger = logging.getLogger("autovision")
 
 def _is_rank_zero() -> bool:
     return int(os.getenv("WORLD_SIZE", "1")) <= 1 or is_global_rank_zero()
+
+
+def _export_embedding_model(
+    out_dir: Path,
+    embedding_model,
+    *,
+    model_name: str | None,
+    normalize_args: dict,
+) -> Path:
+    """Publish the embedding model export through the atomic write path.
+
+    TRAIN-02: same tmp + fsync + os.replace discipline as the task export
+    (H1-5) — a killed pretraining process must not leave a half-written
+    ``exported_last.pt`` on the final path, and a failed write keeps the
+    previous export byte-identical. Extracted as a helper so the failure
+    semantics are unit-testable without a full pretrain run.
+    """
+    exported_dir = out_dir / "exported_models"
+    exported_dir.mkdir(parents=True, exist_ok=True)
+    exported_path = exported_dir / "exported_last.pt"
+    _write_atomic(
+        exported_path,
+        lambda tmp: torch.save(
+            {
+                "schema_version": 1,
+                "kind": "embedding_model",
+                "model_name": model_name,
+                "embed_dim": embedding_model.embed_dim,
+                "state_dict": embedding_model.state_dict(),
+                "normalize_args": normalize_args,
+                "version": CheckpointMetadata().version,
+                "license_info": LICENSE_INFO,
+            },
+            tmp,
+        ),
+    )
+    return exported_path
 
 
 def _coerce_path(value: Any) -> Any:
@@ -85,7 +122,8 @@ class PretrainResult:
     epochs_run: int
     global_step: int
     checkpoint_path: Path
-    exported_model_path: Path
+    # ``None`` on non-zero DDP ranks (only rank zero writes the export).
+    exported_model_path: Path | None
     metrics: dict[str, float] | None = None
 
 
@@ -329,21 +367,11 @@ def train_from_config(config: PretrainConfig) -> PretrainResult:
     # 12. export (rank zero)
     exported_path = None
     if _is_rank_zero():
-        exported_dir = out_dir / "exported_models"
-        exported_dir.mkdir(parents=True, exist_ok=True)
-        exported_path = exported_dir / "exported_last.pt"
-        torch.save(
-            {
-                "schema_version": 1,
-                "kind": "embedding_model",
-                "model_name": config.model if isinstance(config.model, str) else None,
-                "embed_dim": embedding_model.embed_dim,
-                "state_dict": embedding_model.state_dict(),
-                "normalize_args": transform_args.normalize.to_dict(),
-                "version": CheckpointMetadata().version,
-                "license_info": LICENSE_INFO,
-            },
-            exported_path,
+        exported_path = _export_embedding_model(
+            out_dir,
+            embedding_model,
+            model_name=config.model if isinstance(config.model, str) else None,
+            normalize_args=transform_args.normalize.to_dict(),
         )
         fit_result.exported_model_path = exported_path
         logger.info("Exported model to '%s'.", exported_path)

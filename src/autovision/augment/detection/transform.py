@@ -245,6 +245,7 @@ class RTDETRDetectionTransform:
         )
         boxes_out: list[torch.Tensor] = []
         classes_out: list[torch.Tensor] = []
+        crowds_out: list[torch.Tensor] = []
         for index, (sample, image) in enumerate(zip(tiles, resized)):
             row, col = divmod(index, 2)
             y0, x0 = row * max_h, col * max_w
@@ -262,10 +263,19 @@ class RTDETRDetectionTransform:
             scaled[:, [1, 3]] += y0
             boxes_out.append(scaled)
             classes_out.append(sample["classes"])
+            crowds = sample.get("iscrowds")
+            if crowds is None:
+                crowds = torch.zeros(sample["classes"].shape[0], dtype=torch.long)
+            crowds_out.append(crowds)
         merged = (
             torch.cat(boxes_out, dim=0)
             if boxes_out
             else torch.zeros(0, 4)
+        )
+        merged_crowds = (
+            torch.cat(crowds_out, dim=0)
+            if crowds_out
+            else torch.zeros(0, dtype=torch.long)
         )
         merged_classes = (
             torch.cat(classes_out, dim=0)
@@ -309,6 +319,8 @@ class RTDETRDetectionTransform:
         )
         merged = merged[keep]
         merged_classes = merged_classes[keep]
+        if merged_crowds is not None:
+            merged_crowds = merged_crowds[keep]
 
         merged_boxes = tv_tensors.BoundingBoxes(
             merged, format="XYXY", canvas_size=(canvas.shape[1], canvas.shape[2])
@@ -318,6 +330,9 @@ class RTDETRDetectionTransform:
             "image": canvas,
             "bboxes": merged_boxes,
             "classes": merged_classes,
+            # METRIC-03: crowd flags ride every output path (the mAP
+            # evaluator ignores crowd GT under the official protocol).
+            "iscrowds": merged_crowds,
             "original_size": item["original_size"],
         }
 
@@ -354,12 +369,30 @@ class RTDETRDetectionTransform:
             item = self._build_mosaic(item)
         image: torch.Tensor = item["image"]
         boxes: tv_tensors.BoundingBoxes = item["bboxes"]
+        crowds = item.get("iscrowds")
+        if crowds is None:
+            crowds = torch.zeros(boxes.shape[0], dtype=torch.long)
         transformed = self.compose.compose_for(mosaic_sample)(
-            {"image": image, "boxes": boxes, "labels": item["classes"]}
+            {
+                "image": image,
+                "boxes": boxes,
+                "labels": item["classes"],
+                # METRIC-03: carrying crowds through the v2 payload keeps the
+                # SanitizeBoundingBoxes alignment under box removal (plain
+                # keys pass through the compose untouched).
+                "iscrowds": crowds,
+            }
         )
         image_out = transformed["image"]
         boxes_out: tv_tensors.BoundingBoxes = transformed["boxes"]
         labels_out = transformed["labels"]
+        crowds_out = transformed.get("iscrowds")
+        if crowds_out is None:
+            # A compose variant that dropped plain keys: realign to the
+            # surviving boxes (over-truncate, never misalign).
+            crowds_out = crowds[: boxes_out.shape[0]]
+        if crowds_out.shape[0] != boxes_out.shape[0]:
+            crowds_out = crowds_out[: boxes_out.shape[0]]
         # Back to normalized cxcywh for the criterion.
         _, height, width = image_out.shape
         boxes_out = boxes_out.to(torch.float32)
@@ -396,6 +429,8 @@ class RTDETRDetectionTransform:
             "image": image_out,
             "bboxes": bboxes_norm,
             "classes": labels_out,
+            # METRIC-03: crowd flags ride every output path.
+            "iscrowds": crowds_out,
             "original_size": item["original_size"],
         }
 

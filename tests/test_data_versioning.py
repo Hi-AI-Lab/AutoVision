@@ -273,3 +273,61 @@ class TestSnapshotCli:
         runner = CliRunner()
         assert runner.invoke(app, ["data-snapshot"]).exit_code != 0
         assert runner.invoke(app, ["data-snapshot", "data=/tmp/x"]).exit_code != 0
+
+
+class TestSnapshotHardening:
+    """H3-2h: racing files and non-atomic writes must fail loud and clean."""
+
+    def test_file_deleted_during_scan_fails_loud(self, tmp_path, monkeypatch):
+        """H3-2h: a file that vanishes between the rglob enumeration and the
+        stat raises AutoVisionError naming the path — not a bare OSError
+        (the deterministic seam for the deletion race)."""
+        from autovision.data import versioning
+
+        data_root = tmp_path / "data"
+        spec = _tree(data_root)
+        out = tmp_path / "snap.json"
+        original_iter_files = versioning._iter_files
+
+        def vanish_then_list(root):
+            """Enumerate, then delete one image (the race window)."""
+            paths = original_iter_files(root)
+            if root.is_dir():
+                victim = next((data_root / "images").glob("img_1.*"))
+                victim.unlink()
+            return paths
+
+        monkeypatch.setattr(versioning, "_iter_files", vanish_then_list)
+        with pytest.raises(AutoVisionError, match="img_1") as excinfo:
+            dataset_snapshot(spec, out)
+        assert str(data_root / "images") in str(excinfo.value)
+        assert not list(tmp_path.glob("*.tmp"))
+
+    def test_snapshot_writes_are_atomic_and_leave_no_tmp(self, tmp_path):
+        """H3-2h: the snapshot JSON is published via tmp + os.replace — a
+        successful write leaves no .tmp residue and the payload loads."""
+        spec = _tree(tmp_path / "data")
+        out = tmp_path / "snap.json"
+        payload = dataset_snapshot(spec, out)
+        assert out.is_file()
+        assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+        assert load_snapshot(out)["kind"] == "autovision-dataset-snapshot"
+        assert payload["splits"]["train"]["files"] == 4
+
+    def test_failed_atomic_write_keeps_previous_snapshot_and_no_tmp(
+        self, tmp_path, monkeypatch
+    ):
+        """H3-2h: a failing publish (e.g. ENOSPC at os.replace) surfaces as
+        AutoVisionError, leaves the previous snapshot intact and no .tmp."""
+        spec = _tree(tmp_path / "data")
+        out = tmp_path / "snap.json"
+        out.write_text("previous snapshot")
+
+        def failing_replace(src, dst):
+            raise OSError("disk full")
+
+        monkeypatch.setattr("os.replace", failing_replace)
+        with pytest.raises(AutoVisionError, match="Could not write snapshot"):
+            dataset_snapshot(spec, out, overwrite=True)
+        assert out.read_text() == "previous snapshot"
+        assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]

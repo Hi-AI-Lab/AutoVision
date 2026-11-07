@@ -339,8 +339,11 @@ class TraceAnnotator(BaseAnnotator):
     """Draw per-identity motion trails.
 
     Trails need a stable identity per row. Pass ``tracker_ids=`` explicitly
-    or put ``tracker_id`` / ``tracker_ids`` in ``result.extra`` (the stream
-    pipeline records it there). Rows without an identity are skipped.
+    or put ``tracker_id`` / ``tracker_ids`` in ``result.extra``. Rows
+    without an identity are skipped. Note (INFER-12): the stream runtime
+    does NOT write tracker ids into ``result.extra`` — ``run_stream``
+    publishes tracks to the JSONL and the rendered overlay; consumers that
+    want trail rendering feed the ids back themselves.
     """
 
     def __init__(
@@ -351,6 +354,7 @@ class TraceAnnotator(BaseAnnotator):
         thickness: int = 2,
         smooth: bool = False,
         by_track: bool = False,
+        max_tracks: int | None = 512,
     ) -> None:
         self.color = color
         self.position = _check_anchor(position)
@@ -358,11 +362,44 @@ class TraceAnnotator(BaseAnnotator):
         self.thickness = max(1, int(thickness))
         self.smooth = bool(smooth)
         self.by_track = bool(by_track)
+        if max_tracks is not None and max_tracks < 1:
+            raise AutoVisionError(
+                f"TraceAnnotator max_tracks must be >= 1 or None, got {max_tracks}."
+            )
+        # INFER-06: a long-lived service annotates every track id it ever
+        # sees; without an eviction bound ``_history`` grew without limit
+        # (one deque per id, never dropped). Eviction order is last-touch.
+        self.max_tracks = max_tracks
         self._history: dict[int, deque[tuple[float, float]]] = {}
+        self._last_touch: dict[int, int] = {}
+        self._touch_clock = 0
 
     def reset(self) -> None:
         """Drop all accumulated trails (reuse across independent streams)."""
         self._history.clear()
+        self._last_touch.clear()
+        self._touch_clock = 0
+
+    def _evict_stale_tracks(self, keep: set[int]) -> None:
+        """INFER-06: bound ``_history`` to ``max_tracks`` by last-touch order.
+
+        Called once per ``annotate``; current-frame ids are exempt (they
+        are about to be touched anyway), so eviction only targets tracks
+        that have gone stale — matching how the smoother and the tracker
+        retire their own state.
+        """
+        if self.max_tracks is None or len(self._history) <= self.max_tracks:
+            return
+        stale = [
+            tid for tid in sorted(
+                self._history, key=lambda tid: self._last_touch.get(tid, 0)
+            )
+            if tid not in keep
+        ]
+        while len(self._history) > self.max_tracks and stale:
+            victim = stale.pop(0)
+            self._history.pop(victim, None)
+            self._last_touch.pop(victim, None)
 
     def _resolve_tracker_ids(
         self, result: InferenceResult, tracker_ids: Any
@@ -418,6 +455,9 @@ class TraceAnnotator(BaseAnnotator):
                 "TraceAnnotator requires result.bboxes (and tracker ids)."
             )
         if len(result) == 0:
+            # INFER-06 (review P3-4): an empty frame still ages the history —
+            # eviction must run or a quiescent stream never shrinks.
+            self._evict_stale_tracks(set())
             return image
         ids = self._resolve_tracker_ids(result, tracker_ids)
         if ids is None:
@@ -434,6 +474,11 @@ class TraceAnnotator(BaseAnnotator):
         )
         labels = _labels(result)
         boxes = _as_numpy(result.bboxes).reshape(-1, 4)
+        current_ids = {
+            int(float(ids[index]))
+            for index in range(min(len(result), ids.shape[0]))
+            if np.isfinite(float(ids[index])) and float(ids[index]) >= 0
+        }
         draw = ImageDraw.Draw(image)
         for index in range(min(len(result), ids.shape[0])):
             try:
@@ -446,6 +491,8 @@ class TraceAnnotator(BaseAnnotator):
             history = self._history.setdefault(
                 tracker_id, deque(maxlen=self.trace_length)
             )
+            self._touch_clock += 1
+            self._last_touch[tracker_id] = self._touch_clock
             if not history or history[-1] != anchor:
                 history.append(anchor)
             if len(history) < 2:
@@ -462,6 +509,10 @@ class TraceAnnotator(BaseAnnotator):
                 width=self.thickness,
                 joint="curve",
             )
+        # INFER-06: exact bound — evict AFTER the touch loop with the
+        # current frame's ids protected, so the bound holds even under
+        # one-new-id-per-frame churn.
+        self._evict_stale_tracks(current_ids)
         return image
 
 

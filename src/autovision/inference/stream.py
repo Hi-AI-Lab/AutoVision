@@ -25,7 +25,21 @@ import torch
 
 from autovision.errors import AutoVisionError
 from autovision.inference.engine import InferenceEngine
-from autovision.inference.video import AnnotatedVideoWriter, VideoFrameStream
+from autovision.inference.video import (
+    AnnotatedVideoWriter,
+    VideoFrameStream,
+    redact_source,
+)
+from autovision.keys import (
+    BBOXES,
+    DEPTH,
+    KEYPOINTS,
+    LABELS,
+    MASK,
+    MASKS,
+    POLYGONS,
+    SCORES,
+)
 from autovision.results import InferenceResult
 from autovision.tracking.analytics import LineZone, PolygonZone, TrackSmoother
 from autovision.tracking.byte_track import Track
@@ -33,6 +47,10 @@ from autovision.types import PathLike
 from autovision.visualize.zones import draw_zones
 
 __all__ = ["StreamRunResult", "run_stream"]
+
+#: INFER-03: on_frame_error="skip" still aborts a run whose failures are
+#: consecutive — a fully broken pipeline must not spin silently forever.
+_MAX_CONSECUTIVE_FRAME_ERRORS = 10
 
 logger = logging.getLogger("autovision")
 
@@ -50,11 +68,16 @@ class StreamRunResult:
     #: Number of distinct track ids over the run (0 when tracking is off).
     tracks: int = 0
     #: Reconnect attempts consumed on a dropped LIVE source (design D35).
-    #: 0 means the stream never dropped; a positive value means the run
-    #: continued past drops — the caller's health signal for monitoring,
-    #: since a run that gave up reconnecting is otherwise indistinguishable
-    #: from a clean end-of-stream in ``frames`` alone.
+    #: 0 means the stream never dropped — or dropped and ended with no
+    #: reconnect attempt at all, which the run's end-of-run warning calls
+    #: out (``stream_ended_after_drop``, H3-5c): 0 alone is what a clean
+    #: end-of-stream also reports. A positive value means reconnect
+    #: attempts were consumed and the run continued past drops.
     reconnects: int = 0
+    #: Frames the reader discarded under ``max_lag_frames`` backpressure
+    #: (H3-5b): ``frames + frames_dropped`` equals the frames decoded.
+    #: Always 0 unless ``max_lag_frames`` is set.
+    frames_dropped: int = 0
     #: Wall-clock seconds spent decoding, inferring, rendering and encoding.
     decode_s: float = 0.0
     infer_s: float = 0.0
@@ -62,6 +85,13 @@ class StreamRunResult:
     write_s: float = 0.0
     #: Cumulative line-zone and current polygon-zone counts.
     zones: dict[str, Any] = field(default_factory=dict)
+    #: Tracks retired past the buffer and drained during the run (design D2).
+    #: Unconfirmed one-frame tracks are never published and not counted.
+    tracks_removed: int = 0
+    #: Frames skipped by the on_frame_error="skip" policy (INFER-03): each
+    #: one has an ``{"frame", "error"}`` entry in the JSONL. Always 0 unless
+    #: a per-frame failure occurred.
+    frames_failed: int = 0
 
     @property
     def fps(self) -> float:
@@ -73,10 +103,11 @@ class StreamRunResult:
         video = f", video={self.video_path}" if self.video_path else ""
         tracked = f", tracks={self.tracks}" if self.tracks else ""
         dropped = f", reconnects={self.reconnects}" if self.reconnects else ""
+        failed = f", failed_frames={self.frames_failed}" if self.frames_failed else ""
         return (
             f"frames={self.frames} backend={self.backend} "
             f"fps={self.fps:.1f} elapsed={self.elapsed_s:.2f}s "
-            f"jsonl={self.predictions_path}{video}{tracked}{dropped}"
+            f"jsonl={self.predictions_path}{video}{tracked}{dropped}{failed}"
         )
 
 
@@ -96,13 +127,13 @@ def _render_frame(
     if not any(
         key in record
         for key in (
-            "bboxes",
-            "polygons",
-            "keypoints",
-            "mask",
-            "masks",
-            "depth",
-            "labels",
+            BBOXES,
+            POLYGONS,
+            KEYPOINTS,
+            MASK,
+            MASKS,
+            DEPTH,
+            LABELS,
         )
     ):
         return frame
@@ -151,11 +182,11 @@ def _track_record(
     ``frame`` is only consumed by trackers built with motion compensation
     (design D6); plain trackers ignore it.
     """
-    if tracker is None or "bboxes" not in record:
+    if tracker is None or BBOXES not in record:
         return None, class_names
-    boxes = _as_numpy(record["bboxes"]).reshape(-1, 4)
-    scores = record.get("scores")
-    labels = record.get("labels")
+    boxes = _as_numpy(record[BBOXES]).reshape(-1, 4)
+    scores = record.get(SCORES)
+    labels = record.get(LABELS)
     score_array = (
         np.ones(boxes.shape[0], dtype=np.float32)
         if scores is None
@@ -165,7 +196,11 @@ def _track_record(
     tracks = tracker.update(boxes, score_array, label_array, frame=frame)
     if label_array is None:
         # ByteTrack defaults to class 0 when no labels are supplied; expose
-        # "unknown" (-1) instead of fabricating a real class id.
+        # "unknown" (-1) instead of fabricating a real class id. The
+        # reconstruction keeps ``det_index`` (INFER-08): the join-back
+        # contract maps a track to its originating detection, and silently
+        # dropping it here made the mapping vacuous on exactly the
+        # label-less records that rely on it.
         tracks = [
             Track(
                 track_id=track.track_id,
@@ -174,6 +209,7 @@ def _track_record(
                 class_id=-1,
                 state=track.state,
                 age=track.age,
+                det_index=track.det_index,
             )
             for track in tracks
         ]
@@ -217,6 +253,7 @@ def run_stream(
     max_json_elements: int = 10_000,
     prefetch: int = 8,
     writer_buffer: int = 8,
+    max_lag_frames: int | None = None,
     line_zones: Sequence[LineZone] | None = None,
     polygon_zones: Sequence[PolygonZone] | None = None,
     smooth: bool = False,
@@ -226,6 +263,7 @@ def run_stream(
     motion_compensation: str = "none",
     reconnect_attempts: int = 0,
     reconnect_delay_s: float = 1.0,
+    on_frame_error: str = "skip",
 ) -> StreamRunResult:
     """Run inference over a video file / RTSP stream and persist artifacts.
 
@@ -256,7 +294,32 @@ def run_stream(
     ``reconnect_attempts`` / ``reconnect_delay_s`` (design D35) bound how
     many times a dropped LIVE source (RTSP/camera/URL — not a local file)
     reopens its capture before the run ends; frame numbering continues
-    across reconnects.
+    across reconnects. After a successful reconnect the tracker, smoother
+    and zone state are reset (H3-5c): a drop is a scene discontinuity, so
+    ids restart at 1 and zone counts restart from zero for the new
+    session. A live source that ends on a drop without any reconnect
+    attempt is reported through a warning, since ``reconnects=0`` alone
+    is indistinguishable from a clean end-of-stream.
+
+    ``max_lag_frames`` (H3-5b) bounds how far the reader may outrun the
+    engine: once at least that many decoded-but-unconsumed frames are
+    queued, the reader drops the OLDEST frame to admit the newest and
+    counts it in ``StreamRunResult.frames_dropped`` (JSONL frame numbering
+    keeps source indices, so drops appear as gaps). The default ``None``
+    keeps the current blocking backpressure — no frame is ever dropped.
+    The knob only bites at values at or below ``prefetch`` (the queue is
+    the backlog the reader can see) and only affects the read side.
+
+    ``on_frame_error`` (INFER-03) selects the per-frame failure policy:
+    ``"skip"`` (default) logs the frame, writes an ``{"frame", "error"}``
+    JSONL entry, counts it in ``StreamRunResult.frames_failed`` and keeps
+    the run alive — a 24/7 source must not die on one malformed record or
+    one non-finite tracker input; ``"raise"`` keeps the historical
+    fail-fast behavior. Skipping still aborts the run after MORE THAN
+    ``_MAX_CONSECUTIVE_FRAME_ERRORS`` consecutive failures (the counter
+    resets on the first healthy frame and on a live reconnect), so a fully
+    broken pipeline cannot spin silently forever. A run that ended with
+    skipped frames reports a summary warning naming the count.
     """
     if batch_size < 1:
         raise AutoVisionError(f"batch_size must be >= 1, got {batch_size}.")
@@ -273,6 +336,11 @@ def run_stream(
             "mask_format must be 'rle', 'dense', or 'none', "
             f"got {mask_format!r}."
         )
+    if on_frame_error not in {"skip", "raise"}:
+        raise AutoVisionError(
+            "on_frame_error must be 'skip' or 'raise', got "
+            f"{on_frame_error!r}."
+        )
     if max_json_elements < 1:
         raise AutoVisionError(
             f"max_json_elements must be >= 1, got {max_json_elements}."
@@ -282,6 +350,10 @@ def run_stream(
     if writer_buffer < 1:
         raise AutoVisionError(
             f"writer_buffer must be >= 1, got {writer_buffer}."
+        )
+    if max_lag_frames is not None and max_lag_frames < 1:
+        raise AutoVisionError(
+            f"max_lag_frames must be >= 1, got {max_lag_frames}."
         )
     if engine is None:
         if model is None:
@@ -337,7 +409,15 @@ def run_stream(
         )
     smoother = TrackSmoother() if smooth else None
 
-    stats = {"decode_s": 0.0, "infer_s": 0.0, "render_s": 0.0, "write_s": 0.0}
+    stats: dict[str, Any] = {
+        "decode_s": 0.0,
+        "infer_s": 0.0,
+        "render_s": 0.0,
+        "write_s": 0.0,
+        "tracks_removed": 0,
+        "frames_dropped": 0,
+        "frames_failed": 0,
+    }
     read_queue: queue.Queue[tuple[int, np.ndarray] | None] = queue.Queue(
         maxsize=prefetch
     )
@@ -360,6 +440,28 @@ def run_stream(
                     break
                 stats["decode_s"] += time.perf_counter() - read_started
                 while not stop_event.is_set():
+                    if (
+                        max_lag_frames is not None
+                        and read_queue.qsize() >= max_lag_frames
+                    ):
+                        # H3-5b: the backlog reached the lag cap — drop the
+                        # OLDEST frame to admit the newest (live semantics:
+                        # freshest frame wins) and account for it. The check
+                        # must run BEFORE the blocking put: a put with a
+                        # timeout only raises Full after its grace period,
+                        # so any consumer faster than that period would keep
+                        # the backlog bounded without ever tripping this
+                        # branch and live latency would stay unbounded. Only
+                        # the read side drops; the writer path is untouched.
+                        # Only this thread writes ``frames_dropped``.
+                        try:
+                            read_queue.get_nowait()
+                        except queue.Empty:  # pragma: no cover - raced
+                            # The consumer drained the backlog between the
+                            # qsize check and now; the put below just fits.
+                            pass
+                        else:
+                            stats["frames_dropped"] += 1
                     try:
                         read_queue.put(item, timeout=0.1)
                         break
@@ -376,16 +478,18 @@ def run_stream(
                 except BaseException as error:  # noqa: BLE001
                     reader_error.append(error)
             # Always make the main loop's blocking get() wake up; the caller
-            # drains this queue in its own finally block.
-            sentinel_deadline = time.monotonic() + 5.0
-            while time.monotonic() < sentinel_deadline:
+            # drains this queue in its own finally block. The sentinel MUST
+            # land or the main loop spins forever, so retry while the queue
+            # is full instead of giving up after a deadline (H1-2): only this
+            # thread blocks, and the main loop's flush() always frees a slot.
+            # ``stop_event`` keeps an aborting run's shutdown responsive — the
+            # main loop's finally sets it before joining this thread.
+            while not stop_event.is_set():
                 try:
                     read_queue.put(None, timeout=0.2)
                     break
                 except queue.Full:
                     continue
-            else:
-                logger.warning("Could not enqueue the reader sentinel.")
 
     def writer_worker() -> None:
         writer_obj: AnnotatedVideoWriter | None = None
@@ -422,11 +526,41 @@ def run_stream(
             writer_done.set()
 
     frames_done = 0
+    consecutive_frame_errors = 0
     track_ids: set[int] = set()
     buffer: list[tuple[int, np.ndarray]] = []
+    saw_sentinel = False
+    seen_generation = 0
+    frame_size: tuple[int, int] | None = None
 
     def flush() -> None:
-        nonlocal frames_done
+        nonlocal frames_done, seen_generation, consecutive_frame_errors
+        if (
+            tracker is not None
+            and stream.reconnect_generation != seen_generation
+        ):
+            seen_generation = stream.reconnect_generation
+            # H3-5c: a live reconnect is a scene discontinuity — ids, motion
+            # history and zone state fitted to the old session would
+            # mis-associate the new one. BYTETracker.reset() also resets
+            # the GMC estimator it holds (motion_compensation), so camera
+            # motion state does not leak across sessions either. Zone
+            # counts restart from zero BY DESIGN: a drop starts a new
+            # session, it is not a continuation of the old counts.
+            tracker.reset()
+            if smoother is not None:
+                smoother.reset()
+            for zone in line_zone_list:
+                zone.reset()
+            for polygon_zone in polygon_zone_list:
+                polygon_zone.reset()
+            # The consecutive-failure ledger describes ONE pipeline health
+            # streak: a reconnect is a new session (review P3-6).
+            consecutive_frame_errors = 0
+            logger.warning(
+                "Live source reconnected after a drop; tracker/smoother/"
+                "zone state reset (zone counts restart from zero)."
+            )
         if not buffer:
             return
         if writer_error:
@@ -441,75 +575,124 @@ def run_stream(
             )
         if tracker is not None:
             for record in records:
-                if "bboxes" not in record:
+                if BBOXES not in record:
                     raise AutoVisionError(
                         "track=True requires a detection model that returns "
-                        "'bboxes'; this result has no boxes. Disable tracking "
+                        f"'{BBOXES}'; this result has no boxes. Disable tracking "
                         "or use a detection/segmentation model."
                     )
         for (index, frame), record in zip(buffer, records):
-            entry: dict[str, Any] = {"frame": index}
-            if stream.info.fps and stream.info.fps > 0:
-                entry["time_s"] = round(index / stream.info.fps, 4)
-            entry["predictions"] = InferenceResult.from_record(record).to_json(
-                masks=mask_format, max_elements=max_json_elements
-            )
-            tracks, track_names = _track_record(record, tracker, class_names, frame=frame)
-            render_tracks = tracks
-            if tracks is not None:
-                track_ids.update(track.track_id for track in tracks)
-                if smoother is not None:
-                    render_tracks = smoother.update(tracks)
-                if line_zone_list or polygon_zone_list:
-                    entry["zones"] = {
-                        "lines": {
-                            zone.name: zone.update(tracks).as_dict()
-                            for zone in line_zone_list
-                        },
-                        "polygons": {
-                            zone.name: zone.update(tracks).as_dict()
-                            for zone in polygon_zone_list
-                        },
-                    }
-                entry["tracks"] = [
-                    {
-                        "track_id": track.track_id,
-                        "bbox": [_finite_or_none(value) for value in track.bbox],
-                        "score": _finite_or_none(track.score),
-                        "class_id": track.class_id,
-                        "age": track.age,
-                    }
-                    for track in tracks
-                ]
-            handle.write(json.dumps(entry, allow_nan=False) + "\n")
-            if render:
-                render_started = time.perf_counter()
-                rendered = _safe_render(
-                    frame, record, class_names, render_tracks, track_names
+            # INFER-03: the per-frame body is isolated — one malformed
+            # record or one non-finite tracker input used to terminate the
+            # whole run (JSON/serialization paths already tolerated NaN;
+            # the tracker path was the killer). "skip" keeps a 24/7 source
+            # alive with a per-frame JSONL error entry; the consecutive
+            # cap aborts a fully broken pipeline instead of spinning.
+            try:
+                entry: dict[str, Any] = {"frame": index}
+                if stream.info.fps and stream.info.fps > 0:
+                    entry["time_s"] = round(index / stream.info.fps, 4)
+                entry["predictions"] = InferenceResult.from_record(record).to_json(
+                    masks=mask_format, max_elements=max_json_elements
                 )
-                if line_zone_list or polygon_zone_list:
-                    try:
-                        from PIL import Image
+                tracks, track_names = _track_record(record, tracker, class_names, frame=frame)
+                render_tracks = tracks
+                if tracks is not None:
+                    track_ids.update(track.track_id for track in tracks)
+                    if smoother is not None:
+                        render_tracks = smoother.update(tracks)
+                    if line_zone_list or polygon_zone_list:
+                        entry["zones"] = {
+                            "lines": {
+                                zone.name: zone.update(tracks).as_dict()
+                                for zone in line_zone_list
+                            },
+                            "polygons": {
+                                zone.name: zone.update(tracks).as_dict()
+                                for zone in polygon_zone_list
+                            },
+                        }
+                    entry["tracks"] = [
+                        {
+                            "track_id": track.track_id,
+                            "bbox": [_finite_or_none(value) for value in track.bbox],
+                            "score": _finite_or_none(track.score),
+                            "class_id": track.class_id,
+                            "age": track.age,
+                        }
+                        for track in tracks
+                    ]
+                handle.write(json.dumps(entry, allow_nan=False) + "\n")
+                if render:
+                    render_started = time.perf_counter()
+                    rendered = _safe_render(
+                        frame, record, class_names, render_tracks, track_names
+                    )
+                    if line_zone_list or polygon_zone_list:
+                        try:
+                            from PIL import Image
 
-                        canvas = (
-                            Image.fromarray(rendered)
-                            if isinstance(rendered, np.ndarray)
-                            else rendered
-                        )
-                        rendered = np.asarray(
-                            draw_zones(canvas, line_zone_list, polygon_zone_list)
-                        )
-                    except Exception as error:  # noqa: BLE001 - keep the frame
-                        logger.warning(
-                            "Zone rendering failed (%s); writing the frame without "
-                            "zone overlays.",
-                            error,
-                        )
-                stats["render_s"] += time.perf_counter() - render_started
-                write_queue.put(rendered)
+                            canvas = (
+                                Image.fromarray(rendered)
+                                if isinstance(rendered, np.ndarray)
+                                else rendered
+                            )
+                            rendered = np.asarray(
+                                draw_zones(canvas, line_zone_list, polygon_zone_list)
+                            )
+                        except Exception as error:  # noqa: BLE001 - keep the frame
+                            logger.warning(
+                                "Zone rendering failed (%s); writing the frame without "
+                                "zone overlays.",
+                                error,
+                            )
+                    stats["render_s"] += time.perf_counter() - render_started
+                    write_queue.put(rendered)
+                    if writer_error:
+                        # The writer thread's failure is run-fatal by
+                        # design (its artifact is unusable) — re-raise
+                        # outside the frame-isolation contract.
+                        raise writer_error[0]
+                frames_done += 1
+            except Exception as error:  # noqa: BLE001 - INFER-03 frame isolation
                 if writer_error:
                     raise writer_error[0]
-            frames_done += 1
+                if on_frame_error == "raise":
+                    raise
+                stats["frames_failed"] = int(stats.get("frames_failed", 0)) + 1
+                consecutive_frame_errors += 1
+                try:
+                    handle.write(
+                        json.dumps(
+                            {
+                                "frame": index,
+                                "error": f"{type(error).__name__}: {error}",
+                            },
+                            allow_nan=False,
+                        )
+                        + "\n"
+                    )
+                except Exception:  # noqa: BLE001 - the JSONL itself may be gone
+                    pass
+                logger.warning(
+                    "Frame %d failed (%s: %s); skipped and logged to the "
+                    "JSONL (on_frame_error='skip', %d failed this run).",
+                    index, type(error).__name__, error, stats["frames_failed"],
+                )
+                if consecutive_frame_errors > _MAX_CONSECUTIVE_FRAME_ERRORS:
+                    raise AutoVisionError(
+                        f"{consecutive_frame_errors} consecutive frame "
+                        "errors — the pipeline looks fully broken; aborting "
+                        "the run (on_frame_error='skip' still fails fast on "
+                        "a systemic failure)."
+                    ) from error
+                continue
+            consecutive_frame_errors = 0
+        if tracker is not None:
+            # Zone/smoother per-id state for retired tracks is droppable once
+            # they are published here; draining per flush keeps the tracker's
+            # ``_removed`` backlog bounded on long runs (H1-3).
+            stats["tracks_removed"] += len(tracker.drain_removed_tracks())
         buffer.clear()
 
     reader_thread = threading.Thread(
@@ -535,9 +718,46 @@ def run_stream(
                 try:
                     item = read_queue.get(timeout=0.2)
                 except queue.Empty:
+                    # The sentinel is the only cooperative exit signal, so a
+                    # reader that died without an error and without delivering
+                    # it must end the run instead of spinning forever (H1-2).
+                    # A live reader (or one with a queued sentinel/error) is
+                    # not a hang: keep polling until it reports in.
+                    if (
+                        not reader_thread.is_alive()
+                        and read_queue.empty()
+                        and not reader_error
+                        and not saw_sentinel
+                    ):
+                        logger.warning(
+                            "Reader thread exited without delivering a "
+                            "sentinel; ending the run after %d frames.",
+                            frames_done,
+                        )
+                        break
                     continue
                 if item is None:
+                    saw_sentinel = True
                     break
+                frame_index, frame = item
+                height, width = frame.shape[:2]
+                if frame_size is None:
+                    frame_size = (width, height)
+                elif (width, height) != frame_size:
+                    # H3-5e: a resolution change would corrupt the JSONL
+                    # pixel geometry and crash/undefine the MP4 encoder
+                    # (the writer pins frame_size at the first frame).
+                    # Fail loudly with guidance instead of writing junk.
+                    raise AutoVisionError(
+                        f"Frame size changed from {frame_size[0]}x"
+                        f"{frame_size[1]} to {width}x{height} at frame "
+                        f"{frame_index}: run_stream requires a fixed "
+                        "resolution. Pre-scale the source (e.g. cv2.resize "
+                        "or the capture's CAP_PROP_FRAME_* properties) or "
+                        "split it into per-resolution runs; "
+                        "MultiStreamRunner rotates its writer per "
+                        "resolution instead."
+                    )
                 buffer.append(item)
                 if len(buffer) >= batch_size:
                     flush()
@@ -604,6 +824,32 @@ def run_stream(
         frames_done / elapsed if elapsed > 0 else 0.0,
         predictions_path,
     )
+    if stream.stream_ended_after_drop:
+        # H3-5c: reconnects=0 is also what a clean end-of-stream reports,
+        # so a source that died without any reconnect attempt needs its
+        # own signal; a run that burned attempts before giving up is
+        # already visible in reconnects>0 but still ended on a drop.
+        if stream.reconnects_used == 0:
+            logger.warning(
+                "Live source '%s' dropped and ended without any reconnect "
+                "attempt (reconnects=0): not a clean end-of-stream.",
+                redact_source(source),
+            )
+        else:
+            logger.warning(
+                "Live source '%s' ended on a drop after %d reconnect "
+                "attempt(s); the reconnect budget was exhausted.",
+                redact_source(source),
+                stream.reconnects_used,
+            )
+    if stats["frames_failed"]:
+        # INFER-03 (review P2-2): per-frame warnings drown in a long run;
+        # the end-of-run summary is what an operator actually greps for.
+        logger.warning(
+            "Run finished with %d skipped frame(s) (on_frame_error='skip'); "
+            "each one has an {'frame', 'error'} entry in '%s'.",
+            stats["frames_failed"], predictions_path,
+        )
     return StreamRunResult(
         out_dir=out_dir,
         predictions_path=predictions_path,
@@ -613,9 +859,12 @@ def run_stream(
         backend=engine.backend,
         tracks=len(track_ids),
         reconnects=stream.reconnects_used,
+        frames_dropped=stats["frames_dropped"],
         decode_s=stats["decode_s"],
         infer_s=stats["infer_s"],
         render_s=stats["render_s"],
         write_s=stats["write_s"],
         zones=zone_summary,
+        tracks_removed=stats["tracks_removed"],
+        frames_failed=stats["frames_failed"],
     )

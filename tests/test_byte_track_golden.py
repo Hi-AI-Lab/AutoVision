@@ -11,6 +11,10 @@ not discovered downstream.
 
 Delete ``tests/golden/byte_track_lifecycle.json`` to re-record after an
 *intentional* behavior change.
+
+Recording is fail-fast (H4-5): a missing golden is written and then
+*fails* the run — the second run performs the comparison. Record-and-skip
+would let a deleted golden pass CI on its first round.
 """
 
 from __future__ import annotations
@@ -135,9 +139,11 @@ class TestGoldenLifecycle:
     def test_lifecycle_matches_snapshot(self):
         snapshot = _snapshot()
         if not GOLDEN_PATH.exists():
+            # Record-then-fail (H4-5): a missing golden must never pass its
+            # first CI round — write it, fail, and let the re-run compare.
             GOLDEN_PATH.parent.mkdir(parents=True, exist_ok=True)
             GOLDEN_PATH.write_text(json.dumps(snapshot, indent=2))
-            pytest.skip("golden snapshot recorded; re-run to compare")
+            pytest.fail("golden recorded; re-run to verify")
         golden = json.loads(GOLDEN_PATH.read_text())
         assert golden == snapshot, (
             "Tracker behavior diverged from the golden snapshot; if this "

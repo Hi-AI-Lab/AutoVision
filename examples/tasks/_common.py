@@ -279,6 +279,24 @@ def reject_num_classes(args: argparse.Namespace, task: str) -> None:
         )
 
 
+def load_exported_model(path: Path, device: str) -> Any:
+    """Load an exported ``.pt`` with clean one-line exits for common failures.
+
+    A missing file or corrupt payload raised raw ``CheckpointError``
+    tracebacks from the inference scripts; the underlying loader keeps its
+    semantics — this helper only converts the error surface to the one-line
+    SystemExit every other example failure uses.
+    """
+    if not Path(path).is_file():
+        raise SystemExit(f"Weights file does not exist: '{path}'.")
+    try:
+        import autovision
+
+        return autovision.load_model(path, device=device)
+    except AutoVisionError as error:
+        raise SystemExit(str(error)) from None
+
+
 def run_prediction(model: Any, args: argparse.Namespace) -> dict[str, Any]:
     """Run one image eagerly, or through ``--onnx`` when the flag is set.
 
@@ -581,8 +599,30 @@ def demo_root(args: argparse.Namespace, task: str) -> Path:
     return args.out.parent / "_demo_data" / task
 
 
-def dry_run(name: str, data: Any) -> None:
-    """Print the data contract without starting a training run."""
+def dry_run(name: str, data: Any, args: argparse.Namespace | None = None) -> None:
+    """Print the data contract without starting a training run.
+
+    ``args`` (when passed) surfaces the follow-up options that a dry-run
+    silently skips — ``--predict-image`` / ``--export`` / ``--export-onnx``
+    all consume a trained model, so a user passing them under ``--dry-run``
+    deserves a note instead of silent no-ops.
+    """
+    if args is not None:
+        ignored = [
+            flag
+            for flag, attr in (
+                ("--predict-image", "predict_image"),
+                ("--export", "export"),
+                ("--export-onnx", "export_onnx"),
+            )
+            if getattr(args, attr, None) is not None
+        ]
+        if ignored:
+            joined = ", ".join(ignored[:-1]) + f" and {ignored[-1]}" if len(ignored) > 1 else ignored[0]
+            print(
+                f"note: {joined} ignored under --dry-run "
+                "(they need a trained model; re-run without --dry-run)."
+            )
     print(f"[{name}] demo data config:")
     print(json.dumps(data, default=str, indent=2))
     print("\nPass --data <yaml|json> to train on a real dataset.")

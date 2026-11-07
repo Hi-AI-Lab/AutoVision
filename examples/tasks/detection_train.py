@@ -40,7 +40,7 @@ def main() -> None:
 
     data = args.data or autovision.ensure_coco8()
     if args.dry_run:
-        dry_run("detection", data)
+        dry_run("detection", data, args)
         return
     ensure_out_available(args.out, overwrite=args.overwrite)
     gtr_requirement()

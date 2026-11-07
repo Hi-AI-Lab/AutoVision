@@ -15,11 +15,15 @@ config validators.
 from __future__ import annotations
 
 import json
+import logging
+import tempfile
 from pathlib import Path
 from typing import Any
 
 import typer
 import yaml
+
+logger = logging.getLogger("autovision")
 
 app = typer.Typer(
     name="autovision-cli",
@@ -60,6 +64,59 @@ def _run(fn, arguments: list[str]) -> None:
     fn(**kwargs)
 
 
+def _parse_int_kwarg(
+    kwargs: dict[str, Any],
+    key: str,
+    *,
+    default: int,
+    low: int = 0,
+    high: int | None = None,
+) -> int:
+    """SERVE-03: parse an integer CLI kwarg into a usage error, not a traceback.
+
+    ``int(kwargs.pop(...))`` on the real terminal printed the raw
+    ``ValueError`` traceback for ``port=abc`` (the TestClient-based tests
+    never exercised it); a bad value is a usage error like any other.
+    """
+    raw = kwargs.pop(key, default)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as error:
+        raise typer.BadParameter(
+            f"{key}= must be an integer, got {raw!r}."
+        ) from error
+    if str(raw).strip() not in {str(value), f"+{value}"}:
+        # SERVE-13's whole-number rule: 8000.7 must not silently truncate.
+        raise typer.BadParameter(
+            f"{key}= must be a whole number, got {raw!r} "
+            f"(would truncate to {value})."
+        )
+    if value < low or (high is not None and value > high):
+        bounds = f">= {low}" if high is None else f"in [{low}, {high}]"
+        raise typer.BadParameter(f"{key}= must be {bounds}, got {value}.")
+    return value
+
+
+def _parse_bool_kwarg(kwargs: dict[str, Any], key: str, default: bool) -> bool:
+    """SERVE-11: parse a boolean CLI kwarg strictly.
+
+    ``bool(kwargs.pop(...))`` turned the shell-style ``strict=False`` into
+    ``True`` (any non-empty string is truthy) — a silent flag inversion on
+    exactly the commands where the flag gates fail-closed behavior.
+    """
+    raw = kwargs.pop(key, default)
+    if isinstance(raw, bool):
+        return raw
+    lowered = str(raw).strip().lower()
+    if lowered in {"true", "1", "yes", "on"}:
+        return True
+    if lowered in {"false", "0", "no", "off"}:
+        return False
+    raise typer.BadParameter(
+        f"{key}= must be a boolean (true/false), got {raw!r}."
+    )
+
+
 def _reject_unknown_keys(
     leftovers: dict[str, Any], command: str, accepted: tuple[str, ...]
 ) -> None:
@@ -68,6 +125,23 @@ def _reject_unknown_keys(
         raise typer.BadParameter(
             f"Unknown {command} key(s) {sorted(leftovers)} — accepted: {sorted(accepted)}."
         )
+
+
+# Keep in sync with the predict_to_files signature (model_handle.py); the
+# CLI additionally accepts out= as the out_dir= spelling. When
+# predict_to_files gains or drops a parameter, this tuple must change too
+# (H3-6b: unknown keys used to reach it as a TypeError traceback).
+_PREDICT_TO_FILES_KEYS: tuple[str, ...] = (
+    "model",
+    "images",
+    "out",
+    "out_dir",
+    "threshold",
+    "save_visuals",
+    "class_names",
+    "mask_format",
+    "max_json_elements",
+)
 
 
 @app.command("pretrain")
@@ -325,8 +399,19 @@ def compliance_report_command(arguments: list[str] = typer.Argument(None)) -> No
     from autovision.cli.compliance_report import compliance_report
 
     kwargs = _parse_kwargs(list(arguments or []))
-    strict = bool(kwargs.pop("strict", False))
-    fail_on = str(kwargs.pop("fail_on", "error" if strict else "none"))
+    # METRIC-05: the default flips to fail-closed — a compliance gate that
+    # passed on error by default was the dangerous direction (the Python
+    # API already defaulted to "error"). The legacy ``strict`` flag is
+    # deprecated: strict=False no longer disables gating; pass
+    # fail_on=none explicitly for the legacy open behavior.
+    if "strict" in kwargs:
+        logger.warning(
+            "compliance-report strict= is deprecated in 0.6.1 and will be "
+            "removed in 0.7.0; pass fail_on= directly (strict=False no "
+            "longer disables gating — use fail_on=none)."
+        )
+        kwargs.pop("strict")
+    fail_on = str(kwargs.pop("fail_on", "error"))
     if fail_on not in ("error", "warning", "none"):
         raise typer.BadParameter(
             "fail_on must be one of error | warning | none."
@@ -358,6 +443,30 @@ def registry_command(arguments: list[str] = typer.Argument(None)) -> None:
     action = str(kwargs.pop("action", ""))
     root = kwargs.pop("root", os.environ.get("AUTOVISION_REGISTRY_ROOT", "runs/registry"))
     actor = kwargs.pop("actor", None)
+    # SERVE-01: per-action allow-lists validated BEFORE dispatch. The tail
+    # check used to run AFTER the branches — a typo key applied the change
+    # first and failed second, leaving a registered/promoted/rolled-back
+    # state behind a usage error (retries then duplicated audit records).
+    _REGISTRY_ALLOWED_KEYS: dict[str, tuple[str, ...]] = {
+        "register": ("file", "name", "v", "version", "stage", "metadata"),
+        "promote": ("name", "v", "version", "gates", "to", "reason"),
+        "rollback": ("name", "to", "stage", "reason"),
+        "current": ("name", "stage"),
+        "list": ("stage",),
+        "audit": (),
+    }
+    if action not in _REGISTRY_ALLOWED_KEYS:
+        raise typer.BadParameter(
+            "registry action must be register | promote | rollback | "
+            "current | list | audit."
+        )
+    unknown = sorted(
+        key for key in kwargs if key not in _REGISTRY_ALLOWED_KEYS[action]
+    )
+    if unknown:
+        raise typer.BadParameter(
+            f"Unknown registry key(s) for action={action!r}: {unknown}"
+        )
     registry = ModelRegistry(root)
     if action == "register":
         file = kwargs.pop("file", None)
@@ -365,10 +474,26 @@ def registry_command(arguments: list[str] = typer.Argument(None)) -> None:
         version = kwargs.pop("v", kwargs.pop("version", None))
         if file is None or name is None or version is None:
             raise typer.BadParameter("register needs file= name= v=")
+        metadata_arg = kwargs.pop("metadata", None)
+        if isinstance(metadata_arg, str):
+            # EXPORT audit P3-14: a bare string died on dict(str) with a raw
+            # traceback; parse it as JSON or reject as a usage error.
+            try:
+                metadata_arg = json.loads(metadata_arg)
+            except json.JSONDecodeError as error:
+                raise typer.BadParameter(
+                    'metadata= must be JSON (e.g. metadata={"team":"vision"})'
+                    f" — parse failed: {error}."
+                ) from error
+        if metadata_arg is not None and not isinstance(metadata_arg, dict):
+            raise typer.BadParameter(
+                "metadata= must be a JSON object after parsing, got "
+                f"{type(metadata_arg).__name__}."
+            )
         entry = registry.register(
             file, name=str(name), version=str(version),
             stage=str(kwargs.pop("stage", "dev")),
-            metadata=kwargs.pop("metadata", None),
+            metadata=metadata_arg,
             actor=actor,
         )
         typer.echo(json.dumps(entry.to_manifest(), indent=2, sort_keys=True))
@@ -416,12 +541,10 @@ def registry_command(arguments: list[str] = typer.Argument(None)) -> None:
     elif action == "audit":
         for record in registry.audit_log():
             typer.echo(json.dumps(record, sort_keys=True))
-    else:
+    else:  # pragma: no cover - unreachable (action validated above)
         raise typer.BadParameter(
             "registry action must be register | promote | rollback | current | list | audit."
         )
-    if kwargs:
-        raise typer.BadParameter(f"Unknown registry key(s): {sorted(kwargs)}")
 
 
 @app.command("list-methods")
@@ -440,14 +563,27 @@ def val_command(arguments: list[str] = typer.Argument(None)) -> None:
         autovision-cli val model=runs/d1/exported_models/exported_best.pt data=coco8 [out=metrics.json]
     """
     from autovision.cli.model_handle import evaluate_object_detection
+    from autovision.errors import AutoVisionError
 
     kwargs = _parse_kwargs(list(arguments or []))
     out = kwargs.pop("out", None)
-    metrics = evaluate_object_detection(**kwargs)
+    try:
+        metrics = evaluate_object_detection(**kwargs)
+    except AutoVisionError as error:
+        # Unified CLI error surface (H3-6a): one stderr line + exit 1 — a
+        # raw API traceback is not a usable answer to a bad model path.
+        typer.echo(f"error: {error}", err=True)
+        raise typer.Exit(code=1) from None
     if out is not None:
         Path(str(out)).write_text(json.dumps(metrics, indent=2))
     for key, value in sorted(metrics.items()):
         typer.echo(f"{key}\t{value:.4f}" if isinstance(value, float) else f"{key}\t{value}")
+    # H3-6c: the val output declares the headline protocol — the argmax-F1
+    # point readings are routinely compared against COCO summary mAP
+    # numbers, which they are not.
+    from autovision.metrics.map_evaluator import HEADLINE_PROTOCOL
+
+    typer.echo(HEADLINE_PROTOCOL)
 
 
 @app.command("predict")
@@ -476,9 +612,16 @@ def predict_command(arguments: list[str] = typer.Argument(None)) -> None:
 
         typer.echo(run_stream(**kwargs).summary())
         return
+    # Pop every accepted key first (data-snapshot pattern), then reject the
+    # remainder — before importing the handle, which pulls torch (H3-6b).
+    known = {
+        key: kwargs.pop(key) for key in _PREDICT_TO_FILES_KEYS if key in kwargs
+    }
+    _reject_unknown_keys(kwargs, "predict", _PREDICT_TO_FILES_KEYS)
+
     from autovision.cli.model_handle import predict_to_files
 
-    typer.echo(str(predict_to_files(**kwargs)))
+    typer.echo(str(predict_to_files(**known)))
 
 
 @app.command("pseudo-label")
@@ -494,16 +637,132 @@ def pseudo_label_command(arguments: list[str] = typer.Argument(None)) -> None:
     typer.echo(json.dumps(result.to_dict(), indent=2))
 
 
+def _offline_category_ranks(annotations: Any) -> dict[str, int]:
+    """class name -> internal label id, in ``sorted(coco ids)`` rank order.
+
+    This is exactly the convention ``analyze_errors._from_offline`` derives
+    from the annotations json; the CLI wrapper needs the same ranks to
+    remap prediction labels that carry their own categories (H3-6e).
+    """
+    payload = json.loads(Path(str(annotations)).read_text())
+    pairs = sorted((int(c["id"]), str(c["name"])) for c in payload.get("categories", []))
+    ranks: dict[str, int] = {}
+    for rank, (_, name) in enumerate(pairs):
+        if name in ranks:
+            from autovision.errors import AutoVisionError
+
+            raise AutoVisionError(
+                f"annotations declare duplicate category name '{name}'; "
+                "predictions json with a categories envelope cannot be "
+                "mapped unambiguously."
+            )
+        ranks[name] = rank
+    return ranks
+
+
+def _remap_offline_prediction_labels(kwargs: dict[str, Any]) -> Path | None:
+    """Align offline prediction labels with the annotations' id order (H3-6e).
+
+    The offline mode of ``analyze-errors`` reads prediction labels as
+    internal ids ranking the ANNOTATIONS' COCO categories by id — an
+    assumption that silently mislabels every class when the training class
+    order differs. The mapping logic lives in ``analyze_errors.py`` (not
+    adjustable here), so this CLI-side wrapper is the minimal hook:
+
+    - a predictions json shaped ``{"categories": {id: name}, "records":
+      [...]}`` is remapped label-by-label through the class NAME (fail loud
+      on a name the annotations do not declare) into a temp file that is
+      passed downstream instead; the caller unlinks it after the run;
+    - a bare record list keeps the legacy sorted-position assumption, with
+      a warning saying so.
+
+    Returns the temp file path, or None when nothing was remapped.
+    """
+    predictions = kwargs.get("predictions")
+    if predictions is None:
+        return None  # model+data mode: the data config defines the order.
+    records = json.loads(Path(str(predictions)).read_text())
+    if isinstance(records, list):
+        logger.warning(
+            "predictions json carries no 'categories' — label ids are read "
+            "as ranks of the annotations' COCO categories sorted by id; "
+            "remap explicitly via {\"categories\": {...}, \"records\": [...]} "
+            "if the training class order differs."
+        )
+        return None
+    if not isinstance(records, dict) or "categories" not in records:
+        from autovision.errors import AutoVisionError
+
+        raise AutoVisionError(
+            "predictions json must be a list of records or a "
+            '{"categories": ..., "records": [...]} envelope.'
+        )
+    if not isinstance(records.get("records"), list):
+        from autovision.errors import AutoVisionError
+
+        raise AutoVisionError(
+            'predictions json envelope carries "categories" but no '
+            '"records" list.'
+        )
+    annotations = kwargs.get("annotations")
+    if annotations is None:
+        # Defer to the API's own "needs both predictions= and annotations="
+        # error rather than duplicating its wording here.
+        return None
+    name_to_rank = _offline_category_ranks(annotations)
+    envelope_categories = records["categories"]
+    if isinstance(envelope_categories, list):
+        id_to_name = {int(c["id"]): str(c["name"]) for c in envelope_categories}
+    else:
+        id_to_name = {int(cid): str(name) for cid, name in envelope_categories.items()}
+    remapped: list[dict[str, Any]] = []
+    for record in records.get("records", []):
+        if not isinstance(record, dict) or "labels" not in record:
+            remapped.append(record)
+            continue
+        labels = []
+        for label in record["labels"]:
+            name = id_to_name.get(int(label))
+            if name is None or name not in name_to_rank:
+                from autovision.errors import AutoVisionError
+
+                raise AutoVisionError(
+                    f"predictions json maps label {label} to "
+                    f"{name!r}, which the annotations' categories do not "
+                    "declare — the two files describe different class sets."
+                )
+            labels.append(name_to_rank[name])
+        remapped.append({**record, "labels": labels})
+    handle = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False, prefix="autovision-mapped-"
+    )
+    with handle as stream:
+        json.dump(remapped, stream)
+    kwargs["predictions"] = handle.name
+    return Path(handle.name)
+
+
 @app.command("analyze-errors")
 def analyze_errors_command(arguments: list[str] = typer.Argument(None)) -> None:
     """Detection error report + top-FP/FN gallery.
 
         autovision-cli analyze-errors model=best.pt data=coco.yaml out=report/ iou=0.5
         autovision-cli analyze-errors predictions=preds.json annotations=val.json out=report/
+
+    Offline ``predictions=`` accepts a record list (label ids then rank the
+    annotations' categories by id) or a ``{"categories": {id: name},
+    "records": [...]}`` envelope whose ids are mapped through the class
+    names (H3-6e).
     """
     from autovision.cli.analyze_errors import analyze_errors
 
-    report = analyze_errors(**_parse_kwargs(list(arguments or [])))
+    kwargs = _parse_kwargs(list(arguments or []))
+    remapped = _remap_offline_prediction_labels(kwargs)
+    try:
+        report = analyze_errors(**kwargs)
+    finally:
+        if remapped is not None:
+            remapped.unlink(missing_ok=True)
     typer.echo(json.dumps(report.summary["totals"], indent=2))
     typer.echo(f"report: {report.report_md}")
     typer.echo(f"gallery: {len(report.gallery)} images under {report.out_dir / 'gallery'}")
@@ -535,7 +794,13 @@ def download_command(arguments: list[str] = typer.Argument(None)) -> None:
     dataset = kwargs.pop("dataset", None)
     if dataset is None:
         raise typer.BadParameter("dataset=<name> is required")
-    typer.echo(str(download_dataset(str(dataset), Path(kwargs.get("out", "datasets")))))
+    out = kwargs.pop("out", None)
+    # "out" used to be read with .get() and left in kwargs, so any other
+    # unknown key was silently ignored (H3-6b).
+    _reject_unknown_keys(kwargs, "download", ("dataset", "out"))
+    typer.echo(
+        str(download_dataset(str(dataset), Path(out if out is not None else "datasets")))
+    )
 
 
 def _load_names(value: Any, source: str) -> Any:
@@ -587,8 +852,8 @@ def serve_command(arguments: list[str] = typer.Argument(None)) -> None:
 
     kwargs = _parse_kwargs(list(arguments or []))
     host = str(kwargs.pop("host", "127.0.0.1"))
-    port = int(kwargs.pop("port", 8000))
-    workers = int(kwargs.pop("workers", 1))
+    port = _parse_int_kwarg(kwargs, "port", default=8000, low=1, high=65535)
+    workers = _parse_int_kwarg(kwargs, "workers", default=1, low=1)
     ssl_keyfile = kwargs.pop("ssl_keyfile", None)
     ssl_certfile = kwargs.pop("ssl_certfile", None)
     ssl_ca_certs = kwargs.pop("ssl_ca_certs", None)
@@ -726,9 +991,9 @@ def hpo_command(arguments: list[str] = typer.Argument(None)) -> None:
     trials = _as_int("trials", 10)
     budget = _as_int("budget", 1000)
     objective = str(kwargs.pop("objective", "val_metric/map"))
-    maximize = bool(kwargs.pop("maximize", True))
+    maximize = _parse_bool_kwarg(kwargs, "maximize", default=True)
     seed = _as_int("seed", 0)
-    force = bool(kwargs.pop("force", False))
+    force = _parse_bool_kwarg(kwargs, "force", default=False)
     asha_kwargs = {
         key: kwargs.pop(key)
         for key in ("asha_min_budget", "asha_max_budget", "asha_eta")
@@ -760,6 +1025,29 @@ def hpo_command(arguments: list[str] = typer.Argument(None)) -> None:
             f"{best.objective(objective):.6g} | params: {best.params}"
         )
     else:
+        failed = [
+            trial for trial in result.trials
+            if trial.status == "failed" and trial.error
+        ]
+        if failed:
+            # H3-6f: "no successful trial" used to swallow the per-trial
+            # causes, so one typo'd kwarg (stepps=100 -> TypeError in every
+            # trial) surfaced as nothing but a shrug. Prefer the first
+            # non-AutoVisionError record: an API-level rejection is
+            # intentional, an accidental TypeError is the bug signature.
+            first = next(
+                (
+                    trial for trial in failed
+                    if not trial.error.startswith("AutoVisionError:")
+                ),
+                failed[0],
+            )
+            typer.echo(
+                f"error: {len(failed)}/{len(result.trials)} trials failed; "
+                f"first failure: {first.error}",
+                err=True,
+            )
+            raise typer.Exit(code=1) from None
         typer.echo("no successful trial produced the objective")
     typer.echo(f"report: {result.report_md}")
 
@@ -853,9 +1141,18 @@ def plot_curves_command(arguments: list[str] = typer.Argument(None)) -> None:
 
         autovision-cli plot-curves run=runs/d1
     """
+    kwargs = _parse_kwargs(list(arguments or []))
+    if "run" not in kwargs:
+        # Usage errors are BadParameter (exit 2), not a KeyError traceback
+        # from kwargs.pop (H3-6a).
+        raise typer.BadParameter(
+            "plot-curves needs run=<run directory or metrics.jsonl>."
+        )
+    # AutoVisionError is deliberately left to propagate: direct callers of
+    # this command function rely on the API error surfacing as-is (e.g. the
+    # matplotlib optional-dependency failure), unlike val's exit-1 surface.
     from autovision.cli.plot import plot_training_curves
 
-    kwargs = _parse_kwargs(list(arguments or []))
     run = Path(str(kwargs.pop("run")))
     metrics = run / "metrics.jsonl" if run.is_dir() else run
     typer.echo(str(plot_training_curves(metrics, out_path=kwargs.get("out"))))

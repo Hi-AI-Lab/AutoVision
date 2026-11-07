@@ -8,12 +8,30 @@ import logging
 import tempfile
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import torch
 
 logger = logging.getLogger("autovision")
 
-__all__ = ["COCOMAPEvaluator", "predictions_to_coco"]
+__all__ = ["COCOMAPEvaluator", "HEADLINE_PROTOCOL", "predictions_to_coco"]
+
+#: H3-6c output-side protocol declaration. The headline precision/recall/F1
+#: are read at the F1-optimal operating point (see ``compute()``), a number
+#: that is routinely mistaken for the COCO summary protocol. This string is
+#: the single source of the wording surfaced by the ``val`` CLI footer.
+#: (It deliberately travels as a constant rather than a key inside the
+#: ``compute()`` dict: every value there flows into the engine's
+#: ``val_metric/*`` logging, which rounds each entry — a str value would
+#: crash training.)
+HEADLINE_PROTOCOL: str = (
+    "note: headline precision/recall/F1 are readings at ONE operating "
+    "point (IoU 0.5, headline_score_threshold, macro-averaged over classes "
+    "with ground truth; crowd GT is ignored) — AP/AR remain the COCO "
+    "protocol. The pre-0.6.1 readings swept pycocotools' recall-threshold "
+    "axis against a fixed recall, which is not an operating point (audit "
+    "METRIC-04)."
+)
 
 
 def predictions_to_coco(
@@ -35,13 +53,21 @@ def predictions_to_coco(
         ],
         "annotations": [],  # filled by compute() from real targets
         "categories": [
-            {"id": internal_to_user[index], "name": name}
-            for index, name in enumerate(sorted(categories))
+            # METRIC audit P3-10: names are the REAL class names (looked up
+            # through the user id), not the numeric ids the old enumerate
+            # wrote — the temp gt.json is human-readable.
+            {
+                "id": internal_to_user[index],
+                "name": categories[internal_to_user[index]],
+            }
+            for index in range(len(categories))
         ],
     }
     dt = []
     for index, prediction in enumerate(predictions):
         boxes = prediction.get("bboxes", prediction.get("boxes"))
+        if boxes is None:
+            boxes = []
         scores = prediction["scores"]
         labels = prediction["labels"]
         for box, score, label in zip(boxes, scores, labels):
@@ -67,6 +93,7 @@ class COCOMAPEvaluator:
     def __init__(
         self, categories: dict[int, str], max_dets: int = 100,
         *, auto_raise: bool = False,
+        headline_score_threshold: float = 0.50,
     ) -> None:
         """``max_dets`` caps detections per image in the COCO eval.
 
@@ -74,22 +101,50 @@ class COCOMAPEvaluator:
         (the VisDrone official protocol uses 500: crowded frames hold
         hundreds of objects, and the cap directly bounds recall).
         ``auto_raise=True`` (design doc D29b) tracks the densest image
-        seen and lifts the cap at ``compute()`` time with a warning —
-        ``params.maxDets`` is only consumed there, so no retroactive work
-        is needed. Leave it off when the caller pinned an explicit
-        protocol cap (e.g. VisDrone's 500).
+        seen and lifts the cap for the ``compute()`` evaluation with a
+        warning — ``params.maxDets`` is only consumed there, so no
+        retroactive work is needed. The attribute itself is never mutated
+        (H3-6c): a permanently lifted cap leaked one round's densest-image
+        count into every later round's protocol, so two ``compute()``
+        readings were not comparable. Leave auto-raise off when the caller
+        pinned an explicit protocol cap (e.g. VisDrone's 500).
+        ``headline_score_threshold`` (METRIC-04, design A) is the SINGLE
+        score operating point the headline precision/recall/F1 are read
+        at — the old sweep over pycocotools' recall-threshold axis paired
+        precisions from different thresholds with one fixed recall, which
+        is not an operating point and made the F1 systematically exceed
+        the recall it was paired with.
         """
         self.categories = categories  # internal id -> name
         self.max_dets = max_dets
         self.auto_raise = auto_raise
+        self.headline_score_threshold = float(headline_score_threshold)
         self._max_instances_seen = 0
+        self._matches_for_round: list | None = None
         self._predictions: list[dict] = []
         self._ground_truth: list[dict] = []  # {"boxes","labels","size"} per image
         #: Per-class rows from the last :meth:`compute` (name, ap, ar, f1,
         #: precision, recall) — consumed by the validation report renderer.
-        self.last_per_class: list[dict[str, float]] = []
+        # Detail rows mix a str name with float metrics.
+        self.last_per_class: list[dict[str, Any]] = []
 
     def set_ground_truth(self, targets: Sequence[dict]) -> None:
+        """Deprecated: size/crowd metadata cannot ride this shape.
+
+        ``update_targets`` is the wired entry point (it carries
+        ``original_sizes`` and the crowd flags the protocol needs); this
+        method has no production caller left. Deprecated in 0.6.1,
+        removal in 0.7.0.
+        """
+        import warnings
+
+        warnings.warn(
+            "COCOMAPEvaluator.set_ground_truth is deprecated in 0.6.1 and "
+            "will be removed in 0.7.0 — use update_targets (it carries the "
+            "original sizes and crowd flags the protocol needs).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self._ground_truth = [
             {
                 "boxes": t["boxes"].detach().cpu() if torch.is_tensor(t["boxes"]) else torch.as_tensor(t["boxes"]),
@@ -153,6 +208,12 @@ class COCOMAPEvaluator:
     def reset(self) -> None:
         self._predictions = []
         self._ground_truth = []
+        self._matches_for_round = None
+        # METRIC audit P3-11: the auto-raise high-water mark leaked across
+        # rounds INTO other datasets when one process evaluated several
+        # datasets back to back; reset() starts every new evaluation
+        # clean (auto_raise re-derives it from the fresh round).
+        self._max_instances_seen = 0
 
     def export_state(self) -> dict:
         """Snapshot accumulated predictions/targets (CPU tensors) for
@@ -178,16 +239,119 @@ class COCOMAPEvaluator:
             ]
         )
 
+    def _matches_cache(self) -> list:
+        """Matches for the current round, computed once per compute()."""
+        if self._matches_for_round is None:
+            from autovision.metrics.error_analysis import match_detections
+
+            def _empty_like(record: dict) -> dict:
+                # GT-only rounds (a validation pass with no decodable
+                # predictions) must stay per-image aligned with EMPTY
+                # records — dropping them would misalign every later image.
+                return {
+                    "boxes": torch.zeros(0, 4),
+                    "scores": torch.zeros(0),
+                    "labels": torch.zeros(0, dtype=torch.long),
+                }
+
+            def _as_match_record(record: dict) -> dict:
+                # P0-1: the production decode contract returns "bboxes"
+                # (decode_detection_outputs / picodet postprocessor); the
+                # matcher consumes "boxes". Normalize both — a bboxes-keyed
+                # record must never fall through to the empty fallback (it
+                # turned EVERY production headline into 0/0/0 while the
+                # tests, all using "boxes", stayed green).
+                boxes = record.get("boxes", record.get("bboxes"))
+                if boxes is None:
+                    return _empty_like(record)
+                return {
+                    "boxes": boxes,
+                    "scores": record.get("scores"),
+                    "labels": record.get("labels"),
+                }
+
+            predictions = [
+                _as_match_record(record) for record in self._predictions
+            ]
+            targets = [
+                {
+                    "boxes": record["boxes"],
+                    "labels": record["labels"],
+                    "iscrowds": record.get("iscrowds"),
+                }
+                for record in self._ground_truth
+            ]
+            self._matches_for_round = match_detections(
+                predictions,
+                targets,
+                iou_threshold=0.5,
+                score_threshold=self.headline_score_threshold,
+            )
+        return self._matches_for_round
+
+    def _compute_matches(self) -> list:
+        """Deprecated alias (kept one MINOR for external callers)."""
+        return self._matches_cache()
+
+    def _single_point_headline(self) -> tuple[float, float, float]:
+        """METRIC-04 (design A): P/R/F1 at ONE score operating point.
+
+        Greedy per-class matching at IoU 0.5 over the accumulated round,
+        score-gated at ``headline_score_threshold``; crowd GT rows are
+        ignored (neither FP-for-the-prediction nor FN-for-the-count,
+        mirroring pycocotools' ``dtIg``). Precision/recall are macro
+        averages over classes with ground truth; F1 combines those two
+        macro values — all three describe the SAME operating point.
+        """
+        matches = self._matches_cache()
+        per_class: dict[int, dict[str, int]] = {}
+        for match in matches:
+            row = per_class.setdefault(match.class_id, {"tp": 0, "fp": 0, "fn": 0})
+            if match.kind in ("tp", "fp", "fn"):
+                row[match.kind] += 1
+            # "ignored" (crowd hit) counts toward neither P nor R.
+        precisions: list[float] = []
+        recalls: list[float] = []
+        for class_id, counts in per_class.items():
+            gt_total = counts["tp"] + counts["fn"]
+            if gt_total == 0:
+                continue  # classes without (non-crowd) GT: not in the mean
+            # A class whose GT survives but which has no surviving
+            # prediction has UNDEFINED precision — 0.0, mirroring "nothing
+            # was predicted correctly" (excluding it would inflate the
+            # macro precision; recall is unambiguous at 0).
+            predicted = counts["tp"] + counts["fp"]
+            precisions.append(
+                counts["tp"] / predicted if predicted > 0 else 0.0
+            )
+            recalls.append(counts["tp"] / gt_total)
+        if not precisions:
+            return 0.0, 0.0, 0.0
+        precision = sum(precisions) / len(precisions)
+        recall = sum(recalls) / len(recalls)
+        f1 = (
+            2 * precision * recall / (precision + recall)
+            if (precision + recall) > 0
+            else 0.0
+        )
+        return precision, recall, f1
+
     def compute(self) -> dict[str, float]:
+        # H3-6c: the auto-raise is a per-call adjustment, not a state
+        # mutation. Lifting ``self.max_dets`` permanently made the first
+        # dense round rewrite the protocol for every later round; the cap
+        # below is a local value, so the attribute keeps the caller's
+        # pinned number and repeated compute() calls stay comparable.
+        cap = self.max_dets
         if self.auto_raise and self._max_instances_seen > self.max_dets:
+            cap = self._max_instances_seen
             logger.warning(
                 "Dataset holds up to %d instances on one image but maxDets "
-                "caps per-image detections at %d — raising the cap to %d "
-                "(pass max_dets explicitly to pin the protocol).",
-                self._max_instances_seen, self.max_dets,
-                self._max_instances_seen,
+                "caps per-image detections at %d — evaluating with the cap "
+                "raised to %d (pass max_dets explicitly to pin the "
+                "protocol).",
+                self._max_instances_seen, self.max_dets, cap,
             )
-            self.max_dets = self._max_instances_seen
         from pycocotools.cocoeval import COCOeval
 
         self.last_per_class = []
@@ -277,7 +441,7 @@ class COCOMAPEvaluator:
         # Three-element ladder per pycocotools convention; [1, 10, 100]
         # equals the library default, so the default path is numerically
         # unchanged.
-        evaluator.params.maxDets = [1, 10, self.max_dets]
+        evaluator.params.maxDets = [1, 10, cap]
         evaluator.evaluate()
         evaluator.accumulate()
         # summarize() is deliberately skipped: its headline stats[0]/stats[1]
@@ -317,71 +481,49 @@ class COCOMAPEvaluator:
                 precision[tind:, :, :, area_index, mind]
             )
 
-        # F1 sweep at IoU 0.5 across pycocotools' operating-point axis: the
-        # precision array varies along it, recall does not (it is fixed by
-        # the maxDets cutoff), so each point pairs precision@point with the
-        # single recall value — the standard PR curve. Headline
-        # precision/recall/F1 are macro-averaged over classes with ground
-        # truth at the F1-optimal point.
+        # METRIC-04 (design A): headline P/R/F1 at ONE score operating
+        # point (IoU 0.5, score-gated, crowd-ignored, macro over classes
+        # with GT) — the old R-axis sweep paired precisions from different
+        # recall thresholds with one fixed recall and overstated F1.
         p50 = precision[tind, :, :, aind, mind]  # [R, K]
-        r50 = recall[tind, :, aind, mind]  # [K]
-        valid_class = (p50 > -1).any(axis=0)
-        r_values = r50[valid_class]
-        r_values = r_values[r_values > -1]
-        r_scalar = float(r_values.mean()) if r_values.size else -1.0
-        p_curve = np.array(
-            [
-                (
-                    p50[t][valid_class][p50[t][valid_class] > -1].mean()
-                    if (p50[t][valid_class] > -1).any() else -1.0
-                )
-                for t in range(p50.shape[0])
-            ]
-        )
-        if p_curve.max() > -1 and r_scalar > 0:
-            f1_curve = np.where(
-                p_curve > -1,
-                2 * p_curve * r_scalar / np.maximum(p_curve + r_scalar, 1e-12),
-                -1.0,
-            )
-            best_t = int(np.argmax(f1_curve))
-            metrics["f1"] = float(f1_curve[best_t])
-            metrics["precision"] = float(p_curve[best_t])
-            metrics["recall"] = float(r_scalar)
-        else:
-            metrics["f1"] = 0.0
-            metrics["precision"] = 0.0
-            metrics["recall"] = 0.0
+        headline_p, headline_r, headline_f1 = self._single_point_headline()
+        metrics["f1"] = headline_f1
+        metrics["precision"] = headline_p
+        metrics["recall"] = headline_r
 
         # Per-class detail for the validation report (category order);
-        # classes without ground truth are skipped.
+        # classes without ground truth are skipped. METRIC-04: the P/R/F1
+        # columns are the same single operating point as the headline.
         class_names = [name for _, name in sorted(self.categories.items())]
+        per_class_point: dict[int, dict[str, float]] = {}
+        for match in self._matches_cache():
+            row = per_class_point.setdefault(match.class_id, {"tp": 0.0, "fp": 0.0, "fn": 0.0})
+            if match.kind in ("tp", "fp", "fn"):
+                row[match.kind] += 1.0
         self.last_per_class = []
         for k, name in enumerate(class_names):
             if k >= p50.shape[1] or not (p50[:, k] > -1).any():
                 continue
-            r_k = float(r50[k]) if r50[k] > -1 else -1.0
-            p_k = p50[:, k]
-            if p_k.max() > -1 and r_k > 0:
-                f1_k = np.where(
-                    p_k > -1,
-                    2 * p_k * r_k / np.maximum(p_k + r_k, 1e-12),
-                    -1.0,
+            counts = per_class_point.get(k, {"tp": 0.0, "fp": 0.0, "fn": 0.0})
+            gt_total = counts["tp"] + counts["fn"]
+            if gt_total > 0:
+                predicted = counts["tp"] + counts["fp"]
+                p_point = counts["tp"] / predicted if predicted > 0 else 0.0
+                r_point = counts["tp"] / gt_total
+                f1_point = (
+                    2 * p_point * r_point / (p_point + r_point)
+                    if (p_point + r_point) > 0 else 0.0
                 )
-                best_k = int(np.argmax(f1_k))
-                f1_best = float(f1_k[best_k])
-                p_best = float(p_k[best_k])
             else:
-                f1_best = 0.0
-                p_best = 0.0
+                p_point = r_point = f1_point = 0.0
             self.last_per_class.append(
                 {
                     "name": name,
                     "ap": _mean(precision[tind:, :, k, aind, mind]),
                     "ar": _mean(recall[:, k, aind, mind]),
-                    "f1": f1_best,
-                    "precision": p_best,
-                    "recall": max(r_k, 0.0),
+                    "f1": float(f1_point),
+                    "precision": float(p_point),
+                    "recall": float(r_point),
                 }
             )
         return metrics

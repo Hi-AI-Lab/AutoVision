@@ -103,6 +103,7 @@ class RTDETRDetectionCollateFunction:
         images: list[torch.Tensor],
         boxes_list: list[torch.Tensor],
         classes_list: list[torch.Tensor],
+        crowds_list: list[torch.Tensor] | None = None,
     ) -> None:
         """Copy-paste blending (baseline CopyBlend, tensor form).
 
@@ -156,20 +157,37 @@ class RTDETRDetectionCollateFunction:
                     ],
                     dim=0,
                 )
+                if crowds_list is not None:
+                    # Pasted objects are real instances, not crowd regions.
+                    crowds_list[image_index] = torch.cat(
+                        [
+                            crowds_list[image_index],
+                            torch.zeros(1, dtype=crowds_list[image_index].dtype),
+                        ],
+                        dim=0,
+                    )
 
     def _filter_small_boxes(
-        self, boxes: torch.Tensor, classes: torch.Tensor, width: int, height: int
+        self,
+        boxes: torch.Tensor,
+        classes: torch.Tensor,
+        width: int,
+        height: int,
+        crowds: torch.Tensor | None = None,
     ):
         if boxes.numel() == 0:
-            return boxes, classes
+            return boxes, classes, crowds
         keep = (boxes[:, 2] * width >= self.transform_args.min_bbox_size_px) & (
             boxes[:, 3] * height >= self.transform_args.min_bbox_size_px
         )
-        return boxes[keep], classes[keep]
+        if crowds is not None:
+            return boxes[keep], classes[keep], crowds[keep]
+        return boxes[keep], classes[keep], None
 
     def __call__(self, batch: list[dict[str, Any]]) -> dict[str, Any]:
         args = self.transform_args
         images, boxes_list, classes_list = [], [], []
+        crowds_list: list[torch.Tensor] = []
         original_sizes = []
         input_size: tuple[int, int] | None = None
 
@@ -200,6 +218,12 @@ class RTDETRDetectionCollateFunction:
             images.append(image)
             boxes_list.append(boxes)
             classes_list.append(classes)
+            crowds_list.append(
+                item.get("iscrowds", None)
+                if item.get("iscrowds", None) is not None
+                and item["iscrowds"].shape[0] == boxes.shape[0]
+                else torch.zeros(boxes.shape[0], dtype=torch.long)
+            )
             original_sizes.append(tuple(item["original_size"]))
 
         input_size = (images[0].shape[-1], images[0].shape[-2])
@@ -222,6 +246,10 @@ class RTDETRDetectionCollateFunction:
                 torch.cat([classes_list[i], classes_list[i - 1]], dim=0)
                 for i in range(len(classes_list))
             ]
+            crowds_list = [
+                torch.cat([crowds_list[i], crowds_list[i - 1]], dim=0)
+                for i in range(len(crowds_list))
+            ]
 
         elif (
             self._copyblend_active
@@ -229,19 +257,28 @@ class RTDETRDetectionCollateFunction:
             and args.copyblend_prob is not None
             and random.random() < args.copyblend_prob
         ):
-            self._copyblend_batch(images, boxes_list, classes_list)
+            self._copyblend_batch(
+                images, boxes_list, classes_list, crowds_list=crowds_list
+            )
 
         filtered = [
-            self._filter_small_boxes(b, c, input_size[0], input_size[1])
-            for b, c in zip(boxes_list, classes_list)
+            self._filter_small_boxes(b, c, input_size[0], input_size[1], crowds)
+            for b, c, crowds in zip(boxes_list, classes_list, crowds_list)
         ]
-        boxes_list = [b for b, _ in filtered]
-        classes_list = [c for _, c in filtered]
+        boxes_list = [b for b, _, _ in filtered]
+        classes_list = [c for _, c, _ in filtered]
+        crowds_list = [
+            crowds if crowds is not None else torch.zeros(0, dtype=torch.long)
+            for _, _, crowds in filtered
+        ]
 
         return {
             "image": torch.stack(images),
             "bboxes": boxes_list,
             "classes": classes_list,
+            # METRIC-03: crowd flags ride the batch so the mAP evaluator can
+            # apply the official crowd-ignore protocol during validation.
+            "iscrowds": crowds_list,
             "image_path": [item["image_path"] for item in batch],
             "original_size": original_sizes,
             "input_size": input_size,

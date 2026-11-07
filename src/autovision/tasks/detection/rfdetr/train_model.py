@@ -317,7 +317,22 @@ class RFDETRObjectDetectionTrain(TrainModel):
             COCOMAPEvaluator(self.categories, max_dets=self.model_args.eval_max_dets),
         )
         evaluator.update(decoded)
-        evaluator.update_targets(targets, original_sizes=batch["original_size"])
+        # METRIC-03: crowd flags ride the VALIDATION targets only — the
+        # evaluator applies the official crowd-ignore protocol (the
+        # matcher/criterion path deliberately keeps pre-fix semantics).
+        iscrowds_batch = batch.get("iscrowds") or [
+            torch.zeros(labels.shape[0], dtype=torch.long)
+            for labels in batch["classes"]
+        ]
+        evaluator.update_targets(
+            [
+                {"boxes": boxes, "labels": labels, "iscrowds": crowds}
+                for boxes, labels, crowds in zip(
+                    batch["bboxes"], batch["classes"], iscrowds_batch
+                )
+            ],
+            original_sizes=batch["original_size"],
+        )
         if self.model_args.eval_erase is not None:
             self._erased_eval_step(x, targets, batch, model, metadata)
         loss = outputs["loss"]

@@ -20,9 +20,13 @@ from autovision.data.file_helpers import open_image
 from autovision.data.label_helpers import contiguous_class_id_map
 from autovision.data.object_detection_dataset import ObjectDetectionDataset
 from autovision.data.yolo_object_detection_dataset import (
+    _LABEL_ENCODING,
+    IMAGE_SUFFIXES,
     YOLOObjectDetectionDataArgs,
+    _MalformedLabelLines,
     yolo_images_to_labels_path,
 )
+from autovision.errors import AutoVisionError
 
 __all__ = [
     "OrientedObjectDetectionDataset",
@@ -40,28 +44,48 @@ class YOLOOrientedObjectDetectionDataArgs(YOLOObjectDetectionDataArgs):
         labels_dir = yolo_images_to_labels_path(images_dir)
         included = set(self.names) - set(self.ignore_classes or [])
         internal = contiguous_class_id_map(sorted(included))
+        ignored = set(self.ignore_classes or [])
+        malformed = _MalformedLabelLines(expected_fields=9)
 
         for image_path in sorted(images_dir.rglob("*")):
-            if not image_path.is_file() or image_path.suffix.lower() not in {
-                ".jpg", ".jpeg", ".png", ".bmp", ".webp"
-            }:
+            if not image_path.is_file() or image_path.suffix.lower() not in IMAGE_SUFFIXES:
                 continue
             relative = image_path.relative_to(images_dir)
             label_path = (labels_dir / relative).with_suffix(".txt")
             boxes: list[list[float]] = []
             labels: list[int] = []
             if label_path.exists():
-                for line in label_path.read_text().splitlines():
+                try:
+                    lines = label_path.read_text(encoding=_LABEL_ENCODING).splitlines()
+                except UnicodeDecodeError as error:
+                    # A binary/GBK label file used to die with a bare
+                    # UnicodeDecodeError and no file context (DATA-21).
+                    raise AutoVisionError(
+                        f"YOLO label file '{label_path}' is not valid "
+                        f"UTF-8 (utf-8-sig): {error}. Re-export the labels "
+                        "in UTF-8."
+                    ) from error
+                for line_number, line in enumerate(lines, start=1):
                     line = line.strip()
                     if not line:
                         continue
                     parts = line.split()
                     if len(parts) != 9:
+                        malformed.record(label_path, line_number)
                         continue
-                    class_id = int(parts[0])
+                    try:
+                        class_id = int(parts[0])
+                        coords = [float(v) for v in parts[1:]]
+                    except ValueError:
+                        # Same hot-path guard as the detection loader (DATA-06).
+                        malformed.record(label_path, line_number)
+                        continue
+                    if class_id in ignored:
+                        continue  # deliberate ignore_classes drop — silent
                     if class_id not in internal:
+                        malformed.record_unknown(label_path, line_number, class_id)
                         continue
-                    boxes.append([float(v) for v in parts[1:]])
+                    boxes.append(coords)
                     labels.append(internal[class_id])
             elif self.skip_if_label_file_missing and split == "train":
                 continue
@@ -70,6 +94,7 @@ class YOLOOrientedObjectDetectionDataArgs(YOLOObjectDetectionDataArgs):
                 "bboxes": json.dumps(boxes),
                 "class_labels": json.dumps(labels),
             }
+        malformed.warn_once(split)
 
 
 class OrientedObjectDetectionDataset(ObjectDetectionDataset):

@@ -15,11 +15,12 @@ calibrated) — see ``autovision.export.quantization``.
 from __future__ import annotations
 
 import glob
+import inspect
 import logging
 import os
 import uuid
 from pathlib import Path
-from typing import Any, Iterable, Literal
+from typing import Any, Iterable, Literal, Sequence
 
 import torch
 from torch import nn
@@ -37,6 +38,13 @@ INT8_PARITY_RTOL = 0.5
 #: Exported graphs below this size are treated as truncated (design D14b):
 #: a header-only "success" fails the export instead of shipping a graph
 #: with no weights.
+# EXPORT audit P3-12: the dynamo batch Dim's documented ceiling; ORT
+# rejects a larger batch at load time with a shape error.
+_MAX_DYNAMIC_BATCH = 128
+# EXPORT-10: external data beyond this size cannot be inlined by the
+# later repair/metadata steps (protobuf limit) — fail fast instead.
+_MAX_INLINE_EXTERNAL_DATA = 2 * (1 << 30)
+
 _MIN_ARTIFACT_BYTES = 4096
 
 logger = logging.getLogger("autovision")
@@ -58,7 +66,9 @@ def _spec_dynamic_axes(spec: Any, input_name: str) -> dict[int, Any]:
     }
 
 
-def _dim_from_marker(marker: Any, axis: int) -> Any:
+def _dim_from_marker(
+    marker: Any, axis: int, cache: dict[str, Any] | None = None
+) -> Any:
     """``torch.export.Dim`` for one dynamic-axis marker.
 
     Accepted forms: a ready ``Dim`` (used as-is), an axis NAME (str →
@@ -67,13 +77,24 @@ def _dim_from_marker(marker: Any, axis: int) -> Any:
     feature pyramids asserting ``size // divisor >= 1``) will REJECT with
     ``Constraints violated``; use the tuple form (or the
     ``dynamic_spatial`` flag, whose bounds derive from the example) there.
+
+    ``cache`` (H3-4e) is a per-export dict: two markers with the same NAME
+    must resolve to the SAME ``Dim`` object — torch.export treats a fresh
+    ``Dim`` with a reused name as a second unrelated axis (equal-sizes
+    constraint lost, or an outright export error). Scope is one export
+    call; a module-level cache would leak bounds across exports.
     """
     from torch.export import Dim
 
     if isinstance(marker, Dim):
         return marker
     if isinstance(marker, str):
-        return Dim(marker, min=1)
+        if cache is not None and marker in cache:
+            return cache[marker]
+        dim = Dim(marker, min=1)
+        if cache is not None:
+            cache[marker] = dim
+        return dim
     if isinstance(marker, (tuple, list)) and len(marker) == 2:
         low, high = marker
         return Dim(f"dynamic_axis{axis}", min=int(low), max=int(high))
@@ -92,8 +113,34 @@ def _drop_onnx_artifacts(*paths: Path) -> None:
 
 
 def _move_onnx_artifacts(source: Path, target: Path) -> None:
-    """Move an ONNX graph and its external-data sidecar atomically."""
-    os.replace(source, target)
+    """Move an ONNX graph, its external-data sidecar, and the decode
+    contract sidecar in one rename sequence (EXPORT-09).
+
+    The spec (when present at the staged path) moves FIRST — after the
+    graph rename a reader sees either old-graph+old-spec or
+    new-graph+new-spec; publishing the graph before the spec exposed a
+    window where the new graph paired with the PREVIOUS run's decode
+    contract.
+    """
+    source_spec = Path(str(source) + ".postprocess.json")
+    target_spec = Path(str(target) + ".postprocess.json")
+    spec_backup: bytes | None = None
+    if source_spec.is_file():
+        # EXPORT-09 (review P2-4): publish the spec first, keep the OLD
+        # spec's bytes, and restore them if the graph rename fails — a
+        # failed export must not leave the new decode contract paired with
+        # the OLD graph.
+        spec_backup = target_spec.read_bytes() if target_spec.is_file() else None
+        os.replace(source_spec, target_spec)
+    try:
+        os.replace(source, target)
+    except BaseException:
+        if spec_backup is not None:
+            target_spec.write_bytes(spec_backup)
+        elif source_spec.is_file():
+            # The old graph had NO spec: remove the newly published one.
+            target_spec.unlink(missing_ok=True)
+        raise
     source_data = source.with_suffix(source.suffix + ".data")
     if source_data.exists():
         os.replace(source_data, target.with_suffix(target.suffix + ".data"))
@@ -191,6 +238,20 @@ def _eager_reference_device_bound(network: Any) -> bool:
     )
 
 
+def _parity_session_providers(available: Sequence[str]) -> list[str]:
+    """Execution providers for the parity-gate session (H1-8).
+
+    The fp16 gate's warning promises "re-verify on a CUDA-enabled
+    onnxruntime build for exact parity": when such a build is installed, the
+    session actually routes through the CUDA execution provider so the fp16
+    graph is gated on the device numerics it targets. The CUDA EP is listed
+    first so onnxruntime cannot silently fall back to the CPU EP.
+    """
+    if "CUDAExecutionProvider" in available:
+        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    return ["CPUExecutionProvider"]
+
+
 def _warn_tensorrt_version_advisory(network: Any) -> None:
     """Warn when a module declares a TensorRT-version advisory and the
     installed TensorRT falls in the known-bad range (the GTR pure-ONNX
@@ -233,6 +294,58 @@ def _warn_tensorrt_version_advisory(network: Any) -> None:
         tensorrt.__version__,
         advisory,
     )
+
+
+#: Hooks already told (H3-4c) that their gate runs at fp32 tolerances.
+_FP32_TOLERANCE_WARNED: set[str] = set()
+
+
+def _hook_accepts_precision(hook: Any) -> bool:
+    """Whether a verify hook consumes the ``precision`` keyword (H3-4c).
+
+    Only a named parameter or ``**kwargs`` counts: the task-family hooks
+    declare the parameter but half of them ignore it (fp32-tolerance
+    bodies) — a signature alone cannot see that, so the central fallback
+    can only promise correctness for hooks WITHOUT the parameter.
+    """
+    try:
+        parameters = inspect.signature(hook).parameters
+    except (TypeError, ValueError):
+        return True  # not introspectable: assume compatible, stay silent
+    if "precision" in parameters:
+        return True
+    return any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+
+
+def _call_verify_hook(
+    network: Any, torch_outputs: Any, onnx_outputs: list, *, precision: str
+) -> None:
+    """Invoke the task's verify hook with its precision contract (H3-4c).
+
+    Hooks that accept ``precision`` get it; hooks that do not are called
+    without it (legacy plugins keep working) and warned about ONCE: their
+    gate then runs at the fp32 tolerance band even for an fp16 export,
+    which is the loose-tolerance direction users must know about.
+    """
+    hook = network.verify_onnx_export_outputs
+    if precision == "fp16" and not _hook_accepts_precision(hook):
+        marker = f"{type(network).__module__}.{type(network).__qualname__}"
+        if marker not in _FP32_TOLERANCE_WARNED:
+            _FP32_TOLERANCE_WARNED.add(marker)
+            logger.warning(
+                "Verify hook %s.verify_onnx_export_outputs does not accept "
+                "a 'precision' argument; the fp16 export is gated at the "
+                "fp32 tolerance band (atol 5e-3 / rtol 1e-1) and may be "
+                "too tight for real fp16 numerics. Update the hook to "
+                "accept precision and branch its tolerances.",
+                marker,
+            )
+        hook(torch_outputs, onnx_outputs)
+        return
+    hook(torch_outputs, onnx_outputs, precision=precision)
 
 
 class ONNXExportPrecisionPolicy:
@@ -352,15 +465,19 @@ class ONNXExportMixin(nn.Module):
                 opset_version=opset_version,
                 simplify=simplify,
                 verify=verify,
-                write_spec=False,
+                # EXPORT-09: the spec stages beside the graph so
+                # _move_onnx_artifacts publishes the pair in one window.
+                # P1-2: forward the CALLER's write_spec — the hardcoded True
+                # ignored the TRT/OV/int8 wrappers' write_spec=False and
+                # littered intermediate artifacts with decode contracts.
+                write_spec=write_spec,
                 format_args=format_args,
             )
             _move_onnx_artifacts(tmp_out, final_out)
         except Exception:
+            Path(str(tmp_out) + ".postprocess.json").unlink(missing_ok=True)
             _drop_onnx_artifacts(tmp_out)
             raise
-        if write_spec:
-            _maybe_write_postprocess_spec(self, final_out)
         return final_out
 
     @torch.no_grad()
@@ -462,7 +579,10 @@ class ONNXExportMixin(nn.Module):
         from torch.export import Dim
 
         spec = self.model_input_spec
-        batch_dim = Dim("batch_size", min=1, max=128) if dynamic_batch_size else batch_size
+        # EXPORT audit P3-12: the dynamic batch ceiling is a documented
+        # export contract — ORT rejects batch > 128 at load time with a
+        # shape error; keep the limit visible at the definition.
+        batch_dim = Dim("batch_size", min=1, max=_MAX_DYNAMIC_BATCH) if dynamic_batch_size else batch_size
         # Trace on the model's own device: a CUDA-resident model (the normal
         # case right after training) would otherwise hit a device mismatch
         # against a CPU example input inside the strict export.
@@ -482,9 +602,11 @@ class ONNXExportMixin(nn.Module):
         # fast path. (Numerically transparent: the hooks only record.)
         module(example_tensor)
         # The TaskNetwork forward contract is ``forward(self, x: Tensor)``.
+        # dim_cache (H3-4e): same-name axis markers must share one Dim.
+        dim_cache: dict[str, Any] = {}
         dynamic_shapes = {"x": self._onnx_dynamic_shapes(
             spec, example_name, batch_dim, dynamic_batch_size, dynamic_spatial,
-            example_tensor=example_tensor,
+            example_tensor=example_tensor, dim_cache=dim_cache,
         )}
         dynamic_axes_requested = dynamic_spatial or any(
             axis != 0 for axis in _spec_dynamic_axes(spec, example_name)
@@ -560,25 +682,58 @@ class ONNXExportMixin(nn.Module):
 
             onnxslim.slim(str(out), output=str(out), skip_optimizations=["constant_folding"])
 
+        # EXPORT-10: the dynamo exporter externalizes ALL initializers at
+        # trace time (normal); onnxslim inlines them back — UNLESS the graph
+        # is beyond the ~2GB protobuf limit, where the value_info repair and
+        # metadata write (both `onnx.load` without the flag) would die
+        # opaquely deep inside the pipeline. Gate on the actual .data size
+        # AFTER onnxslim: a >2GB sidecar cannot be inlined by any later step.
+        data_sidecar = out.with_suffix(out.suffix + ".data")
+        if data_sidecar.is_file() and data_sidecar.stat().st_size > _MAX_INLINE_EXTERNAL_DATA:
+            raise AutoVisionError(
+                f"'{out.name}' carries {data_sidecar.stat().st_size / 1e9:.1f}GB "
+                "of external initializers (beyond the ~2GB protobuf limit): "
+                "the value-info repair and metadata write would inline the "
+                "whole model and fail opaquely. Export in-graph (smaller "
+                "model / lower precision) or split the graph."
+            )
+
         # 6. repair value_info (dynamo exporter can leave wrong rank hints).
         _repair_value_info(out)
 
-        # 7. metadata.
-        metadata = self.onnx_export_metadata()
-        _write_onnx_metadata(out, metadata)
-        logger.info(
-            "Artifact identity: task=%s, num_classes=%s, image_size=%s.",
-            metadata.get("autovision_task"),
-            metadata.get("num_classes"),
-            metadata.get("autovision_image_size"),
-        )
-
-        # 8. verification gate.
+        # 7. verification gate FIRST (EXPORT-02): the verify strength
+        # ("full" / fp16-no-CUDA "smoke-only" / "unverified") is part of the
+        # artifact's identity and must land in the metadata — with the gate
+        # after the metadata write, a smoke-only graph could never be
+        # distinguished from a fully-parity-verified one by anything reading
+        # the artifact. Review P2-1: verify=False (throwaway debug builds,
+        # per the docstring) must NOT claim "full" — VerifyStrengthGate
+        # would wave it through.
+        verify_strength = "unverified"
         if verify:
-            self._verify_onnx(
+            verify_strength = self._verify_onnx(
                 out, example_name, example_tensor, precision,
                 dynamic_spatial=dynamic_spatial,
             )
+
+        # 8. metadata (the toolchain record carries the graph's REAL opset:
+        # the export argument may be None and the exporter's default won).
+        metadata = self.onnx_export_metadata()
+        effective_opset = _graph_opset_version(out)
+        if effective_opset is not None:
+            from autovision.export.artifact_metadata import record_onnx_opset
+
+            record_onnx_opset(metadata, effective_opset)
+        metadata["autovision_verify_strength"] = verify_strength
+        _write_onnx_metadata(out, metadata)
+        logger.info(
+            "Artifact identity: task=%s, num_classes=%s, image_size=%s, "
+            "verify=%s.",
+            metadata.get("autovision_task"),
+            metadata.get("num_classes"),
+            metadata.get("autovision_image_size"),
+            verify_strength,
+        )
         # Gross-truncation guard (parity owns numerics; this owns the
         # "wrote only a header" accident). A real exported graph with its
         # weights is never this small.
@@ -593,6 +748,11 @@ class ONNXExportMixin(nn.Module):
         _sweep_orphan_external_data(out)
         logger.info("Exported ONNX model to '%s' (%s).", out, precision)
         if write_spec:
+            # EXPORT-09: publish the decode contract BEFORE the graph is
+            # renamed into place — a concurrent reader then either sees
+            # old-graph+old-spec or new-graph+new-spec. The old order (graph
+            # first) exposed a window where the new graph paired with the
+            # PREVIOUS run's decode contract.
             _maybe_write_postprocess_spec(self, out)
         return out
 
@@ -655,6 +815,7 @@ class ONNXExportMixin(nn.Module):
         dynamic_spatial: bool,
         *,
         example_tensor: torch.Tensor | None = None,
+        dim_cache: dict[str, Any] | None = None,
     ) -> tuple[Any, ...]:
         """Per-axis dynamic markers for the image input.
 
@@ -692,7 +853,7 @@ class ONNXExportMixin(nn.Module):
                         "STATIC."
                     )
                 continue  # batch is governed by dynamic_batch_size
-            axes[axis] = _dim_from_marker(marker, axis)
+            axes[axis] = _dim_from_marker(marker, axis, cache=dim_cache)
         return tuple(axes)
 
     def _onnx_output_names(self, example_tensor: torch.Tensor) -> list[str]:
@@ -743,14 +904,24 @@ class ONNXExportMixin(nn.Module):
         self, out: Path, example_name: str, example_tensor: torch.Tensor,
         precision: str,
         dynamic_spatial: bool = False,
-    ) -> None:
+    ) -> str:
+        """Run the parity gate; return the machine-readable verify strength.
+
+        EXPORT-02: ``"full"`` (element-wise parity ran) vs
+        ``"smoke-only"`` (fp16 without a CUDA execution provider — the
+        execute-and-finiteness gate). The strength lands in the artifact
+        metadata so downstream consumers can tell whether verify=True ever
+        compared numbers on this machine instead of guessing from a
+        warning lost in the build log.
+        """
         import copy
 
         import onnx
         import onnxruntime as ort
 
         onnx.checker.check_model(str(out), full_check=True)
-        if precision == "fp16" and "CUDAExecutionProvider" not in ort.get_available_providers():
+        available_providers = ort.get_available_providers()
+        if precision == "fp16" and "CUDAExecutionProvider" not in available_providers:
             # ORT's CPU EP runs fp16 graphs through internal fp32 casts, but
             # the per-model verify hooks are tuned for the CUDA-EP numerics
             # these graphs target — element-wise parity would false-positive.
@@ -763,10 +934,20 @@ class ONNXExportMixin(nn.Module):
                 "running the execute-and-finiteness smoke gate instead. "
                 "Re-verify on a CUDA-enabled onnxruntime build (e.g. pip "
                 "install onnxruntime-gpu) for exact parity.",
-                ", ".join(ort.get_available_providers()),
+                ", ".join(available_providers),
             )
             self._smoke_verify_fp16(out, example_tensor)
-            return
+            return "smoke-only"
+
+        providers = _parity_session_providers(available_providers)
+        if providers[0] == "CUDAExecutionProvider":
+            logger.info(
+                "ONNX parity gate: CUDA execution provider active "
+                "(available: %s; onnxruntime %s) — the graph is gated on "
+                "device numerics.",
+                ", ".join(available_providers),
+                ort.__version__,
+            )
 
         reference = copy.deepcopy(self).cpu().float().eval()
         if hasattr(reference, "deploy"):
@@ -779,7 +960,7 @@ class ONNXExportMixin(nn.Module):
         prepare = getattr(reference, "_prepare_onnx_export_modules", None)
         prepared = prepare() if callable(prepare) else []
         try:
-            session = ort.InferenceSession(str(out), providers=["CPUExecutionProvider"])
+            session = ort.InferenceSession(str(out), providers=providers)
 
             def _compare(tensor: torch.Tensor) -> None:
                 torch_outputs = reference.forward_backend(tensor.float().cpu())
@@ -787,14 +968,29 @@ class ONNXExportMixin(nn.Module):
                     import dataclasses
                     if dataclasses.is_dataclass(torch_outputs):
                         torch_outputs = [getattr(torch_outputs, f.name) for f in dataclasses.fields(torch_outputs)]
+                session_inputs = session.get_inputs()
+                if len(session_inputs) > 1:
+                    # H3-4f: feeding every input the SAME tensor "verifies"
+                    # nothing for the second+ inputs (their real distributions
+                    # differ); the TaskNetwork export contract is a single
+                    # image tensor, so this is unreachable for supported
+                    # exports — refuse loudly instead of pretending.
+                    raise AutoVisionError(
+                        "暂不支持多输入对拍: the parity gate feeds one "
+                        f"tensor, but the graph declares {len(session_inputs)} "
+                        "inputs ("
+                        + ", ".join(item.name for item in session_inputs)
+                        + "). Export with verify=False or extend the gate "
+                        "for this multi-input graph."
+                    )
                 feeds = {}
-                for session_input in session.get_inputs():
+                for session_input in session_inputs:
                     feed = tensor.float().cpu()
                     if session_input.type == "tensor(float16)":
                         feed = feed.half()
                     feeds[session_input.name] = feed.numpy()
                 onnx_outputs = session.run(None, feeds)
-                self.verify_onnx_export_outputs(torch_outputs, onnx_outputs, precision=precision)
+                _call_verify_hook(self, torch_outputs, onnx_outputs, precision=precision)
 
             # The comparison input is SEEDED RANDOM, not the spec's all-zero
             # example: on a zero image a DETR's query selection has tie-broken
@@ -820,9 +1016,16 @@ class ONNXExportMixin(nn.Module):
                 factor = (2, 3) if min(height, width) >= 128 else (3, 2)
                 probe_height = max(1, height * factor[0] // factor[1])
                 probe_width = max(1, width * factor[0] // factor[1])
+                # EXPORT-05: the probe input is SEEDED like the first
+                # compare input (same tie-flip argument the first input's
+                # comment derives — an unseeded probe made the gate flaky
+                # at the second size, exactly the failure mode the seeding
+                # exists to prevent).
+                probe_generator = torch.Generator().manual_seed(0)
                 probe = torch.rand(
                     (example_tensor.shape[0], example_tensor.shape[1],
                      probe_height, probe_width),
+                    generator=probe_generator,
                     dtype=example_tensor.dtype,
                 )
                 logger.info(
@@ -832,6 +1035,7 @@ class ONNXExportMixin(nn.Module):
                 _compare(probe)
         finally:
             self._restore_onnx_export_modules(prepared)
+        return "full"  # EXPORT-02: the element-wise gate ran end to end
 
     def _smoke_verify_fp16(self, out: Path, example_tensor: torch.Tensor) -> None:
         """Runtime smoke gate for fp16 graphs on builds without a CUDA EP.
@@ -1004,6 +1208,15 @@ class ONNXExportMixin(nn.Module):
             )
         fp32_outputs = sessions["fp32"].run(None, sample)
         int8_outputs = sessions["int8"].run(None, sample)
+        if len(fp32_outputs) != len(int8_outputs):
+            # EXPORT-06: a silent zip truncation would compare only the
+            # shared prefix and pass a structurally broken quantized graph
+            # (the TRT gate raises on the same condition).
+            raise AssertionError(
+                f"int8 parity gate: output count mismatch — "
+                f"{len(int8_outputs)} int8 output(s) vs {len(fp32_outputs)} "
+                "FP32 output(s); the quantized graph is structurally broken."
+            )
         for index, (fp32_out, int8_out) in enumerate(zip(fp32_outputs, int8_outputs)):
             if fp32_out.shape != int8_out.shape:
                 raise AssertionError(
@@ -1012,9 +1225,12 @@ class ONNXExportMixin(nn.Module):
                 )
             fp32_sum = torch.as_tensor(fp32_out).float().sum(dim=1)
             int8_sum = torch.as_tensor(int8_out).float().sum(dim=1)
+            # equal_nan=False (EXPORT-06): a NaN in the FP32 REFERENCE means
+            # the source model or calibration is broken — letting NaN==NaN
+            # pass would bless a broken calibration with a green gate.
             torch.testing.assert_close(
                 int8_sum, fp32_sum,
-                atol=parity_atol, rtol=parity_rtol, equal_nan=True,
+                atol=parity_atol, rtol=parity_rtol, equal_nan=False,
                 check_device=False, check_dtype=False,
             )
 
@@ -1027,6 +1243,7 @@ class ONNXExportMixin(nn.Module):
         calibration_reader: Any | None = None,
         quantization_config: Any | None = None,
         keep_int8_onnx: bool = False,
+        keep_staged_onnx: bool = False,
         min_batch_size: int = 1,
         opt_batch_size: int = 1,
         max_batch_size: int = 1,
@@ -1041,9 +1258,11 @@ class ONNXExportMixin(nn.Module):
 
         Requires the ``tensorrt`` package (not a framework dependency) and a
         CUDA-capable machine for the engine build. The intermediate ONNX is
-        produced by :meth:`export_onnx` — see
-        :func:`autovision.export.tensorrt_helpers.export_onnx_to_tensorrt`
-        for the engine-build semantics.
+        produced by :meth:`export_onnx` and removed once the engine built
+        and passed its gates (H3-4b: the staged graph never ran the parity
+        gate — deploying it because it happens to sit next to the verified
+        engine is exactly the accident this avoids). ``keep_staged_onnx=True``
+        preserves it for TensorRT-side debugging.
 
         ``precision="int8"`` (roadmap D4) quantizes first — the QDQ ONNX
         from :meth:`export_onnx_int8` (its int8-vs-fp32 parity gate runs
@@ -1054,16 +1273,26 @@ class ONNXExportMixin(nn.Module):
         ``keep_int8_onnx=True`` keeps the SANITIZED QDQ graph (the
         TensorRT-side int32 fold mutates it in place).
 
-        ``verify=True`` runs a seeded eager-vs-engine parity check after the
-        build (final tensors, precision-appropriate tolerances); a mismatch
-        deletes the engine and raises. Set ``verify=False`` only for
-        throwaway debug builds.
+        ``verify=True`` runs a seeded eager-vs-engine parity check against
+        the staged engine BEFORE publication (final tensors, tolerances
+        chosen by the engine's RESOLVED precision — H3-4a: ``auto`` reads
+        the build decision back instead of assuming fp16); a mismatch drops
+        the staged engine and raises while any previous engine at the target
+        path stays untouched. Set ``verify=False`` only for throwaway debug
+        builds.
         """
         _warn_tensorrt_version_advisory(self)
         from autovision.export.tensorrt_helpers import export_onnx_to_tensorrt
 
+        # H3-4a: the helper reports the build decision point's resolved
+        # precision here; the gate reads it after the build returns.
+        resolved_precision_report: dict[str, str] = {}
+
         def _verify_engine(engine_path: Path) -> None:
-            """Eager-vs-engine parity gate (fail closed: delete the engine)."""
+            """Eager-vs-engine parity gate against the STAGED engine (fail
+            closed: drop the staged engine on mismatch). The gate runs before
+            publication, so a numerically drifting engine never overwrites
+            the artifact at the published target (H1-6)."""
             if not verify:
                 return
             from autovision.export.tensorrt_helpers import (
@@ -1087,11 +1316,12 @@ class ONNXExportMixin(nn.Module):
             compare = torch.rand(
                 sample.shape, generator=generator, dtype=sample.dtype
             ).to(sample.device)
-            resolved_precision = precision
-            if resolved_precision == "auto":
-                # The engine may be fp16 (explicit request or an fp16 model
-                # at build time); use the fp16 band for auto builds.
-                resolved_precision = "fp16"
+            resolved_precision = resolved_precision_report.get("precision")
+            if resolved_precision is None:
+                # The helper pre-dating H3-4a reporting (e.g. a mocked
+                # build): keep the documented fallback — auto assumed the
+                # fp16 band, explicit precisions resolve to themselves.
+                resolved_precision = precision if precision != "auto" else "fp16"
             atol, rtol = {
                 "fp32": (5e-3, 1e-2),
                 "fp16": (5e-2, 5e-2),
@@ -1208,6 +1438,17 @@ class ONNXExportMixin(nn.Module):
         # engine gets a postprocess sidecar.
         effective_onnx_args = {**(onnx_args or {}), "write_spec": False}
 
+        # H1-6: build and gate the engine under a STAGED name, publish with
+        # os.replace only after the gate passes. The ".tmp-<pid>" marker is
+        # the atomic-write convention shared with checkpoint writes, so a
+        # killed exporter's orphans stay sweepable by fs_utils' mtime guard.
+        final_out = Path(out)
+        final_out.parent.mkdir(parents=True, exist_ok=True)
+        sweep_stale_temp_files(
+            final_out.parent, glob.escape(final_out.name) + ".tmp-*"
+        )
+        tmp_engine = final_out.with_name(f"{final_out.name}.tmp-{os.getpid()}")
+
         if precision == "int8":
             if calibration_data is None and calibration_reader is None:
                 raise ValueError(
@@ -1215,7 +1456,7 @@ class ONNXExportMixin(nn.Module):
                     "calibration_data (iterable of {input_name: Tensor}) or "
                     "calibration_reader."
                 )
-            int8_onnx = Path(out).with_suffix(".int8.onnx")
+            int8_onnx = final_out.with_suffix(".int8.onnx")
 
             def _drop(path: Path) -> None:
                 for candidate in (path, path.with_suffix(path.suffix + ".data")):
@@ -1239,7 +1480,7 @@ class ONNXExportMixin(nn.Module):
             try:
                 engine = export_onnx_to_tensorrt(
                     export_onnx_fn=self.export_onnx,
-                    out=out,
+                    out=tmp_engine,
                     precision="int8",
                     model_dtype=next(self.parameters()).dtype,
                     onnx_args=effective_onnx_args,
@@ -1251,38 +1492,101 @@ class ONNXExportMixin(nn.Module):
                     verbose=verbose,
                     debug=debug,
                     pre_staged_onnx=int8_onnx,
+                    resolved_precision_out=resolved_precision_report,
                 )
+                _verify_engine(engine)
+            except BaseException:
+                tmp_engine.unlink(missing_ok=True)
+                raise
             finally:
                 _drop(int8_onnx.with_suffix(".fp32.onnx"))
                 if not keep_int8_onnx:
                     _drop(int8_onnx)
-            _verify_engine(engine)
-            _write_engine_identity(self, engine, precision)
-            _maybe_write_postprocess_spec(self, engine)
+            # EXPORT-09: same sidecar-first ordering as the fp32/fp16 path
+            # (review P1-1: one snapshot before any publish).
+            sidecar_paths = (
+                final_out.with_suffix(".meta.json"),
+                Path(str(final_out) + ".postprocess.json"),
+            )
+            int8_backup: dict[Path, bytes] = {
+                path: path.read_bytes() for path in sidecar_paths if path.is_file()
+            }
+            try:
+                _write_engine_identity(self, final_out, precision)
+                _maybe_write_postprocess_spec(self, final_out)
+                os.replace(tmp_engine, final_out)
+            except BaseException:
+                for path, payload in int8_backup.items():
+                    path.write_bytes(payload)
+                for path in sidecar_paths:
+                    if path not in int8_backup:
+                        path.unlink(missing_ok=True)
+                tmp_engine.unlink(missing_ok=True)
+                raise
             if not keep_int8_onnx:
                 # export_onnx_int8 wrote the staged ONNX sidecar; the engine
                 # carries its own, so do not leave a dangling contract.
                 Path(str(int8_onnx) + ".postprocess.json").unlink(missing_ok=True)
-            return engine
+            return final_out
 
-        engine = export_onnx_to_tensorrt(
-            export_onnx_fn=self.export_onnx,
-            out=out,
-            precision=precision,
-            model_dtype=next(self.parameters()).dtype,
-            onnx_args=effective_onnx_args,
-            min_batch_size=min_batch_size,
-            opt_batch_size=opt_batch_size,
-            max_batch_size=max_batch_size,
-            fp32_attention_scores=fp32_attention_scores,
-            strongly_typed=strongly_typed,
-            verbose=verbose,
-            debug=debug,
+        try:
+            engine = export_onnx_to_tensorrt(
+                export_onnx_fn=self.export_onnx,
+                out=tmp_engine,
+                precision=precision,
+                model_dtype=next(self.parameters()).dtype,
+                onnx_args=effective_onnx_args,
+                min_batch_size=min_batch_size,
+                opt_batch_size=opt_batch_size,
+                max_batch_size=max_batch_size,
+                fp32_attention_scores=fp32_attention_scores,
+                strongly_typed=strongly_typed,
+                verbose=verbose,
+                debug=debug,
+                resolved_precision_out=resolved_precision_report,
+                keep_staged_onnx=keep_staged_onnx,
+            )
+            _verify_engine(engine)
+        except BaseException:
+            # Build or gate failure: only the staged engine is dropped; the
+            # published target (if any) keeps its previous bytes.
+            tmp_engine.unlink(missing_ok=True)
+            raise
+        # EXPORT-09: identity + decode-contract sidecars publish to the
+        # LOADER's names (with_suffix of the final artifact) BEFORE the
+        # engine rename, with the previous sidecars backed up and restored
+        # on failure — after the rename a reader sees either
+        # old-engine+old-sidecars or new-engine+new-sidecars. The old order
+        # (engine first, sidecars after) let a fresh engine pair with the
+        # PREVIOUS run's identity sidecar during the window.
+        # Review P1-1: the backup snapshot must be taken ONCE, BEFORE any
+        # publish — per-iteration re-snapshots read the NEW bytes written
+        # by the previous publish and overwrite the old identity in the
+        # backup, so a failure mid-sequence restored NEW sidecars onto the
+        # OLD engine (the exact state this block exists to prevent).
+        sidecar_paths = (
+            final_out.with_suffix(".meta.json"),
+            Path(str(final_out) + ".postprocess.json"),
         )
-        _verify_engine(engine)
-        _write_engine_identity(self, engine, precision)
-        _maybe_write_postprocess_spec(self, engine)
-        return engine
+        backup: dict[Path, bytes] = {
+            path: path.read_bytes() for path in sidecar_paths if path.is_file()
+        }
+        try:
+            _write_engine_identity(self, final_out, precision)
+            _maybe_write_postprocess_spec(self, final_out)
+            os.replace(tmp_engine, final_out)
+        except BaseException:
+            # Restore the previous sidecars so the OLD engine keeps its OLD
+            # identity; sidecars absent from the backup were newly created
+            # by this failed export and are removed.
+            for path, payload in backup.items():
+                path.write_bytes(payload)
+            for path in sidecar_paths:
+                if path not in backup:
+                    path.unlink(missing_ok=True)
+            tmp_engine.unlink(missing_ok=True)
+            raise
+        return final_out
 
     def export_openvino(
         self,
@@ -1346,6 +1650,10 @@ def _maybe_write_postprocess_spec(network: Any, artifact: Path) -> None:
     ``postprocess_spec_family`` marker distinguishes the DETR detection task
     models from other heads that also carry ``image_size``/``num_classes``
     or ``num_top_queries`` (OBB / instance segmentation / PicoDet).
+
+    The sidecar is staged and published with ``os.replace`` like the
+    artifact itself (H1-6): a killed exporter must not leave a partial
+    decode contract next to a good graph/engine/IR.
     """
     family = getattr(network, "postprocess_spec_family", None)
     if family is None:
@@ -1354,7 +1662,19 @@ def _maybe_write_postprocess_spec(network: Any, artifact: Path) -> None:
     from autovision.export.postprocess import write_postprocess_spec
 
     try:
-        write_postprocess_spec(network, artifact, family=family)
+        artifact = Path(artifact)
+        target = Path(str(artifact) + ".postprocess.json")
+        # write_postprocess_spec appends ".postprocess.json" to the artifact
+        # path it is handed, so the sidecar is staged under the artifact's
+        # ".tmp-<pid>" marker (keeping the suffix intact for the rename —
+        # and keeping the staged name sweepable, like the artifact tmps).
+        staged = artifact.with_name(f"{artifact.name}.tmp-{os.getpid()}")
+        staged_sidecar = Path(str(staged) + ".postprocess.json")
+        try:
+            write_postprocess_spec(network, staged, family=family)
+            os.replace(staged_sidecar, target)
+        finally:
+            staged_sidecar.unlink(missing_ok=True)
     except NotImplementedError:
         logger.debug("No postprocess spec for %s.", type(network).__name__)
 
@@ -1366,6 +1686,24 @@ def _repair_value_info(out: Path) -> None:
     del model.graph.value_info[:]
     model = onnx.shape_inference.infer_shapes(model, strict_mode=False, data_prop=True)
     onnx.save(model, str(out))
+
+
+def _graph_opset_version(out: Path) -> int | None:
+    """The opset the written graph actually targets (H3-4d).
+
+    ``opset_version=None`` lets the exporter pick its default; reading the
+    graph back records what really shipped instead of guessing the default.
+    """
+    import onnx
+
+    try:
+        model = onnx.load(str(out), load_external_data=False)
+    except Exception:  # noqa: BLE001 - metadata is best-effort, parity owns failure
+        return None
+    for entry in model.opset_import:
+        if entry.domain in ("", "ai.onnx"):
+            return int(entry.version)
+    return None
 
 
 def _write_onnx_metadata(out: Path, metadata: dict[str, str]) -> None:

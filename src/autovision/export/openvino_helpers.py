@@ -13,6 +13,7 @@ outputs on the model's example input through the same
 
 from __future__ import annotations
 
+import glob
 import json
 import logging
 import os
@@ -20,6 +21,7 @@ import pathlib
 from typing import Any
 
 from autovision.errors import AutoVisionError
+from autovision.runtime.fs_utils import sweep_stale_temp_files
 
 __all__ = [
     "OpenVINOEngineRunner",
@@ -107,15 +109,35 @@ def export_onnx_to_openvino(
     unless ``keep_onnx``. Metadata rides in a ``<stem>.json`` sidecar (IR
     cannot carry ONNX metadata); with ``verify`` the torch reference and
     the COMPILED OpenVINO model are compared on the example input via
-    ``model.verify_onnx_export_outputs`` — an OpenVINO artifact that fails
-    the parity gate is never accepted.
+    ``model.verify_onnx_export_outputs``. The IR pair is staged under temp
+    names and published with ``os.replace`` only after the parity gate
+    passes — a gate failure drops the staged pair and leaves any previous
+    IR at the target untouched.
     """
     openvino = _import_openvino()
     if precision not in ("fp32", "fp16"):
         raise ValueError(f"precision must be 'fp32' or 'fp16', got '{precision}'")
 
     xml_path = _resolve_ir_path(out)
+    bin_path = xml_path.with_suffix(".bin")
     onnx_path = xml_path.with_suffix(".onnx")
+
+    # H1-7: the IR pair is staged under ".tmp-<pid>" names and published
+    # with os.replace only after the parity gate passes. The marker sits
+    # BEFORE the ".xml" extension (not appended): ``save_model`` and the
+    # OpenVINO runtime resolve the weights file by replacing that suffix,
+    # so the staged pair must remain a valid xml/bin pair. The names stay
+    # compatible with fs_utils' mtime-guarded orphan sweep.
+    stem_glob = glob.escape(xml_path.stem)
+    sweep_stale_temp_files(xml_path.parent, f"{stem_glob}.tmp-*.xml")
+    sweep_stale_temp_files(xml_path.parent, f"{stem_glob}.tmp-*.bin")
+    pid = os.getpid()
+    tmp_xml = xml_path.with_name(f"{xml_path.stem}.tmp-{pid}.xml")
+    tmp_bin = tmp_xml.with_suffix(".bin")
+
+    def _drop_ir_tmp() -> None:
+        tmp_xml.unlink(missing_ok=True)
+        tmp_bin.unlink(missing_ok=True)
 
     def _drop_intermediate() -> None:
         for candidate in (onnx_path, onnx_path.with_suffix(".onnx.data")):
@@ -126,25 +148,57 @@ def export_onnx_to_openvino(
     try:
         export_onnx_fn(onnx_path, **export_kwargs)
         ov_model = openvino.convert_model(str(onnx_path))
-        openvino.save_model(ov_model, str(xml_path))
-        logger.info("Saved OpenVINO IR to '%s'.", xml_path)
+        openvino.save_model(ov_model, str(tmp_xml))
         if verify:
-            _verify_openvino_parity(openvino, model, xml_path, device, precision)
+            _verify_openvino_parity(openvino, model, tmp_xml, device, precision)
+    except BaseException:
+        # Gate or conversion failure: the staged pair is dropped and the
+        # published target keeps whatever was there before — the same
+        # "previous good artifact survives a failed gate" semantics the ONNX
+        # exporter provides.
+        _drop_ir_tmp()
+        raise
     finally:
         # The intermediate ONNX (and dynamo's external-data sidecar) never
         # outlives the call unless the caller asked for it — including the
-        # gate-failure path (the IR stays, mirroring the ONNX exporter
-        # leaving its artifact after a failed gate).
+        # gate-failure path.
         if not keep_onnx:
             _drop_intermediate()
 
+    # EXPORT-09 publish order: identity json → weights bin → entry-point
+    # xml LAST. The xml is the file every consumer opens first, so after
+    # the xml rename a reader sees a complete (json, bin, xml) triple; the
+    # old order (bin/xml first, json last) exposed a window where the new
+    # IR paired with the PREVIOUS run's identity json — the worst pairing
+    # possible, since the json IS the identity gate's input.
     metadata = {
         **model.onnx_export_metadata(),
         "backend": "openvino",
         "precision": precision,
         "device": device,
     }
-    xml_path.with_suffix(".json").write_text(json.dumps(metadata, indent=2))
+    json_path = xml_path.with_suffix(".json")
+    tmp_json = json_path.with_name(json_path.name + f".tmp-{pid}")
+    # EXPORT-09 (review P2-4): back up the OLD identity json so a failure in
+    # the bin/xml renames restores it — the old IR must not pair with the
+    # NEW identity json.
+    json_backup: bytes | None = (
+        json_path.read_bytes() if json_path.is_file() else None
+    )
+    try:
+        tmp_json.write_text(json.dumps(metadata, indent=2))
+        os.replace(tmp_json, json_path)
+        os.replace(tmp_bin, bin_path)
+        os.replace(tmp_xml, xml_path)
+    except BaseException:
+        if json_backup is not None:
+            json_path.write_bytes(json_backup)
+        else:
+            json_path.unlink(missing_ok=True)
+        raise
+    finally:
+        tmp_json.unlink(missing_ok=True)
+    logger.info("Published OpenVINO IR to '%s'.", xml_path)
     return xml_path
 
 

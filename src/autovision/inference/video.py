@@ -40,8 +40,11 @@ __all__ = [
 ]
 
 
-def redact_source(source: PathLike) -> str:
-    """Return a log-safe source string with URL credentials removed."""
+def redact_source(source: PathLike | int) -> str:
+    """Return a log-safe source string with URL credentials removed.
+
+    Camera indexes (``int``) pass through ``str()`` unchanged.
+    """
     text = str(source)
     try:
         parts = urlsplit(text)
@@ -80,9 +83,13 @@ class VideoInfo:
 class VideoFrameStream:
     """Iterate a video file or network stream as ``(index, RGB frame)``.
 
-    ``source`` is anything OpenCV opens: a path, ``rtsp://``,
-    ``http://``, or a camera index. Iteration ends at the source's last
-    frame, at ``max_frames``, or on read failure — except that live
+    ``source`` is a path (``str``/``os.PathLike``), an ``rtsp://`` /
+    ``http://`` URL, or a camera index. A camera index MUST be passed as
+    an ``int`` (H3-5g): string sources are always resolved as file/URL
+    paths — ``"0"`` is not camera 0, and whether OpenCV happens to accept
+    a numeric string as an index varies by version, so this module never
+    relies on it. Iteration ends at the source's last frame, at
+    ``max_frames``, or on read failure — except that live
     sources (everything that is not a local file) may reconnect:
     ``reconnect_attempts`` bounds how many times a dropped read reopens
     the capture (with ``reconnect_delay_s`` between tries) before the
@@ -100,7 +107,7 @@ class VideoFrameStream:
 
     def __init__(
         self,
-        source: PathLike,
+        source: PathLike | int,
         *,
         max_frames: int | None = None,
         open_timeout_ms: int | None = 10_000,
@@ -116,20 +123,41 @@ class VideoFrameStream:
             raise AutoVisionError(
                 f"reconnect_delay_s must be >= 0, got {reconnect_delay_s}."
             )
-        self.source = str(source)
+        # H3-5g: an int keeps camera-index semantics all the way to
+        # ``capture.open``; strings are file/URL paths, never indexes.
+        self.source: int | str = (
+            source if isinstance(source, int) else str(source)
+        )
         self.max_frames = max_frames
         self.open_timeout_ms = open_timeout_ms
         self.read_timeout_ms = read_timeout_ms
         self.reconnect_attempts = int(reconnect_attempts)
         self.reconnect_delay_s = float(reconnect_delay_s)
         #: Reconnect attempts consumed by the most recent iteration. A
-        #: positive value after a run means the source dropped mid-way and
-        #: the iteration continued past the drop — a caller-side health
-        #: signal, since a run that gave up reconnecting is otherwise
-        #: indistinguishable from a clean end-of-stream.
+        #: positive value after a run means reconnect attempts were
+        #: consumed; 0 means the stream never dropped — or dropped and
+        #: ended with no attempt at all, which ``stream_ended_after_drop``
+        #: distinguishes (H3-5c), since 0 alone is also what a clean
+        #: end-of-stream reports.
         self.reconnects_used = 0
-        # Local files never reconnect: their short reads mean truncation.
-        self._is_live = not Path(self.source).is_file()
+        #: Monotonic count of SUCCESSFUL reconnects (H3-5c): consumers
+        #: holding cross-frame state (tracker, smoother, zones) watch this
+        #: and reset it when it advances — a reconnect is a scene
+        #: discontinuity, so state fitted to the old session is stale.
+        self.reconnect_generation = 0
+        #: True when the most recent iteration ended on a dropped read
+        #: with no reconnect left (or none configured) — a live source
+        #: that died, as opposed to a stop at ``max_frames`` or a local
+        #: file's clean EOF. OpenCV gives no EOS signal for live sources,
+        #: so "ended on a failed read" is the closest observable.
+        self.stream_ended_after_drop = False
+        if isinstance(self.source, int):
+            # A camera index is inherently live (and is not a filesystem
+            # path — ``Path(int)`` does not even construct).
+            self._is_live = True
+        else:
+            # Local files never reconnect: their short reads mean truncation.
+            self._is_live = not Path(self.source).is_file()
         self._capture = self._open_capture()
         self.info = self._read_info()
         self._frame_count = self.info.frame_count
@@ -183,9 +211,22 @@ class VideoFrameStream:
 
     def __iter__(self) -> Generator[tuple[int, Any], None, None]:
         cv2 = _require_cv2()
+        if getattr(self, "_iterating", False):
+            # INFER-16: two live iterators share one cv2 capture — frames
+            # would be split between them and reconnect state machine
+            # writes would race. Concurrent/second iteration is a caller
+            # bug; name it instead of undefined behavior.
+            raise AutoVisionError(
+                "This VideoFrameStream is already being iterated; a second "
+                "concurrent iteration would split frames between readers. "
+                "Build a fresh VideoFrameStream instead."
+            )
+        self._iterating = True
         index = 0
         attempts_left = self.reconnect_attempts
         self.reconnects_used = 0
+        self.reconnect_generation = 0
+        self.stream_ended_after_drop = False
         try:
             while self.max_frames is None or index < self.max_frames:
                 ok, frame = self._capture.read()
@@ -208,20 +249,37 @@ class VideoFrameStream:
                         time.sleep(self.reconnect_delay_s)
                         # A failed reopen leaves the (released) capture
                         # reporting failed reads, so the next drop consumes
-                        # the next attempt — attempts bound the loop either way.
-                        self._reopen_capture()
+                        # the next attempt — attempts bound the loop either
+                        # way. Only a SUCCESSFUL reopen advances the
+                        # generation (H3-5c): downstream state resets on a
+                        # proven new session, not on a burned attempt.
+                        if self._reopen_capture():
+                            self.reconnect_generation += 1
                         continue
+                    if self._is_live:
+                        # H3-5c: the iteration is ending on a dropped read
+                        # with no reconnect attempt left (or none
+                        # configured) — expose that so callers can tell a
+                        # dead source from a clean stop; ``reconnects=0``
+                        # alone cannot.
+                        self.stream_ended_after_drop = True
                     break
                 yield index, cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 index += 1
         finally:
+            self._iterating = False
             self._capture.release()
 
     @property
     def _strict_frame_count(self) -> bool:
         """Only local files have a trustworthy frame count: a short read
         before that count means truncation/corruption, not a normal EOF."""
-        return self._frame_count > 0 and Path(self.source).is_file()
+        if isinstance(self.source, int) or self._frame_count <= 0:
+            # A camera index is not a filesystem path at all (``Path(int)``
+            # does not even construct); an unknown count cannot distinguish
+            # truncation from a normal end.
+            return False
+        return Path(self.source).is_file()
 
 
 class AnnotatedVideoWriter:
@@ -263,13 +321,15 @@ class AnnotatedVideoWriter:
 
 
 def get_video_frames_generator(
-    source: PathLike,
+    source: PathLike | int,
     *,
     max_frames: int | None = None,
     open_timeout_ms: int | None = 10_000,
     read_timeout_ms: int | None = 5_000,
 ) -> Iterator[Any]:
-    """Yield RGB frames from a file, camera index or network stream."""
+    """Yield RGB frames from a file, URL, or camera index (``int`` only —
+    string sources are always resolved as file/URL paths; see
+    :class:`VideoFrameStream`)."""
     for _, frame in VideoFrameStream(
         source,
         max_frames=max_frames,
@@ -416,7 +476,7 @@ class FPSMonitor:
 
 
 def process_video(
-    source: PathLike,
+    source: PathLike | int,
     callback: Callable[[Any, int], Any],
     *,
     output_path: PathLike | None = None,

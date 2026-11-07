@@ -263,3 +263,62 @@ def test_cli_data_check_clean_and_failing(tmp_path):
     assert {"split_leak", "unreadable", "unknown_category", "raw_box_out_of_bounds"} <= _kinds(bad)
     result = runner.invoke(app, ["data-check", f"data={data_bad}", f"out={tmp_path / 'qa-bad-cli'}"])
     assert result.exit_code == 1, result.output
+
+
+def _unescaped_pipes(line: str) -> int:
+    """Count cell separators (pipes not escaped as ``\\|``) in a table row."""
+    return sum(
+        1
+        for index, char in enumerate(line)
+        if char == "|" and (index == 0 or line[index - 1] != "\\")
+    )
+
+
+def test_markdown_report_survives_hostile_cells(tmp_path):
+    """H3-2j: detail/path/class cells containing newlines, pipes and
+    backticks cannot add rows or columns to the markdown tables — the
+    old escaping only handled the pipe character."""
+    from autovision.data.quality import AuditIssue, DataAuditReport
+
+    hostile_detail = "PIL: cannot `identify` file\na|b\nsecond line"
+    report = DataAuditReport(
+        out_dir=tmp_path,
+        summary={"images": 1, "boxes": 0, "errors": 1, "warnings": 0},
+        per_split={"train": {"images": 1, "boxes": 0, "errors": 1, "warnings": 0}},
+        per_class={"weird|`name`": {"train": 0}},
+        issues=[
+            AuditIssue(
+                split="train",
+                path="img|1\n.jpg",
+                kind="unreadable",
+                severity="error",
+                detail=hostile_detail,
+            )
+        ],
+    )
+    markdown = report._render_markdown()
+    lines = markdown.split("\n")
+
+    # A newline inside a cell used to splice extra rows into the table:
+    # the hostile detail must occupy exactly one row.
+    issue_rows = [line for line in lines if "unreadable" in line]
+    assert len(issue_rows) == 1
+
+    # Every rendered table row keeps its header's cell count — a raw pipe
+    # in the detail no longer splits the row.
+    header_index = lines.index("| severity | split | path | kind | detail |")
+    header = lines[header_index]
+    assert _unescaped_pipes(header) == 6
+    for row in lines[header_index + 2 : header_index + 3]:
+        assert _unescaped_pipes(row) == 6, row
+
+    # Class-name cells are escaped in the distribution table too.
+    class_row = next(line for line in lines if "weird" in line)
+    assert _unescaped_pipes(class_row) == 3  # | name | train |
+
+    report.save(tmp_path / "qa")
+    saved = (tmp_path / "qa" / "report.md").read_text()
+    assert saved == markdown
+    # manifest/report json keep the raw, unescaped detail.
+    payload = json.loads((tmp_path / "qa" / "report.json").read_text())
+    assert payload["issues"][0]["detail"] == hostile_detail

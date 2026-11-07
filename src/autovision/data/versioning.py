@@ -20,6 +20,12 @@ absolute paths.
 
 Scope note: directory symbolic links are not descended (``Path.rglob``
 semantics) and link identity is not recorded — snapshot the real trees.
+
+Ultralytics ``data.yaml`` specs are understood natively (DATA-01, see
+``docs/design/data_layer.md``): ``path`` anchors the relative
+``train``/``val``/``test`` roots, ``names`` is recorded as metadata and
+never treated as a path. A payload that declares an explicit ``format:``
+key opts out of the YOLO interpretation and follows the generic rules.
 """
 
 from __future__ import annotations
@@ -27,6 +33,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -111,6 +118,102 @@ def _load_spec(data: Any) -> tuple[dict[str, Any], Path | None]:
     raise AutoVisionError(f"Unsupported data spec type: {type(data).__name__}.")
 
 
+#: Split keys an Ultralytics ``data.yaml`` declares its roots under.
+_YOLO_SPLIT_KEYS = ("train", "val", "test")
+#: Keys that mark a payload as YOLO ``data.yaml`` (beyond string splits).
+_YOLO_MARKER_KEYS = ("path", "names")
+
+
+def _is_yolo_spec(spec: dict[str, Any]) -> bool:
+    """Whether ``spec`` is an Ultralytics ``data.yaml`` (DATA-01).
+
+    A payload that declares an explicit ``format:`` key always follows the
+    generic rules — that is the documented escape hatch for specs that
+    happen to carry ``train``/``names`` keys.
+    """
+    if "format" in spec:
+        return False
+    split_shaped = any(
+        isinstance(spec.get(key), (str, list, tuple)) for key in _YOLO_SPLIT_KEYS
+    )
+    return split_shaped and any(key in spec for key in _YOLO_MARKER_KEYS)
+
+
+def _collect_yolo_roots(
+    spec: dict[str, Any],
+    *,
+    base_dir: Path | None,
+) -> tuple[dict[str, list[tuple[str, Path]]], list[str]]:
+    """``(groups, missing)`` for an Ultralytics ``data.yaml`` (DATA-01).
+
+    ``train``/``val``/``test`` hold one string (or a list of strings) per
+    split; relative roots anchor to ``path`` first, then to the spec file's
+    directory. ``names`` and every other key are metadata — they never
+    become paths. Labels stay the RAW spec strings so a moved tree with its
+    own ``data.yaml`` re-derives identical manifest keys.
+    """
+    groups: dict[str, list[tuple[str, Path]]] = {}
+    missing: list[str] = []
+    anchor_value = spec.get("path")
+    anchor = Path(anchor_value) if isinstance(anchor_value, str) and anchor_value else None
+    if anchor is not None and not anchor.is_absolute() and base_dir is not None:
+        anchor = base_dir / anchor
+    for split_key in _YOLO_SPLIT_KEYS:
+        value = spec.get(split_key)
+        if value is None:
+            continue
+        if isinstance(value, dict):
+            raise AutoVisionError(
+                f"YOLO data.yaml split '{split_key}' holds a mapping — the "
+                "YOLO layout expects string path(s). Add a 'format:' key to "
+                "the spec to snapshot with the generic rules instead."
+            )
+        if isinstance(value, str):
+            items: list[Any] = [value]
+        elif isinstance(value, (list, tuple)):
+            items = list(value)
+        else:
+            # A scalar (e.g. `train: 5`) would otherwise die on a bare
+            # ``list(value)`` TypeError (review P3-1).
+            raise AutoVisionError(
+                f"YOLO data.yaml split '{split_key}' must hold string "
+                f"path(s), got {value!r}. Add a 'format:' key to the spec "
+                "to snapshot with the generic rules instead."
+            )
+        for item in items:
+            if not isinstance(item, str) or not item:
+                raise AutoVisionError(
+                    f"YOLO data.yaml split '{split_key}' must hold string "
+                    f"path(s), got {item!r}. Add a 'format:' key to the spec "
+                    "to snapshot with the generic rules instead."
+                )
+            candidate = Path(item)
+            if not candidate.is_absolute():
+                if anchor is not None:
+                    candidate = anchor / candidate
+                elif base_dir is not None:
+                    candidate = base_dir / candidate
+            if candidate.exists():
+                groups.setdefault(split_key, []).append((item, candidate))
+                # The mirrored labels directory carries this split's
+                # annotation bytes — a snapshot pinning only the images
+                # would give false confidence that the labels are pinned
+                # too (review P3-8). Same mirror rule as the loader's row
+                # enumeration.
+                from autovision.data.yolo_object_detection_dataset import (
+                    yolo_images_to_labels_path,
+                )
+
+                labels_dir = yolo_images_to_labels_path(candidate)
+                if labels_dir.is_dir():
+                    groups.setdefault(split_key, []).append(
+                        (f"{item}@labels", labels_dir)
+                    )
+            else:
+                missing.append(f"{split_key}/{item}: '{candidate}'")
+    return groups, missing
+
+
 def _collect_roots(
     spec: dict[str, Any],
     *,
@@ -119,41 +222,47 @@ def _collect_roots(
 ) -> dict[str, list[tuple[str, Path]]]:
     """Split name → [(field label, existing path)] from a data spec.
 
-    Every string value that names an existing file or directory is a root;
-    relative paths resolve against ``base_dir`` (the spec file's directory).
-    Split names come from the top-level mapping entries; top-level path
-    values group under ``"(shared)"``. Labels must be unique per split —
-    the manifest key is ``label/relative-path``. With ``strict=True`` a path
+    Generic rules: every string value that names an existing file or
+    directory is a root; relative paths resolve against ``base_dir`` (the
+    spec file's directory). Split names come from the top-level mapping
+    entries; top-level path values group under ``"(shared)"``. Ultralytics
+    ``data.yaml`` payloads take the YOLO rules instead (see
+    :func:`_collect_yolo_roots`). Labels must be unique per split — the
+    manifest key is ``label/relative-path``. With ``strict=True`` a path
     that does not exist is an error instead of being silently omitted.
     """
-    groups: dict[str, list[tuple[str, Path]]] = {}
-    missing: list[str] = []
+    groups: dict[str, list[tuple[str, Path]]]
+    missing: list[str]
+    if _is_yolo_spec(spec):
+        groups, missing = _collect_yolo_roots(spec, base_dir=base_dir)
+    else:
+        groups, missing = {}, []
 
-    def collect(node: Any, split: str, label: str = "") -> None:
-        if isinstance(node, str):
-            candidate = Path(node)
-            if not candidate.is_absolute() and base_dir is not None:
-                candidate = base_dir / candidate
-            if candidate.exists():
-                groups.setdefault(split, []).append((label or node, candidate))
+        def collect(node: Any, split: str, label: str = "") -> None:
+            if isinstance(node, str):
+                candidate = Path(node)
+                if not candidate.is_absolute() and base_dir is not None:
+                    candidate = base_dir / candidate
+                if candidate.exists():
+                    groups.setdefault(split, []).append((label or node, candidate))
+                else:
+                    missing.append(f"{split}/{label or node}: '{candidate}'")
+                return
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    collect(value, split, str(key))
+                return
+            if isinstance(node, (list, tuple)):
+                for index, value in enumerate(node):
+                    collect(value, split, f"{label}[{index}]")
+
+        for key, value in spec.items():
+            if key == "format":
+                continue
+            if isinstance(value, dict):
+                collect(value, str(key))
             else:
-                missing.append(f"{split}/{label or node}: '{candidate}'")
-            return
-        if isinstance(node, dict):
-            for key, value in node.items():
-                collect(value, split, str(key))
-            return
-        if isinstance(node, (list, tuple)):
-            for index, value in enumerate(node):
-                collect(value, split, f"{label}[{index}]")
-
-    for key, value in spec.items():
-        if key == "format":
-            continue
-        if isinstance(value, dict):
-            collect(value, str(key))
-        else:
-            collect(value, "(shared)")
+                collect(value, "(shared)")
     if not groups or all(not roots for roots in groups.values()):
         raise AutoVisionError(
             "The data spec references no existing paths — pass a spec whose "
@@ -190,7 +299,10 @@ def _digest_files(
     """``(files, bytes, digest, content_digest, manifest)`` for the roots.
 
     Every manifest row carries its own resolved file path, so the deep
-    content hash never has to re-derive a root from a label.
+    content hash never has to re-derive a root from a label. A file that
+    disappears (or becomes unreadable) after the ``rglob`` enumeration is
+    wrapped into an :class:`AutoVisionError` naming the path instead of a
+    bare ``OSError`` — a snapshot must fail loudly, not half-derive (H3-2h).
     """
     rows: list[tuple[str, int, Path]] = []
     total_bytes = 0
@@ -199,7 +311,13 @@ def _digest_files(
     started = time.perf_counter()
     for label, root in sorted(roots, key=lambda item: item[0]):
         for path in _iter_files(root):
-            size = path.stat().st_size
+            try:
+                size = path.stat().st_size
+            except OSError as error:
+                raise AutoVisionError(
+                    f"Dataset file '{path}' disappeared or became unreadable "
+                    f"while snapshotting: {error}."
+                ) from error
             relative = path.relative_to(root if root.is_dir() else root.parent)
             rows.append((f"{label}/{relative.as_posix()}", size, path))
             total_bytes += size
@@ -209,9 +327,15 @@ def _digest_files(
     manifest = [[key, size] for key, size, _path in rows]
     if deep and content_digest is not None:
         for _key, _size, path in rows:
-            with path.open("rb") as handle:
-                for chunk in iter(lambda: handle.read(_CHUNK), b""):
-                    content_digest.update(chunk)
+            try:
+                with path.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(_CHUNK), b""):
+                        content_digest.update(chunk)
+            except OSError as error:
+                raise AutoVisionError(
+                    f"Dataset file '{path}' disappeared or became unreadable "
+                    f"while deep-hashing: {error}."
+                ) from error
         logger.info(
             "Deep-hashed %d files (%.1f MB) in %.1fs.",
             len(rows), total_bytes / 1e6, time.perf_counter() - started,
@@ -223,6 +347,29 @@ def _digest_files(
         content_digest.hexdigest() if content_digest is not None else None,
         manifest,
     )
+
+
+def _write_atomic_text(path: Path, text: str) -> None:
+    """Publish ``text`` at ``path`` via tmp + fsync + ``os.replace`` (H3-2h).
+
+    A snapshot pins a dataset and readers may verify against it while the
+    write is in flight, so the JSON must never be observed half-written,
+    and neither a failed nor a finished write may leave a ``.tmp`` file
+    next to the snapshot (the same convention as checkpoint writes).
+    """
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    except OSError as error:
+        raise AutoVisionError(
+            f"Could not write snapshot '{path}': {error}."
+        ) from error
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 def dataset_snapshot(
@@ -288,10 +435,13 @@ def dataset_snapshot(
         "note": note,
         "spec": spec,
         "spec_base_dir": str(base_dir) if base_dir is not None else None,
+        # YOLO snapshots record the class table too — it is split metadata
+        # that verify never treats as paths (DATA-01).
+        "names": spec["names"] if _is_yolo_spec(spec) and "names" in spec else None,
         "splits": splits,
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+    _write_atomic_text(out_path, json.dumps(payload, indent=2, sort_keys=True))
     logger.info("Dataset snapshot written to '%s'.", out_path)
     return payload
 
@@ -315,6 +465,23 @@ def load_snapshot(snapshot: "str | Path | dict[str, Any]") -> dict[str, Any]:
         raise AutoVisionError(
             "Not an AutoVision dataset snapshot (missing the 'kind' marker)."
         )
+    if not isinstance(payload.get("splits"), dict):
+        # A truncated or hand-edited snapshot must fail loudly here instead
+        # of a bare KeyError deep inside verification (DATA-22).
+        raise AutoVisionError(
+            "Snapshot is missing a valid 'splits' mapping — the file is "
+            "truncated or was not written by dataset_snapshot()."
+        )
+    bad_entries = [
+        name for name, entry in payload["splits"].items() if not isinstance(entry, dict)
+    ]
+    if bad_entries:
+        # A hand-edited entry ({"train": "garbage"}) died later on a bare
+        # ``string indices`` TypeError (review P3-2).
+        raise AutoVisionError(
+            f"Snapshot split entries {bad_entries[:5]} are not objects — "
+            "the file was hand-edited or truncated."
+        )
     return payload
 
 
@@ -329,7 +496,9 @@ def verify_dataset_snapshot(
     Returns ``{"ok": bool, "checked": ..., "differences": [...]}`` where a
     difference is ``{"split", "field", "expected", "actual"}`` — plus
     ``added``/``removed``/``resized`` name lists (field ``"manifest"``) when
-    the snapshot carries a per-file manifest. ``deep`` defaults to the
+    the snapshot carries a per-file manifest, and an ``"added_split"``
+    difference for every split the spec declares but the snapshot never
+    recorded (DATA-02). ``deep`` defaults to the
     snapshot's own mode; requesting ``deep=True`` on a SHALLOW snapshot
     fails loudly (there are no recorded content digests, so the check would
     be vacuous — re-snapshot with ``deep=true``). ``spec_override`` verifies
@@ -352,23 +521,48 @@ def verify_dataset_snapshot(
         )
     if spec_override is not None:
         spec, base_dir = _load_spec(spec_override)
-    else:
+    elif payload.get("spec") is not None:
         spec, base_dir = _load_spec(payload["spec"])
         if base_dir is None and payload.get("spec_base_dir"):
             base_dir = Path(payload["spec_base_dir"])
+    else:
+        raise AutoVisionError(
+            "Snapshot records no data spec to re-derive from — pass "
+            "spec_override= with the dataset's spec file (DATA-22)."
+        )
     groups = _collect_roots(spec, base_dir=base_dir)
     differences: list[dict[str, Any]] = []
     checked: list[str] = []
+    # Splits the spec declares but the snapshot never recorded (e.g. the
+    # split appeared after a strict=False snapshot) must fail verification
+    # too — the old loop only iterated the RECORDED splits and stayed
+    # blind to them (DATA-02).
+    recorded_names = set(payload["splits"])
+    for name, roots in sorted(groups.items()):
+        if name in recorded_names or not roots:
+            continue
+        files, total_bytes, _digest, _content, _manifest = _digest_files(
+            roots, deep=False
+        )
+        differences.append(
+            {
+                "split": name,
+                "field": "added_split",
+                "expected": "absent at snapshot time",
+                "actual": f"{files} files / {total_bytes} bytes",
+            }
+        )
+        checked.append(name)
     for name, recorded in sorted(payload["splits"].items()):
         checked.append(name)
-        roots = groups.get(name)
-        if not roots:
+        recorded_roots = groups.get(name)
+        if not recorded_roots:
             differences.append(
                 {"split": name, "field": "missing", "expected": "present", "actual": None}
             )
             continue
         files, total_bytes, digest, content_digest, manifest = _digest_files(
-            roots, deep=deep_mode
+            recorded_roots, deep=deep_mode
         )
         for field_name, expected, actual in (
             ("files", recorded["files"], files),

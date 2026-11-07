@@ -382,13 +382,23 @@ def test_downloadable_download_passes_a_timeout(monkeypatch, tmp_path):
     seen = {}
 
     class _Response:
+        def __init__(self) -> None:
+            self._exhausted = False
+
         def __enter__(self):
             return self
 
         def __exit__(self, *args):
             return False
 
-        def read(self):
+        def read(self, amt: int = -1) -> bytes:
+            # H3-4i streams in chunks, so the download loop passes a size
+            # argument and keeps reading until EOF (empty bytes); a mock
+            # that returned payload forever would loop writing to the
+            # .part file without end.
+            if self._exhausted:
+                return b""
+            self._exhausted = True
             return b"payload"
 
     def _fake_urlopen(url, timeout=None):

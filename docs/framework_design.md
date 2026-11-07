@@ -40,7 +40,7 @@ AST 静态扫描在 CI 强制（数字越小越高层，高层可依赖低层）
 
 | 包 / 模块 | 职责 | 关键入口 |
 |---|---|---|
-| `cli` | 30 条命令；参数校验与 Python API 完全同源 | `cli/_app.py` |
+| `cli` | 31 条命令；参数校验与 Python API 完全同源 | `cli/_app.py` |
 | `engine` | step 循环、DDP / AMP、原子 checkpoint + resume、回调编排（`Engine` / `TaskEngine` 双引擎） | `engine/engine.py` |
 | `hpo` | 超参搜索：空间规格（分布 / 网格）、随机 / 网格 / ASHA 驱动、报告与断点复用 | `hpo/space.py`、`hpo/search.py`、`hpo/asha.py` |
 | `inference` | 视频 / 流推理运行时：三段式 reader / infer / writer 管线、batch 聚合、后端切换（torch / ONNX / TRT / OpenVINO）、同源前后处理；单路跟踪 / 区域计数 / 平滑 / 多路流共享批处理；统一结果容器 `InferenceResult`（mask 默认 RLE）；逐帧 `process_video` / `VideoSink` / `ImageSink` / `FPSMonitor` | `autovision/results.py`、`inference/stream.py`、`inference/multi_stream.py`、`inference/video.py` |

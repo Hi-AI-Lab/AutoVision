@@ -372,11 +372,25 @@ class TrackSmoother:
         self._frame = 0
 
     def update(self, tracks: Sequence[Track]) -> list[Track]:
-        """Return tracks with averaged boxes/scores, preserving ids and classes."""
+        """Return tracks with averaged boxes/scores, preserving ids and classes.
+
+        A duplicated id WITHIN one update double-counts the track into its
+        own average (INFER-13); the 1:1 tracker association cannot produce
+        it, so a public-API caller hitting this has a caller-side bug and
+        gets a named error instead of a skewed box.
+        """
         self._frame += 1
+        seen_ids: set[int] = set()
         smoothed: list[Track] = []
         for track in tracks:
             track_id = int(track.track_id)
+            if track_id in seen_ids:
+                raise AutoVisionError(
+                    f"TrackSmoother.update received track id {track_id} "
+                    "twice in one frame; ids must be unique per update "
+                    "(the 1:1 tracker association guarantees it upstream)."
+                )
+            seen_ids.add(track_id)
             history = self._history.get(track_id)
             # A gap longer than max_age starts a new history; a gap of exactly
             # max_age is still within the allowed tracking window.

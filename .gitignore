@@ -54,3 +54,7 @@ site/
 # ZCode session tooling (local)
 .zcode/
 customer_deck/
+
+# H1-9 working artifact: computed dataset pins (fill before applying; never
+# commit placeholders — real pins live in src/autovision/data/downloads.py)
+pins.json

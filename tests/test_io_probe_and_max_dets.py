@@ -113,10 +113,12 @@ class TestMaxDetsAutoRaise:
     def test_auto_raise_lifts_cap_at_compute_time(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """Opt-in flag lifts the cap with a warning before evaluation runs.
+        """Opt-in flag evaluates with a lifted cap, warns, and restores.
 
         The empty-predictions early return in ``compute()`` sits after the
-        cap lift, so no pycocotools machinery is needed to observe it.
+        cap check, so no pycocotools machinery is needed to observe the
+        warning. The lift itself is per-call (H3-6c): the attribute keeps
+        the caller's pinned cap so a second round inherits no protocol.
         """
         evaluator = self._evaluator(auto_raise=True)
         evaluator.update_targets(
@@ -126,8 +128,8 @@ class TestMaxDetsAutoRaise:
         with caplog.at_level(logging.WARNING):
             metrics = evaluator.compute()
         assert metrics["map"] == 0.0  # early return, no predictions
-        assert evaluator.max_dets == 200
-        assert "raising the cap" in caplog.text
+        assert evaluator.max_dets == 100  # restored — never mutated (H3-6c)
+        assert "raised to 200" in caplog.text
 
     def test_default_keeps_cap_fixed(self) -> None:
         """Without opt-in, an explicit protocol cap is never touched."""

@@ -38,24 +38,23 @@ __all__ = [
     "resolve_gtr_asset",
 ]
 
-#: Known user-held location for the GTR checkpoints. Resolution:
-#: ``AUTOVISION_GTR_ROOT`` env override, else this path (error messages point
-#: at it). The historical research-tree fallback is intentionally not shipped:
-#: it is a private, machine-specific location.
-_GTR_ROOT_CANDIDATES = (Path.home() / "Research/Model/gtr",)
-
-
-def _resolve_asset_root() -> Path:
+#: Known user-held location for the GTR checkpoints (P3-16: read LAZILY —
+#: an import-time freeze made test/multi-tenant processes that set
+#: ``AUTOVISION_GTR_ROOT`` after import ineffective). The historical
+#: research-tree fallback is intentionally NOT part of the shipped
+#: resolution (P3-17: the old candidate list contradicted this docstring);
+#: machines that host the private tree set the env var explicitly.
+def _gtr_asset_root() -> Path:
     override = os.environ.get("AUTOVISION_GTR_ROOT")
     if override:
         return Path(override).expanduser()
-    for candidate in _GTR_ROOT_CANDIDATES:
-        if candidate.is_dir():
-            return candidate
-    return _GTR_ROOT_CANDIDATES[0]
+    return Path.home() / "Research/Model/gtr"
 
 
-GTR_ASSET_ROOT = _resolve_asset_root()
+#: Snapshot for external readers of the constant (callers inside this
+#: module use the lazy :func:`_gtr_asset_root` so a post-import env override
+#: takes effect; P3-16).
+GTR_ASSET_ROOT = _gtr_asset_root()
 GTR_HF_REPO = "Phoenix8125/GTR"
 #: Upstream HF commit for the GTR family. ``None`` means the downloader
 #: resolves the current ``main`` commit (and prints it); pin the printed
@@ -89,7 +88,7 @@ class GTRAsset:
     @property
     def hf_filename(self) -> str:
         """Path of this checkpoint inside the upstream HF repository."""
-        return self.path.relative_to(GTR_ASSET_ROOT).as_posix()
+        return self.path.relative_to(_gtr_asset_root()).as_posix()
 
     @property
     def model_num_classes(self) -> int:
@@ -138,7 +137,7 @@ GTR_SEG_VARIANTS: dict[str, tuple[int, int, float]] = {
 def _asset(relative: str, sha256: str, *, task: str = "det", **kwargs) -> GTRAsset:
     return GTRAsset(
         name=Path(relative).stem,
-        path=GTR_ASSET_ROOT / relative,
+        path=_gtr_asset_root() / relative,
         sha256=sha256,
         task=task,
         revision=GTR_HF_REVISION,

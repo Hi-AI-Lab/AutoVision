@@ -32,7 +32,7 @@ def main() -> None:
 
     data = args.data or pose_demo(demo_root(args, "pose_estimation"))
     if args.dry_run:
-        dry_run("pose_estimation", data)
+        dry_run("pose_estimation", data, args)
         return
     ensure_out_available(args.out, overwrite=args.overwrite)
     gtr_requirement()

@@ -27,10 +27,12 @@ import functools
 import glob
 import hashlib
 import json
+import logging
 import os
 import shutil
 import tempfile
 import threading
+import time
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -51,6 +53,8 @@ __all__ = [
 
 MODEL_STAGES = ("dev", "staging", "prod")
 RegistryStage = Literal["dev", "staging", "prod"]
+
+logger = logging.getLogger("autovision")
 
 _MANIFEST_NAME = "manifest.json"
 
@@ -86,13 +90,44 @@ class RegistryEntry:
         return cls(**data)
 
 
-def _version_sort_key(version: str) -> tuple[int, ...] | tuple[str, ...]:
-    """Semantic-ish sort: numeric versions sort naturally, others fallback."""
+def _version_sort_key(version: str) -> tuple[int, tuple[int | str, ...]]:
+    """Sort versions with a total-order key (H3-4g).
+
+    Numeric-semantic versions return ``(1, numeric_tuple)`` and everything
+    else ``(0, (version,))``. The leading rank keeps the two shapes mutually
+    comparable — the previous bare-string fallback crashed ``max()`` with
+    TypeError when a stage mixed ``1.0.0`` with markers like ``rc1`` — and,
+    under the ``max()``-based latest resolution, ranks numbered releases
+    above non-numeric markers. (The hardening-plan sketch had the ranks the
+    other way around; under ``max()`` that would let a marker beat every
+    numbered release, contradicting the "numeric latest wins" contract.)
+    """
     parts = version.split(".")
     try:
-        return tuple(int(part) for part in parts)
+        return (1, tuple(int(part) for part in parts))
     except ValueError:
-        return (version,)
+        return (0, (version,))
+
+
+def _resolve_latest_version(versions: list[str], *, name: str, stage: str) -> str:
+    """Pick the latest version in a stage via :func:`_version_sort_key`.
+
+    A stage mixing numeric and non-numeric versions logs one warning: the
+    numeric winner stays deterministic, but ``latest`` over a mixed set is
+    a policy call the operator should see announced, not infer from
+    silence.
+    """
+    keys = {version: _version_sort_key(version) for version in versions}
+    ranks = {key[0] for key in keys.values()}
+    if 0 in ranks and 1 in ranks:
+        logger.warning(
+            "Registry stage '%s/%s' mixes numeric and non-numeric versions "
+            "%s; resolving latest to the numerically highest version.",
+            stage,
+            name,
+            sorted(versions),
+        )
+    return max(versions, key=keys.__getitem__)
 
 
 _LOCK_TIMEOUT_SEC = 30.0
@@ -148,6 +183,43 @@ def _validate_key(name: str, version: str) -> None:
     _validate_key_part("version", version)
 
 
+#: EXPORT-04: digest memoization keyed on (path, size, mtime_ns) — the same
+#: (path,size,mtime,sha) scheme downloadable/user_held use, so repeated
+#: reads (current()/list_entries over many entries) do not re-hash multi-GB
+#: artifacts inside the registry lock. Bounded by live-entry count; entries
+#: whose (size, mtime) change miss and re-derive.
+_DIGEST_MEMO: dict[tuple[str, int, int], str] = {}
+
+
+def _memoized_sha256(path: Path) -> str:
+    stat = path.stat()
+    key = (str(path.resolve()), stat.st_size, stat.st_mtime_ns)
+    digest = _DIGEST_MEMO.get(key)
+    if digest is None:
+        digest = compute_file_sha256(path)
+        if len(_DIGEST_MEMO) >= 4096:
+            _DIGEST_MEMO.clear()
+        _DIGEST_MEMO[key] = digest
+    return digest
+
+
+def _is_orphan_entry(entry_dir: Path) -> bool:
+    """EXPORT-01: a directory without a readable manifest is an ORPHAN —
+    a register/promote killed between mkdir and the manifest write. The
+    immutability contract only covers PUBLISHED entries (manifest present):
+    refusing to overwrite the orphan permanently wedged the (name, version)
+    key behind a misleading "versions are immutable" error that only manual
+    cleanup could clear."""
+    manifest = entry_dir / _MANIFEST_NAME
+    if manifest.is_file():
+        # A parseable manifest is a published entry; an UNPARSEABLE one is
+        # also treated as published (it carries deliberate content someone
+        # wrote — the Corrupt path reports it loudly instead of the
+        # self-heal silently wiping it).
+        return False
+    return True
+
+
 class ModelRegistry:
     """Filesystem-backed model asset registry with a promotion gate."""
 
@@ -179,12 +251,27 @@ class ModelRegistry:
         source = Path(model_file)
         if not source.is_file():
             raise RegistryError(f"Model file '{source}' does not exist.")
-        entry_dir = self._entry_dir(name, stage, version)
-        if entry_dir.exists():
-            raise RegistryError(
-                f"Registry entry '{name}' v{version} already exists in "
-                f"'{stage}'; versions are immutable."
+        # EXPORT audit P3-20: registering a file that is still being
+        # written snapshots a TRUNCATED artifact whose sha256 is
+        # self-consistent but useless. A two-second-stable mtime is the
+        # cheap guard (checkpoints are written via _write_atomic, so a
+        # settled file never changes under the exporter).
+        source_stat = source.stat()
+        if time.time() - source_stat.st_mtime < 2.0:
+            # EXPORT audit P3-20: registering a mid-write file snapshots a
+            # truncated artifact whose sha256 is self-consistent but
+            # useless. A hard error broke the register-then-verify flow
+            # every test (and scripted consumer) relies on; the warning
+            # surfaces the risk without blocking the deliberate path.
+            logger.warning(
+                "Model file '%s' was modified less than 2s ago — it may "
+                "still be being written; the registration snapshots its "
+                "current bytes.",
+                source,
             )
+        entry_dir = self._entry_dir(name, stage, version)
+        self._resolve_target_dir(entry_dir, name=name, version=version,
+                                 stage=stage)
         target = entry_dir / source.name
         entry_dir.mkdir(parents=True)
         try:
@@ -223,6 +310,7 @@ class ModelRegistry:
         gates: Sequence[Any] | None = None,
         actor: str | None = None,
         reason: str | None = None,
+        set_current: bool = True,
     ) -> RegistryEntry:
         """Promote an entry one stage forward (dev -> staging -> prod).
 
@@ -231,6 +319,12 @@ class ModelRegistry:
         updated only after the gates pass. ``gates=None`` applies the
         default deployment gates (fail-closed); pass ``gates=[]`` only for
         an explicit, audited bypass.
+
+        ``set_current`` (EXPORT-21): promote ALWAYS moved the pointer, so
+        re-promoting a historical version into prod silently ROLLED BACK
+        production; the register path only sets the pointer when empty.
+        Default stays True (the documented behavior), but hotfix-style
+        side-by-side promotions can pass ``set_current=False`` explicitly.
         """
         self._validate_stage(to_stage)
         if to_stage == "dev":
@@ -248,13 +342,11 @@ class ModelRegistry:
             )
         source_entry = self.get(name=name, version=version, stage=source_stage)
         target_dir = self._entry_dir(name, to_stage, version)
-        if target_dir.exists():
-            raise RegistryError(
-                f"Registry entry '{name}' v{version} already exists in "
-                f"'{to_stage}'; versions are immutable."
-            )
+        self._resolve_target_dir(target_dir, name=name, version=version,
+                                 stage=to_stage)
         target_dir.mkdir(parents=True)
         target = target_dir / Path(source_entry.path).name
+        gate_failures: list[str] = []
         try:
             shutil.copy2(source_entry.path, target)
             sidecars = self._copy_sidecars(source_entry.path, target)
@@ -284,27 +376,55 @@ class ModelRegistry:
                 sidecars=sidecars,
             )
             if gates:
-                failures: list[str] = []
                 for gate in gates:
                     gate_name = getattr(gate, "name", type(gate).__name__)
                     try:
                         problems = gate.check(entry)
                     except Exception as error:  # noqa: BLE001 - gate boundary
                         problems = [f"{type(error).__name__}: {error}"]
-                    failures.extend(f"{gate_name}: {problem}" for problem in problems)
-                if failures:
+                    gate_failures.extend(
+                        f"{gate_name}: {problem}" for problem in problems
+                    )
+                if gate_failures:
                     raise RegistryError(
-                        "Deployment gates failed: " + "; ".join(failures)
+                        "Deployment gates failed: " + "; ".join(gate_failures)
                     )
             self._write_manifest(target_dir, entry)
-        except Exception:
+        except Exception as error:
+            # H3-4j: a blocked promotion is exactly the event an auditor
+            # needs to see; previously only successes reached the audit log,
+            # so a gate-rejected attempt left no trace behind the rmtree.
+            # Same hash-chain writer as the success records (format
+            # unchanged); reasons are summarized so a huge gate report
+            # cannot bloat the append-only log.
             shutil.rmtree(target_dir, ignore_errors=True)
+            self._append_audit(
+                action="promote_failed",
+                name=name,
+                version=version,
+                stage=to_stage,
+                actor=actor,
+                reason=reason,
+                details={
+                    "from_stage": source_stage,
+                    "failures": _summarize_failures(gate_failures, error),
+                },
+            )
             raise
-        self._write_current(name, to_stage, version)
+        if set_current:
+            self._write_current(name, to_stage, version)
         self._append_audit(
             action="promote", name=name, version=version, stage=to_stage,
             actor=actor, reason=reason,
-            details={"from_stage": source_stage},
+            details={
+                "from_stage": source_stage,
+                # EXPORT-07: make the "explicit, audited bypass" promise
+                # real — an auditor must be able to tell a gates=[] push
+                # from a fully-gated one without diffing gate reports.
+                "gates": "none (explicit bypass)" if not gates else "default",
+                "bypass": not bool(gates),
+                "set_current": set_current,
+            },
         )
         return entry
 
@@ -316,8 +436,16 @@ class ModelRegistry:
         name: str,
         stage: RegistryStage = "prod",
         version: str | None = None,
+        verify: bool = True,
     ) -> RegistryEntry:
-        """Load an entry; ``version=None`` resolves the latest in the stage."""
+        """Load an entry; ``version=None`` resolves the latest in the stage.
+
+        ``verify=True`` (default) re-hashes the artifact and every sidecar
+        under the registry lock — a 2GB artifact takes seconds and blocks
+        writers (EXPORT-04). ``verify=False`` trusts the manifest (its sha
+        was pinned at register/promote time); the memoized digests make the
+        hot ``current()`` path cheap across repeated reads.
+        """
         self._validate_stage(stage)
         _validate_key_part("name", name)
         if version is not None:
@@ -327,13 +455,13 @@ class ModelRegistry:
             versions = self._list_versions(stage_dir)
             if not versions:
                 raise RegistryError(f"No versions of '{name}' in '{stage}'.")
-            version = max(versions, key=_version_sort_key)
+            version = _resolve_latest_version(versions, name=name, stage=stage)
         entry_dir = self._entry_dir(name, stage, version)
         if not entry_dir.is_dir():
             raise RegistryError(
                 f"Registry entry '{name}' v{version} not found in '{stage}'."
             )
-        return self._read_entry(entry_dir)
+        return self._read_entry(entry_dir, verify=verify)
 
     @_locked
     def exists(
@@ -355,20 +483,31 @@ class ModelRegistry:
             for name_dir in sorted(stage_root.iterdir()):
                 for version_dir in sorted(name_dir.iterdir()):
                     if (version_dir / _MANIFEST_NAME).is_file():
-                        entries.append(self._read_entry(version_dir))
+                        # EXPORT-15: a single corrupt entry used to kill the
+                        # whole listing (and the CLI that reads it) — report
+                        # it and keep listing.
+                        try:
+                            entries.append(self._read_entry(version_dir))
+                        except RegistryError as error:
+                            logger.warning(
+                                "Skipping unreadable registry entry '%s': %s",
+                                version_dir, error,
+                            )
         return entries
 
     # ── deployment pointer / rollback / audit ───────────────────────────
     @_locked
     def current(
-        self, *, name: str, stage: RegistryStage = "prod"
+        self, *, name: str, stage: RegistryStage = "prod", verify: bool = True
     ) -> RegistryEntry:
         """Resolve the stage's ``current`` pointer (latest as a fallback)."""
         self._validate_stage(stage)
         version = self._read_current(name, stage)
         if version is not None and self.exists(name=name, version=version, stage=stage):
-            return self.get(name=name, stage=stage, version=version)
-        return self.get(name=name, stage=stage)
+            return self.get(
+                name=name, stage=stage, version=version, verify=verify
+            )
+        return self.get(name=name, stage=stage, verify=verify)
 
     @_locked
     def rollback(
@@ -379,6 +518,7 @@ class ModelRegistry:
         to_version: str,
         reason: str | None = None,
         actor: str | None = None,
+        verify: bool = True,
     ) -> RegistryEntry:
         """Point ``current`` at an existing older version (no file copy)."""
         self._validate_stage(stage)
@@ -386,7 +526,9 @@ class ModelRegistry:
             raise RegistryError(
                 f"Rollback target '{name}' v{to_version} not found in '{stage}'."
             )
-        entry = self.get(name=name, stage=stage, version=to_version)
+        entry = self.get(
+            name=name, stage=stage, version=to_version, verify=verify
+        )
         self._write_current(name, stage, to_version)
         self._append_audit(
             action="rollback", name=name, version=to_version, stage=stage,
@@ -443,10 +585,56 @@ class ModelRegistry:
         _validate_key(name, version)
         return self.root / stage / name / version
 
-    def _read_entry(self, entry_dir: Path) -> RegistryEntry:
+    #: A fresh orphan directory may be a concurrent registration IN FLIGHT
+    #: (mkdir before the manifest); only an aged one is provably dead.
+    _ORPHAN_GRACE_SEC = 600.0
+
+    def _resolve_target_dir(
+        self, entry_dir: Path, *, name: str, version: str, stage: str
+    ) -> None:
+        """EXPORT-01: refuse published entries, self-heal dead orphans.
+
+        Three states, each with its own message: published (manifest
+        present) → the immutable rejection; fresh orphan (mtime inside the
+        grace window) → likely a concurrent registration, tell the user to
+        wait; aged orphan (killed writer) → remove and proceed, loudly.
+        """
+        if not entry_dir.exists():
+            return
+        if not _is_orphan_entry(entry_dir):
+            raise RegistryError(
+                f"Registry entry '{name}' v{version} already exists in "
+                f"'{stage}'; versions are immutable."
+            )
+        age = time.time() - entry_dir.stat().st_mtime
+        if age < self._ORPHAN_GRACE_SEC:
+            raise RegistryError(
+                f"'{entry_dir}' holds an unfinished registration younger "
+                f"than {int(self._ORPHAN_GRACE_SEC)}s — another process may "
+                "still be writing it. Wait for it to complete, or remove "
+                "the directory if the writer is confirmed dead."
+            )
+        import shutil as _shutil
+
+        _shutil.rmtree(entry_dir, ignore_errors=True)
+        logger.warning(
+            "Removed stale registry orphan '%s' (%.0fs old, no manifest) — "
+            "the previous register/promote died before publishing; the key "
+            "'%s' v%s in '%s' is writable again.",
+            entry_dir, age, name, version, stage,
+        )
+
+    def _read_entry(self, entry_dir: Path, *, verify: bool = True) -> RegistryEntry:
         manifest = entry_dir / _MANIFEST_NAME
         if not manifest.is_file():
-            raise RegistryError(f"Corrupt registry entry: '{entry_dir}'.")
+            # EXPORT-01: align with _list_versions (which skips these
+            # directories) — an in-progress/dead registration is NOT a
+            # corrupt published entry.
+            raise RegistryError(
+                f"Incomplete registry entry (no manifest): '{entry_dir}' — "
+                "the registration died before publishing. Remove the "
+                "directory to retry, or wait if a writer may be live."
+            )
         try:
             entry = RegistryEntry.from_manifest(
                 json.loads(manifest.read_text()), entry_dir
@@ -466,8 +654,8 @@ class ModelRegistry:
             raise RegistryError(
                 f"Registered model file missing: '{entry.path}'."
             )
-        actual = compute_file_sha256(resolved)
-        if actual != entry.sha256:
+        actual = _memoized_sha256(resolved) if verify else entry.sha256
+        if verify and actual != entry.sha256:
             raise RegistryError(
                 f"Registry artifact sha256 mismatch for '{resolved}': "
                 f"{actual} != {entry.sha256}."
@@ -479,7 +667,7 @@ class ModelRegistry:
                     f"Registered sidecar missing or outside the entry: "
                     f"'{sidecar_name}'."
                 )
-            if compute_file_sha256(sidecar) != expected_sha:
+            if verify and _memoized_sha256(sidecar) != expected_sha:
                 raise RegistryError(
                     f"Registry sidecar sha256 mismatch for '{sidecar_name}'."
                 )
@@ -505,12 +693,37 @@ class ModelRegistry:
 
     @staticmethod
     def _copy_sidecars(source: Path, target: Path) -> dict[str, str]:
-        """Copy sidecars and return ``{filename: sha256}`` for the manifest."""
+        """Copy sidecars and return ``{filename: sha256}`` for the manifest.
+
+        EXPORT-03: beyond the model-card/parity family this also covers the
+        IDENTITY sidecars — TensorRT's ``<engine>.meta.json`` and OpenVINO's
+        ``<xml>.json`` (only when the artifact is an .xml, so an unrelated
+        model.json next to a .pt cannot hijack the slot). Dropping them used
+        to make ``verify_engine_artifact`` silently skip at load time from
+        registry copies: the identity gate vanished exactly for the
+        TRT/OV artifacts that need it most.
+        """
         hashes: dict[str, str] = {}
-        for suffix in (".modelcard.json", ".postprocess.json", ".parity.json"):
+        suffixes = [".modelcard.json", ".postprocess.json", ".parity.json"]
+        for suffix in suffixes:
             sidecar = Path(str(source) + suffix)
             if sidecar.is_file():
                 copied = Path(str(target) + suffix)
+                shutil.copy2(sidecar, copied)
+                hashes[copied.name] = compute_file_sha256(copied)
+        # EXPORT-03: identity sidecars follow the LOADER's with_suffix
+        # derivation (read_metadata: artifact.with_suffix(suffix)) — NOT the
+        # str+suffix convention above. For `model.engine` the loader looks
+        # up `model.meta.json`; for `model.xml` it looks up `model.json`.
+        identity_suffix: str | None = None
+        if source.suffix.lower() in (".engine", ".trt"):
+            identity_suffix = ".meta.json"
+        elif source.suffix.lower() == ".xml":
+            identity_suffix = ".json"
+        if identity_suffix is not None:
+            sidecar = source.with_suffix(identity_suffix)
+            if sidecar.is_file():
+                copied = target.with_suffix(identity_suffix)
                 shutil.copy2(sidecar, copied)
                 hashes[copied.name] = compute_file_sha256(copied)
         return hashes
@@ -575,10 +788,31 @@ class ModelRegistry:
         path = self.root / "audit.jsonl"
         previous_hash = ""
         if path.is_file():
-            lines = [line for line in path.read_text().splitlines() if line.strip()]
-            if lines:
+            # P3-20 (EXPORT audit): the whole-log read made every append
+            # O(log size) — linear in the file for a chain lookup. Only the
+            # LAST non-empty line matters; read the tail block.
+            non_empty: list[str] = []
+            with path.open("rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                position = handle.tell()
+                tail = b""
+                while position > 0:
+                    step = min(8192, position)
+                    position -= step
+                    handle.seek(position)
+                    block = handle.read(step)
+                    tail = block + tail
+                    decoded = tail.decode("utf-8", errors="replace")
+                    non_empty = [
+                        line for line in decoded.splitlines() if line.strip()
+                    ]
+                    if len(non_empty) >= 2 or position == 0:
+                        break
+            if non_empty:
                 try:
-                    previous_hash = str(json.loads(lines[-1]).get("entry_hash", ""))
+                    previous_hash = str(
+                        json.loads(non_empty[-1]).get("entry_hash", "")
+                    )
                 except json.JSONDecodeError as error:
                     raise RegistryError(
                         "Refusing to append to a malformed audit log: "
@@ -607,3 +841,23 @@ def _utc_now() -> str:
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+_FAIL_SUMMARY_ITEMS = 20
+_FAIL_SUMMARY_CHARS = 200
+
+
+def _summarize_failures(
+    gate_failures: list[str], error: BaseException
+) -> list[str]:
+    """Audit-safe failure summary (H3-4j): the collected gate reasons when
+    the gates rejected the promotion, else the raising exception's summary.
+
+    Capped in count and per-item length so a pathological gate report cannot
+    bloat the append-only log.
+    """
+    reasons = gate_failures or [f"{type(error).__name__}: {error}"]
+    return [
+        reason[:_FAIL_SUMMARY_CHARS]
+        for reason in reasons[:_FAIL_SUMMARY_ITEMS]
+    ]

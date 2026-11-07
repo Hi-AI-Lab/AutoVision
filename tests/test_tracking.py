@@ -193,6 +193,26 @@ class TestBYTETrackerCore:
         fresh = tracker.update(np.array([_box(11.0)]), np.array([0.9]), np.array([0]))
         assert fresh and fresh[0].track_id != old_id
 
+    def test_unconfirmed_removal_does_not_leak(self):
+        """H1-3: unmatched unconfirmed tracks leave ``self.tracks`` at once.
+
+        100 frames of high-score detections jumping between two far-apart
+        positions: every detection spawns a track that fails stage 3 on the
+        next frame. Before the fix each zombie stayed in ``self.tracks``
+        forever (100 frames -> 100 zombies); now only live tracks remain.
+        """
+        tracker = BYTETracker()
+        tracker.update(*_empty())  # burn frame 1 (the activation exception)
+        for frame in range(100):
+            x = 10.0 if frame % 2 == 0 else 500.0
+            published = tracker.update(
+                np.array([_box(x)]), np.array([0.9]), np.array([0])
+            )
+            assert published == []  # a one-frame blip is never published
+        assert len(tracker.tracks) <= 3
+        # Never-published removals stay silent for the drain contract.
+        assert tracker.drain_removed_tracks() == []
+
     def test_low_score_detections_never_spawn_tracks(self):
         for score in (0.05, 0.3, 0.55):  # below floor / in the low pool / below det_thresh
             spawner = BYTETracker(track_thresh=0.5)
@@ -432,3 +452,19 @@ class TestTrackStateLifecycle:
         assert len(fresh) == 1
         assert fresh[0].track_id == 1
         assert fresh[0].age == 0
+
+    @requires_video
+    def test_reset_clears_gmc_previous_frame_state(self):
+        """H3-5c: reset() also drops the GMC estimator's stored previous
+        frame, so camera-motion history fitted to the dropped session cannot
+        warp the post-reconnect session's associations."""
+        tracker = BYTETracker(motion_compensation="sparse_opt_flow")
+        frame = np.zeros((32, 32, 3), dtype=np.uint8)
+        tracker.update(*_empty(), frame=frame)
+        tracker.update(*_empty(), frame=frame)
+        assert tracker._gmc is not None
+        assert tracker._gmc._prev_gray is not None
+
+        tracker.reset()
+
+        assert tracker._gmc._prev_gray is None

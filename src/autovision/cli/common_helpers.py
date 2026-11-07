@@ -8,9 +8,11 @@ import os
 import shutil
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import torch
 
+from autovision.errors import ConfigValidationError
 from autovision.runtime.distributed import is_global_rank_zero
 from autovision.runtime.env import Env
 from autovision.runtime.manifest import write_run_manifest
@@ -55,7 +57,7 @@ def resolve_gradient_checkpointing(trainer_args: dict | None) -> bool:
     """Read the opt-in ``gradient_checkpointing`` trainer flag."""
     value = (trainer_args or {}).get("gradient_checkpointing", False)
     if not isinstance(value, bool):
-        raise ValueError(
+        raise ConfigValidationError(
             "trainer_args.gradient_checkpointing must be a bool, got "
             f"{type(value).__name__}."
         )
@@ -66,7 +68,7 @@ def resolve_parallel(trainer_args: dict | None) -> str:
     """Read the ``parallel`` strategy (``ddp`` | ``fsdp``)."""
     value = str((trainer_args or {}).get("parallel", "ddp")).lower()
     if value not in ("ddp", "fsdp"):
-        raise ValueError(
+        raise ConfigValidationError(
             "trainer_args.parallel must be 'ddp' or 'fsdp' (DeepSpeed/ZeRO/"
             f"elastic need an external launcher); got '{value}'."
         )
@@ -85,11 +87,31 @@ def validate_trainer_args(trainer_args: dict | None, *, allowed: set[str]) -> No
         return
     unknown = sorted(set(trainer_args) - allowed)
     if unknown:
-        raise ValueError(
+        raise ConfigValidationError(
             f"Unknown trainer_args key(s) {unknown} — accepted: {sorted(allowed)}. "
             "Model-side settings (lr, ema_warmup_steps, criterion flags, ...) "
             "belong in model_args."
         )
+
+
+def coerce_bool_strict(value: Any, *, name: str) -> bool:
+    """SERVE-11 (review P2-3): strict boolean coercion for CLI-sourced flags.
+
+    ``bool("False")`` is ``True`` — every flag that arrives through
+    ``key=value`` shell syntax (where the value may stay a raw string when
+    it is not valid JSON) goes through this instead of a bare ``bool()``
+    cast that silently inverted the documented meaning.
+    """
+    if isinstance(value, bool):
+        return value
+    lowered = str(value).strip().lower()
+    if lowered in {"true", "1", "yes", "on"}:
+        return True
+    if lowered in {"false", "0", "no", "off"}:
+        return False
+    raise ConfigValidationError(
+        f"{name} must be a boolean (true/false), got {value!r}."
+    )
 
 
 def get_out_dir(
@@ -118,7 +140,7 @@ def get_out_dir(
         and any(out_dir.iterdir())
         and not (resume_interrupted or overwrite)
     ):
-        raise ValueError(
+        raise ConfigValidationError(
             f"Output directory '{out_dir}' exists and is not empty. Use "
             f"overwrite=True to replace it, or resume_interrupted=True to "
             f"continue a previous run."
@@ -146,7 +168,7 @@ def get_global_batch_size(
         )
         batch_size = dataset_size
     if batch_size % num_devices != 0:
-        raise ValueError(
+        raise ConfigValidationError(
             f"Global batch size ({batch_size}) must be divisible by the "
             f"number of devices ({num_devices})."
         )
@@ -161,13 +183,12 @@ def get_num_workers(num_workers: int | str, num_devices_per_node: int) -> int:
     """Resolve dataloader workers per dataloader (one per device)."""
     if num_workers != "auto":
         return int(num_workers)
-    if _is_slurm() and (cpus := os.getenv("SLURM_CPUS_PER_TASK")):
-        num_workers = int(cpus) - 1
+    if _is_slurm() and (slurm_cpus := os.getenv("SLURM_CPUS_PER_TASK")):
+        resolved = int(slurm_cpus) - 1
     else:
         cpus = os.cpu_count() or Env.DEFAULT_NUM_WORKERS_AUTO.value
-        num_workers = max(1, cpus // num_devices_per_node) - 1
-    num_workers = min(num_workers, Env.MAX_NUM_WORKERS_AUTO.value)
-    return max(0, num_workers)
+        resolved = max(1, cpus // num_devices_per_node) - 1
+    return max(0, min(resolved, Env.MAX_NUM_WORKERS_AUTO.value))
 
 
 def resolve_data_paths(data: PathLike | Sequence[PathLike]) -> list[Path]:
@@ -194,14 +215,14 @@ def resolve_gradient_accumulation(
     """
     if isinstance(gradient_accumulation_steps, str):
         if gradient_accumulation_steps != "auto":
-            raise ValueError(
+            raise ConfigValidationError(
                 "gradient_accumulation_steps must be a positive int or "
                 f"\"auto\", got {gradient_accumulation_steps!r}."
             )
         return max(1, round(nominal_batch_size / max(1, global_batch_size)))
     resolved = int(gradient_accumulation_steps)
     if resolved < 1:
-        raise ValueError(
+        raise ConfigValidationError(
             f"gradient_accumulation_steps must be >= 1, got {resolved}."
         )
     return resolved
@@ -259,10 +280,16 @@ def build_task_dataloader(
     worker_init_fn = None
     generator = None
     if seed is not None:
-        from autovision.engine.engine import make_dataloader_generator, seed_worker
+        from autovision.engine.engine import (
+            dataloader_seed_rank,
+            make_dataloader_generator,
+            seed_worker,
+        )
 
         worker_init_fn = seed_worker
-        generator = make_dataloader_generator(seed)
+        # H1-4: offset the stream per rank so DDP ranks do not replay the
+        # same shuffle/augmentation sequence.
+        generator = make_dataloader_generator(seed, rank=dataloader_seed_rank())
     return DataLoader(
         dataset,
         batch_size=batch_size,

@@ -131,6 +131,44 @@ def test_report_with_model_card_and_snapshot(tmp_path):
     assert (tmp_path / "compliance" / "compliance.md").is_file()
 
 
+def test_model_card_vendor_alias_license_passes_normalized(tmp_path):
+    """H3-4h: the dependency path normalized licenses while the model-card
+    path compared the raw string, so "Apache Software License" was reported
+    for review while the identical dependency passed. The card license now
+    goes through the same aliases table; the record keeps what the card
+    says, only the judgment is normalized."""
+    path = tmp_path / "aliased.pt"
+    path.write_bytes(b"aliased-checkpoint" * 16)
+    card = ModelCard(
+        model="detr/s",
+        name="Alias demo",
+        train_dataset="COCO 2017 train2017",
+        schedule="1 step smoke",
+        seed=0,
+        metrics={"coco_map": 50.0},
+        latency=[
+            LatencyRecord(
+                backend="onnxruntime", precision="fp32", hardware="CPU",
+                batch_size=1, p50_ms=10.0, script="scripts/x.py",
+            )
+        ],
+        license="Apache Software License",
+        weights_sha256={path.name: _sha(path)},
+    )
+    card.save(path)
+
+    report = build_compliance_report(
+        model=path, include_dependencies=False, timestamp=False
+    )
+
+    assert report.passed
+    assert report.models[0]["license"] == "Apache Software License"
+    assert not any(
+        issue.kind in ("model_license_review", "unknown_model_license")
+        for issue in report.issues
+    )
+
+
 def test_missing_model_card_is_an_error(tmp_path):
     model = tmp_path / "bare.pt"
     model.write_bytes(b"bare")

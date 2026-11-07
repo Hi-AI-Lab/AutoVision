@@ -301,6 +301,9 @@ class DetectionModel:
                 device=device,
                 providers=providers,
                 openvino_device=openvino_device,
+                # INFER-04: the CLI predict entry point refuses
+                # metadata-stripped artifacts (identity gate is vacuous).
+                require_metadata=True,
             )
             self._engine_cache[signature] = engine
             while len(self._engine_cache) > _ENGINE_CACHE_SIZE:

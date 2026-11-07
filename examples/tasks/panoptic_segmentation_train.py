@@ -34,7 +34,7 @@ def main() -> None:
 
     data = args.data or panoptic_demo(demo_root(args, "panoptic_segmentation"))
     if args.dry_run:
-        dry_run("panoptic_segmentation", data)
+        dry_run("panoptic_segmentation", data, args)
         return
     ensure_out_available(args.out, overwrite=args.overwrite)
 

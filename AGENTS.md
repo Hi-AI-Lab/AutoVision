@@ -14,7 +14,7 @@
 
 ```
 src/autovision/
-├── cli/                 # 30 条命令；参数校验与 Python API 同源
+├── cli/                 # 31 条命令；参数校验与 Python API 同源
 ├── config/              # Pydantic 配置与校验
 ├── data/                # 数据集、转换、mmap、interchange
 ├── engine/              # 训练循环（step / DDP / AMP / checkpoint）

@@ -88,10 +88,18 @@ class TaskMetrics:
             self.stats[name].append(value)
 
     def _concatenate(self, values: list[Any]) -> np.ndarray:
-        """Concatenate one column's rows; callers can override the stacking."""
+        """Concatenate one column's rows; callers can override the stacking.
+
+        METRIC audit P3-22: scalar rows (the docstring promises "numpy
+        arrays or scalars") crashed np.concatenate — they join as
+        one-element arrays.
+        """
         rows = [np.asarray(value) for value in values]
         if not rows:
             return np.zeros(0)
+        if all(row.ndim == 0 for row in rows):
+            return np.stack(rows)
+        rows = [row.reshape(1) if row.ndim == 0 else row for row in rows]
         return np.concatenate(rows, axis=0)
 
     def process(self) -> dict[str, float]:

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
+from autovision.data.file_helpers import resolve_under
 from autovision.data.interchange.common import CocoBuilder, polygon_area
 from autovision.errors import AutoVisionError
 
@@ -36,9 +37,14 @@ def _dimensions(
     height = result.get("original_height") or result.get("value", {}).get("original_height")
     if width and height:
         return int(width), int(height)
-    path = Path(image_name)
-    if images_dir is not None and not path.is_absolute():
-        path = images_dir / path
+    if images_dir is not None:
+        # DATA-10: one containment guard like every other loader. The old
+        # ``images_dir / name`` join silently discarded the prefix for
+        # ABSOLUTE names, so a task pointing outside images_dir was opened
+        # (and its hostile name copied into the COCO file_name verbatim).
+        path = resolve_under(images_dir, image_name)
+    else:
+        path = Path(image_name)
     try:
         from PIL import Image
 

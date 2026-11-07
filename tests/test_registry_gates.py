@@ -220,3 +220,61 @@ def test_metric_floor_gate_requires_recorded_metrics(tmp_path):
     problems = MetricFloorGate({"aabb_map": 10.0}).check(entry)
 
     assert problems == ["model card does not record 'aabb_map'"]
+
+
+# ── H3-4h: single-source allowlist + normalized model-card licenses ──────
+
+
+def test_license_allowlist_is_the_compliance_single_source():
+    """H3-4h: the registry gate reads compliance/licenses' table — the two
+    hand-maintained copies had drifted (Python-2.0 / PSF-2.0)."""
+    from autovision.compliance.licenses import DEFAULT_ALLOWLIST
+    from autovision.registry.deployment_gates import _DEFAULT_ALLOWLIST
+
+    assert _DEFAULT_ALLOWLIST is DEFAULT_ALLOWLIST
+
+
+@pytest.mark.parametrize(
+    "license_id",
+    [
+        pytest.param("MPL-2.0", id="mpl-2.0"),
+        pytest.param("Python-2.0", id="python-2.0"),
+        pytest.param("PSF-2.0", id="psf-2.0"),
+        pytest.param("Apache Software License", id="vendor-alias"),
+    ],
+)
+def test_license_gate_judges_edge_licenses_like_the_compliance_report(
+    tmp_path, license_id
+):
+    """H3-4h: gate and report agree on edge licenses — previously MPL-2.0
+    passed one allowlist but drifted out of the other, and vendor aliases
+    were judged on the raw string."""
+    model = _model(tmp_path, "edge.pt", license_id=license_id)
+    entry = ModelRegistry(tmp_path / "registry").register(
+        model, name="edge", version="1.0.0"
+    )
+    gate_problems = LicenseGate().check(entry)
+
+    from autovision.compliance import build_compliance_report
+
+    report = build_compliance_report(
+        model=model, include_dependencies=False, timestamp=False
+    )
+    review_issues = [
+        issue for issue in report.issues if issue.kind == "model_license_review"
+    ]
+
+    assert gate_problems == []
+    assert review_issues == []
+
+
+def test_license_gate_still_rejects_unknown_licenses(tmp_path):
+    """H3-4h: normalization must not widen the gate — UNKNOWN and copyleft
+    stay outside the allowlist."""
+    gpl = _model(tmp_path, "gpl.pt", license_id="GPL-3.0")
+    entry = ModelRegistry(tmp_path / "registry").register(
+        gpl, name="gpl", version="1.0.0"
+    )
+    problems = LicenseGate().check(entry)
+
+    assert problems and "not in the deployment allowlist" in problems[0]

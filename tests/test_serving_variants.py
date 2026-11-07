@@ -57,8 +57,13 @@ def _two_variants(**kwargs):
 
 class TestVariantRouting:
     def test_weighted_selection_and_forced_header(self):
+        # H2-5a: X-AB-Variant steering is opt-in (allow_variant_override=True);
+        # the default app ignores the header (see test_serving.py).
         client = TestClient(
-            _two_variants(variant_weights={"stable": 0.0, "canary": 1.0})
+            _two_variants(
+                variant_weights={"stable": 0.0, "canary": 1.0},
+                allow_variant_override=True,
+            )
         )
         payload = {"image": _b64_image(1)}
         response = client.post("/predict", json=payload)
@@ -91,16 +96,21 @@ class TestVariantRouting:
             seen.add(response.json()["variant"])
         assert seen == {"stable", "canary"}
 
-    def test_same_request_id_is_sticky(self):
+    def test_same_request_id_is_not_sticky(self):
+        """H2-5a: the bucket key is server-issued — a client cannot pin
+        itself to a variant by replaying one X-Request-ID. With equal
+        weights, repeated identical ids must still land on both variants
+        (in the old request-id-keyed world this fails deterministically)."""
         client = TestClient(_two_variants())
         payload = {"image": _b64_image(3)}
-        first = client.post(
-            "/predict", json=payload, headers={"X-Request-ID": "sticky"}
-        ).json()["variant"]
-        second = client.post(
-            "/predict", json=payload, headers={"X-Request-ID": "sticky"}
-        ).json()["variant"]
-        assert first == second
+        seen = set()
+        for _ in range(100):
+            response = client.post(
+                "/predict", json=payload, headers={"X-Request-ID": "sticky"}
+            )
+            assert response.status_code == 200
+            seen.add(response.json()["variant"])
+        assert seen == {"stable", "canary"}
 
     def test_health_and_readyz_report_variants(self):
         client = TestClient(_two_variants())

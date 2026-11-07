@@ -26,6 +26,7 @@ from typing import Any
 
 import torch
 
+from autovision.errors import AutoVisionError
 from autovision.types import PathLike
 
 __all__ = ["COCOKeypointAPEvaluator", "predictions_to_coco_keypoints"]
@@ -148,7 +149,22 @@ class COCOKeypointAPEvaluator:
         image_ids: Sequence[int] | None = None,
     ) -> None:
         if image_ids is None:
-            image_ids = list(range(self._image_id_count, self._image_id_count + len(predictions)))
+            # METRIC audit P3-12: rank-local fallback ids collide under DDP
+            # merging (two ranks both "start" at 0). The keypoint dataset
+            # always supplies an index, so this fallback only fires for
+            # direct-API callers — make it fail loudly under distributed
+            # evaluation instead of silently merging overlapping ids.
+            import os
+
+            if int(os.getenv("WORLD_SIZE", "1")) > 1:
+                raise AutoVisionError(
+                    "PoseMetricCollector.update needs image_ids= under "
+                    "distributed evaluation — rank-local fallback ids "
+                    "collide across ranks during merge_state."
+                )
+            image_ids = list(range(
+                self._image_id_count, self._image_id_count + len(predictions)
+            ))
         self._image_id_count = max(
             [self._image_id_count]
             + [int(image_id) + 1 for image_id in image_ids]

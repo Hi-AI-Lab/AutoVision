@@ -52,12 +52,17 @@ class _FakeCapture:
         self.opens = 0
         self.released = 0
         self.dead = False
+        # H3-5g: records what open() was handed, so tests can assert that
+        # an int source reaches OpenCV as an int (camera index) and a
+        # string source as a path.
+        self.opened_with: list[object] = []
 
     def set(self, *args, **kwargs):
         return True
 
     def open(self, source):
         self.opens += 1
+        self.opened_with.append(source)
         if self.fail_reopens and self.released > 0:
             self.dead = True
             return False
@@ -226,6 +231,68 @@ class TestReconnectTelemetry:
         assert list(stream) == []
         assert stream.reconnects_used == 1
 
+    def test_drop_without_attempts_flags_ended_after_drop(self, monkeypatch) -> None:
+        """H3-5c: a live drop with reconnect_attempts=0 (the default) ends
+        the stream with ``stream_ended_after_drop`` set — reconnects=0
+        alone cannot distinguish this from a clean stop."""
+        capture = _FakeCapture(reads=[(True, "f0"), (False, None)])
+        _install(monkeypatch, capture)
+        stream = video_module.VideoFrameStream(_LIVE_SOURCE)
+        assert list(stream) == [(0, "f0")]
+        assert stream.reconnects_used == 0
+        assert stream.stream_ended_after_drop is True
+        assert stream.reconnect_generation == 0
+
+    def test_successful_reconnect_advances_the_generation(self, monkeypatch) -> None:
+        """H3-5c: the generation counts successful reconnects and a stop
+        at ``max_frames`` is not a drop."""
+        capture = _FakeCapture(
+            reads=[(True, "f0"), (False, None), (True, "f1")]
+        )
+        _install(monkeypatch, capture)
+        stream = video_module.VideoFrameStream(
+            _LIVE_SOURCE, max_frames=2,
+            reconnect_attempts=1, reconnect_delay_s=0,
+        )
+        assert [index for index, _ in stream] == [0, 1]
+        assert stream.reconnects_used == 1
+        assert stream.reconnect_generation == 1
+        assert stream.stream_ended_after_drop is False
+
+    def test_failed_reopen_does_not_advance_the_generation(self, monkeypatch) -> None:
+        """H3-5c: attempts that burn out without a successful reopen leave
+        the generation at 0 but still flag the dead stream."""
+        capture = _FakeCapture(reads=[(False, None)], fail_reopens=True)
+        _install(monkeypatch, capture)
+        stream = video_module.VideoFrameStream(
+            _LIVE_SOURCE, reconnect_attempts=2, reconnect_delay_s=0
+        )
+        assert list(stream) == []
+        assert stream.reconnects_used == 2
+        assert stream.reconnect_generation == 0
+        assert stream.stream_ended_after_drop is True
+
+    def test_max_frames_stop_is_not_a_drop(self, monkeypatch) -> None:
+        """H3-5c: ending at ``max_frames`` is a deliberate stop, not a
+        dropped read."""
+        capture = _FakeCapture(reads=[(True, "f0"), (False, None)])
+        _install(monkeypatch, capture)
+        stream = video_module.VideoFrameStream(_LIVE_SOURCE, max_frames=1)
+        assert list(stream) == [(0, "f0")]
+        assert stream.stream_ended_after_drop is False
+
+    def test_file_eof_is_not_a_drop(self, tmp_path, monkeypatch) -> None:
+        """H3-5c: a local file's clean EOF never sets the drop flag."""
+        path = tmp_path / "clip.mp4"
+        path.write_bytes(b"pretend-video")
+        capture = _FakeCapture(
+            reads=[(True, "f0"), (False, None)], frame_count=1
+        )
+        _install(monkeypatch, capture)
+        stream = video_module.VideoFrameStream(path)
+        assert [index for index, _ in stream] == [0]
+        assert stream.stream_ended_after_drop is False
+
     def test_run_result_summary_reports_reconnects(self) -> None:
         """A non-zero count lands in the CLI summary line; zero is silent."""
         base: dict = {
@@ -240,6 +307,43 @@ class TestReconnectTelemetry:
         assert "reconnects" not in clean.summary()
         dropped = StreamRunResult(**base, reconnects=3)
         assert "reconnects=3" in dropped.summary()
+
+
+class TestCameraIndexSourceTyping:
+    """H3-5g: a camera index must be passed as ``int``; string sources are
+    resolved as file/URL paths — the module never converts a numeric string
+    into an index, so behavior does not depend on the OpenCV version."""
+
+    def test_int_source_keeps_camera_index_semantics(self, monkeypatch) -> None:
+        """An int source is stored as an int and reaches ``capture.open``
+        unchanged, so the index semantics stay with OpenCV."""
+        capture = _FakeCapture(reads=[(True, "f0")])
+        _install(monkeypatch, capture)
+        stream = video_module.VideoFrameStream(0)
+        assert isinstance(stream.source, int)
+        assert stream.source == 0
+        assert list(stream) == [(0, "f0")]
+        assert capture.opened_with == [0]
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            pytest.param("0", id="numeric-string"),
+            pytest.param("/dev/video0", id="path-string"),
+        ],
+    )
+    def test_string_source_is_never_an_index(
+        self, monkeypatch: pytest.MonkeyPatch, source: str
+    ) -> None:
+        """A string source stays a string end to end — typed and handed to
+        ``capture.open`` as a path, whatever its contents look like."""
+        capture = _FakeCapture(reads=[(True, "f0")])
+        _install(monkeypatch, capture)
+        stream = video_module.VideoFrameStream(source)
+        assert isinstance(stream.source, str)
+        assert stream.source == source
+        assert list(stream) == [(0, "f0")]
+        assert capture.opened_with == [source]
 
 
 class TestFileSourcesNeverReconnect:

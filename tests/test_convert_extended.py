@@ -292,3 +292,134 @@ class TestConvertCli:
         result = CliRunner().invoke(app, ["convert-data", "from=nope", "out=x.json"])
         assert result.exit_code != 0
         assert "from= must be one of" in result.output
+
+
+class TestYoloCoordinateHardening:
+    """H3-2f: normalized coordinates are range-checked at conversion time."""
+
+    def _layout(self, tmp_path: Path, label_text: bytes):
+        images = tmp_path / "images"
+        labels = tmp_path / "labels"
+        labels.mkdir()
+        create_image(images / "a.png", size=(100, 100), seed=0)
+        (labels / "a.txt").write_bytes(label_text)
+        return images, labels, labels / "a.txt"
+
+    def test_out_of_range_coordinate_reports_file_and_line(self, tmp_path):
+        """H3-2f: cx > 1 fails with AutoVisionError naming the label file
+        and the line number (the scale multiply used to hide it)."""
+        from autovision.data.convert import yolo_to_coco
+        from autovision.errors import AutoVisionError
+
+        images, labels, label_path = self._layout(tmp_path, b"0 1.5 0.5 0.2 0.2\n")
+        with pytest.raises(AutoVisionError, match=r"outside \[0, 1\]") as excinfo:
+            yolo_to_coco(images, names=["cat"], out_json=tmp_path / "x.json",
+                         labels_dir=labels)
+        assert str(label_path) in str(excinfo.value)
+        assert "line 1" in str(excinfo.value)
+
+    def test_negative_box_size_reports_file_and_line(self, tmp_path):
+        """H3-2f: a zero-width box (in range but non-positive) fails the
+        size check with file and line; negative sizes fail the range check
+        first (see test_out_of_range_coordinate_reports_file_and_line)."""
+        from autovision.data.convert import yolo_to_coco
+        from autovision.errors import AutoVisionError
+
+        images, labels, label_path = self._layout(tmp_path, b"0 0.5 0.5 0 0.2\n")
+        with pytest.raises(AutoVisionError, match=r"box size \(w, h\)") as excinfo:
+            yolo_to_coco(images, names=["cat"], out_json=tmp_path / "x.json",
+                         labels_dir=labels)
+        assert str(label_path) in str(excinfo.value)
+        assert "line 1" in str(excinfo.value)
+
+    def test_seg_polygon_coordinate_out_of_range(self, tmp_path):
+        """H3-2f: polygon coordinates are checked too (seg converter)."""
+        from autovision.data.convert import yolo_seg_to_coco
+        from autovision.errors import AutoVisionError
+
+        images, labels, label_path = self._layout(
+            tmp_path, b"0 0.1 0.1 0.2 0.1 1.7 0.2\n"
+        )
+        with pytest.raises(AutoVisionError, match=r"line 1.*outside \[0, 1\]") as excinfo:
+            yolo_seg_to_coco(images, ["cat"], tmp_path / "seg.json",
+                             labels_dir=labels)
+        assert str(label_path) in str(excinfo.value)
+
+    def test_pose_keypoint_coordinate_out_of_range(self, tmp_path):
+        """H3-2f: keypoint x/y are checked; the visibility flag is not a
+        coordinate (pv=2 stays legal)."""
+        from autovision.data.convert import yolo_pose_to_coco
+        from autovision.errors import AutoVisionError
+
+        images, labels, label_path = self._layout(
+            tmp_path, b"0 0.5 0.5 0.2 0.2 -3.0 0.1 2\n"
+        )
+        with pytest.raises(AutoVisionError, match=r"keypoint 0 x") as excinfo:
+            yolo_pose_to_coco(
+                images, ["cat"], tmp_path / "pose.json",
+                labels_dir=labels, num_keypoints=1,
+            )
+        assert "line 1" in str(excinfo.value)
+
+    def test_bom_label_file_converts(self, tmp_path):
+        """H3-2f: a UTF-8 BOM prefix does not corrupt the first line's
+        class index parse (labels are read with explicit utf-8-sig)."""
+        from autovision.data.convert import yolo_to_coco
+
+        images, labels, label_path = self._layout(
+            tmp_path, b"\xef\xbb\xbf0 0.5 0.5 0.2 0.2\n"
+        )
+        out = yolo_to_coco(images, names=["cat"], out_json=tmp_path / "bom.json",
+                           labels_dir=labels)
+        payload = json.loads(out.read_text())
+        assert payload["annotations"][0]["category_id"] == 1
+        assert payload["annotations"][0]["bbox"] == pytest.approx(
+            [40.0, 40.0, 20.0, 20.0]
+        )
+
+    def test_non_numeric_field_reports_file_and_line(self, tmp_path):
+        """H3-2f: a non-numeric value fails with file/line, not a bare
+        ``invalid literal for float()`` traceback."""
+        from autovision.data.convert import yolo_to_coco
+        from autovision.errors import AutoVisionError
+
+        images, labels, label_path = self._layout(tmp_path, b"0 0.5 oops 0.2 0.2\n")
+        with pytest.raises(AutoVisionError, match="malformed numeric") as excinfo:
+            yolo_to_coco(images, names=["cat"], out_json=tmp_path / "x.json",
+                         labels_dir=labels)
+        assert str(label_path) in str(excinfo.value)
+        assert "line 1" in str(excinfo.value)
+
+
+class TestConvertJsonHardening:
+    """H3-2e: broken COCO json at convert entry points names the file."""
+
+    def test_merge_coco_empty_json_names_file(self, tmp_path):
+        """H3-2e: a 0-byte input json raises AutoVisionError with the path."""
+        from autovision.data.convert import merge_coco
+        from autovision.errors import AutoVisionError
+
+        path = tmp_path / "broken.json"
+        path.write_bytes(b"")
+        with pytest.raises(AutoVisionError, match=r"broken\.json"):
+            merge_coco([path], tmp_path / "out.json")
+
+    def test_merge_coco_truncated_json_names_file(self, tmp_path):
+        """H3-2e: a truncated json is wrapped the same way."""
+        from autovision.data.convert import merge_coco
+        from autovision.errors import AutoVisionError
+
+        path = tmp_path / "cut.json"
+        path.write_text('{"images": [{"id": 1')
+        with pytest.raises(AutoVisionError, match=r"cut\.json"):
+            merge_coco([path], tmp_path / "out.json")
+
+    def test_coco_to_yolo_broken_json_names_file(self, tmp_path):
+        """H3-2e: the backward direction wraps parse failures too."""
+        from autovision.data.convert import coco_to_yolo
+        from autovision.errors import AutoVisionError
+
+        path = tmp_path / "annotations.json"
+        path.write_bytes(b"not json at all")
+        with pytest.raises(AutoVisionError, match=r"annotations\.json"):
+            coco_to_yolo(path, tmp_path / "labels")

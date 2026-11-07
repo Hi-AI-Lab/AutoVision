@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from autovision.cli.common_helpers import coerce_bool_strict
 from autovision.data.coco_object_detection_dataset import (
     COCOObjectDetectionDataArgs,
 )
@@ -195,7 +196,7 @@ def data_check(
         records,
         categories=categories,
         raw_categories=raw_categories or None,
-        near_duplicate=bool(near_duplicate),
+        near_duplicate=coerce_bool_strict(near_duplicate, name="near_duplicate"),
         max_examples=int(max_examples),
     )
     return report.save(out)

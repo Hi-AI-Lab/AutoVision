@@ -11,9 +11,9 @@ optional ``iscrowds``) and produces:
 - false-positive attribution — ``duplicate`` / ``classification`` /
   ``localization`` / ``background`` (TIDE-style, mutually exclusive in
   that order), plus an ``ignored`` bucket: a detection whose best match is
-  a crowd (``iscrowd == 1``) GT at IoU >= the threshold is an ignore-region
-  hit under the official protocol (pycocotools ``dtIg``) — neither TP nor
-  FP, counted separately and excluded from precision/recall;
+  a same-class crowd (``iscrowd == 1``) GT at IoU >= the threshold is an
+  ignore-region hit under the official protocol (pycocotools ``dtIg``) —
+  neither TP nor FP, counted separately and excluded from precision/recall;
 - slices by class and by COCO area range (small / medium / large);
 - a report (``report.json`` + ``report.md``) and a **top-FP / top-FN
   gallery**: rendered overlays (TP green, FP red with reason + score, FN
@@ -26,6 +26,7 @@ convention of :class:`~autovision.metrics.map_evaluator.COCOMAPEvaluator`.
 from __future__ import annotations
 
 import json
+import logging
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
@@ -34,7 +35,10 @@ from typing import Any
 
 import torch
 
+from autovision.errors import AutoVisionError
 from autovision.metrics.confusion import ConfusionMatrix
+
+logger = logging.getLogger("autovision")
 
 __all__ = [
     "COCO_AREA_RANGES",
@@ -165,7 +169,27 @@ def match_detections(
     """
     from torchvision.ops import box_iou
 
+    if len(predictions) != len(targets):
+        # METRIC audit P3-16: a silent zip truncation here would analyze
+        # only the aligned prefix and silently drop the tail's matches.
+        raise AutoVisionError(
+            f"{len(predictions)} prediction record(s) for {len(targets)} "
+            "target record(s) — the sequences must be per-image aligned."
+        )
     names = dict(class_names or {})
+    # METRIC audit P3-17: per_class is keyed by NAME — duplicate names would
+    # merge two classes' counts into one row. The internal-id space is the
+    # contract; duplicates are a caller configuration error.
+    if len(set(names.values())) != len(names):
+        duplicates = sorted(
+            name
+            for name, count in Counter(names.values()).items()
+            if count > 1
+        )
+        raise AutoVisionError(
+            f"Duplicate class name(s) {duplicates} in class_names — per-class "
+            "reporting is keyed by name; give every class a distinct name."
+        )
     matches: list[Match] = []
 
     for image_index, (prediction, target) in enumerate(zip(predictions, targets)):
@@ -192,7 +216,13 @@ def match_detections(
         for class_id in sorted(set(labels_p.tolist()) | set(labels_g.tolist())):
             class_name = names.get(class_id, str(class_id))
             pred_index = torch.nonzero(labels_p == class_id).flatten()
-            order = pred_index[scores_p[pred_index].argsort(descending=True)]
+            # ``ious`` rows follow the class-local tensor order
+            # (``boxes_p[pred_index]``), NOT the score ranking; ``sorted_idx``
+            # maps rank -> class-local position, so rows must be indexed
+            # through it or a low-score box reads a high-score box's IoU
+            # whenever the input is not score-sorted (H1-1).
+            sorted_idx = scores_p[pred_index].argsort(descending=True)
+            order = pred_index[sorted_idx]
             gt_index = torch.nonzero(
                 (labels_g == class_id) & regular_g
             ).flatten()
@@ -205,7 +235,7 @@ def match_detections(
                 box = _box_tuple(boxes_p[p])
                 best_iou, best_gt = 0.0, None
                 if ious is not None:
-                    row = ious[position]
+                    row = ious[sorted_idx[position]]
                     for local_gt, gt in enumerate(gt_index.tolist()):
                         if gt in matched_gt:
                             continue
@@ -281,14 +311,14 @@ def _classify_fp(
 ) -> tuple[str, int | None]:
     """TIDE-style attribution for one false positive.
 
-    A detection overlapping a CROWD gt (``iscrowd == 1``) at IoU >= the
-    threshold is an **ignore** hit (pycocotools ``dtIg`` semantics: the
-    official protocol neither counts it as a true nor as a false positive),
-    returned as ``"ignored"`` for the caller to record separately.
-    Otherwise, in priority order: ``duplicate`` (same-class IoU >= the
-    threshold but the GT is taken), ``classification`` (IoU >= threshold
-    with another class's GT), ``localization`` (same-class IoU >= 0.1),
-    ``background``. The second value is the GT class for a
+    A detection overlapping a SAME-CLASS crowd gt (``iscrowd == 1``) at
+    IoU >= the threshold is an **ignore** hit (pycocotools ``dtIg``
+    semantics: the official protocol neither counts it as a true nor as a
+    false positive), returned as ``"ignored"`` for the caller to record
+    separately. Otherwise, in priority order: ``duplicate`` (same-class
+    IoU >= the threshold but the GT is taken), ``classification`` (IoU >=
+    threshold with another class's GT), ``localization`` (same-class IoU
+    >= 0.1), ``background``. The second value is the GT class for a
     ``classification`` hit, else ``None``.
     """
     from torchvision.ops import box_iou
@@ -297,14 +327,19 @@ def _classify_fp(
         return "background", None
     query = torch.tensor([box], dtype=torch.float32, device=boxes_g.device)
     ious = box_iou(query, boxes_g)[0]
-    # Closest-to-pyocotools rule (``dtIg``): pick the BEST-IoU GT among the
-    # crowd boxes and the UNMATCHED regular GT; only when that best match is
-    # the crowd box is the detection an ignore-region hit. (pycocotools
-    # additionally skips already-matched regular GT in its argmax; here a
-    # strong overlap on a taken GT reads as ``duplicate`` — the TIDE
-    # attribution — which is the more informative answer.)
+    # Closest-to-pycocotools rule (``dtIg``): pick the BEST-IoU GT among
+    # the same-class crowd boxes and the regular GT; only when that best
+    # match is a crowd box is the detection an ignore-region hit. Crowd
+    # boxes of other classes are skipped below — pycocotools matches per
+    # category, so a dog detection is never absorbed by a person crowd
+    # region (H3-6d). One deliberate deviation remains: pycocotools skips
+    # already-matched regular GT in its argmax; here a strong overlap on a
+    # taken GT reads as ``duplicate`` — the TIDE attribution — which is the
+    # more informative answer.
     best_overall, best_overall_is_crowd = 0.0, False
     for gt in range(boxes_g.shape[0]):
+        if int(crowds_g[gt]) != 0 and int(labels_g[gt]) != class_id:
+            continue
         value = float(ious[gt])
         if value > best_overall:
             best_overall, best_overall_is_crowd = value, int(crowds_g[gt]) != 0
@@ -408,7 +443,12 @@ def _render_overlay(
 
     from autovision.data.file_helpers import open_image
 
-    canvas = Image.fromarray(open_image(image_path).permute(1, 2, 0).numpy())
+    source = open_image(image_path)
+    if source.shape[0] == 1:
+        source = source.repeat(3, 1, 1)
+    elif source.shape[0] == 4:
+        source = source[:3]
+    canvas = Image.fromarray(source.permute(1, 2, 0).numpy())
     draw = ImageDraw.Draw(canvas)
     for match in list(image_matches)[:max_boxes]:
         x1, y1, x2, y2 = match.box
@@ -456,6 +496,19 @@ def _rank_images(
     return ranked
 
 
+def _gallery_file_name(rank: int, count: float, image_path: Path) -> str:
+    """Gallery file name shared by the writer AND the report.md builder.
+
+    METRIC audit P3-14: same-stem images from different directories used to
+    overwrite each other's gallery files; the parent directory prefixes the
+    stem, and one helper keeps the two construction sites in sync.
+    """
+    disambiguator = (
+        f"{image_path.parent.name}_" if image_path.parent != Path(".") else ""
+    )
+    return f"rank{rank:02d}_{count:.0f}_{disambiguator}{image_path.stem}.jpg"
+
+
 def analyze_detection_errors(
     predictions: Sequence[Mapping[str, Any]],
     targets: Sequence[Mapping[str, Any]],
@@ -467,6 +520,7 @@ def analyze_detection_errors(
     score_threshold: float = 0.0,
     top_k: int = 5,
     max_boxes_per_image: int = 60,
+    max_report_matches: int = 1000,
     area_ranges: Mapping[str, tuple[float, float]] | None = None,
     split: str = "train",
 ) -> ErrorAnalysisReport:
@@ -534,12 +588,23 @@ def analyze_detection_errors(
         folder.mkdir(parents=True, exist_ok=True)
         for rank, (image_index, count, tie) in enumerate(ranked):
             path = Path(image_paths[image_index])
-            canvas = _render_overlay(
-                path, by_image.get(image_index, ()), class_names, max_boxes_per_image
-            )
-            out_path = folder / f"rank{rank:02d}_{count:.0f}_{path.stem}.jpg"
-            canvas.save(str(out_path))
-            written.append(out_path)
+            # METRIC audit P3-15: a missing/unreadable image used to abort
+            # the whole gallery (and leave report.md referencing nothing).
+            try:
+                canvas = _render_overlay(
+                    path, by_image.get(image_index, ()), class_names, max_boxes_per_image
+                )
+                # P3-14: same-stem files from different directories collide
+                # on one gallery name — the shared helper keeps report.md
+                # links in sync.
+                out_path = folder / _gallery_file_name(rank, count, path)
+                canvas.save(str(out_path))
+                written.append(out_path)
+            except Exception as error:  # noqa: BLE001 - one bad image skips
+                logger.warning(
+                    "Gallery overlay for '%s' failed (%s); skipped.",
+                    path, error,
+                )
 
     # Global galleries (top_k images) + per-class worst image.
     global_fp = _rank_images(matches, "fp", None)[:top_k]
@@ -611,7 +676,10 @@ def analyze_detection_errors(
             return
         for rank, (image_index, count, tie) in enumerate(ranked):
             path = Path(image_paths[image_index])
-            rel = f"gallery/{kind}_all/rank{rank:02d}_{count:.0f}_{path.stem}.jpg"
+            rel = (
+                f"gallery/{kind}_all/"
+                f"{_gallery_file_name(rank, count, path)}"
+            )
             md.append(f"![{kind} rank{rank}]({rel})\n")
 
     _gallery_section(f"Top-FP 画廊（按 FP 数排序，取前 {len(global_fp)}）", "fp", global_fp)
@@ -627,7 +695,7 @@ def analyze_detection_errors(
             image_index, count, tie = ranked[0]
             rel = (
                 f"gallery/fp_{_safe_name(name)}/"
-                f"rank00_{count:.0f}_{Path(image_paths[image_index]).stem}.jpg"
+                f"{_gallery_file_name(0, count, Path(image_paths[image_index]))}"
             )
             md.append(f"FP {row['fp']}：![{name} fp]({rel})\n")
         if row["fn"]:
@@ -635,19 +703,33 @@ def analyze_detection_errors(
             image_index, count, tie = ranked[0]
             rel = (
                 f"gallery/fn_{_safe_name(name)}/"
-                f"rank00_{count:.0f}_{Path(image_paths[image_index]).stem}.jpg"
+                f"{_gallery_file_name(0, count, Path(image_paths[image_index]))}"
             )
             md.append(f"FN {row['fn']}：![{name} fn]({rel})\n")
 
     report_md = out_dir / "report.md"
     report_md.write_text("\n".join(md))
     report_json = out_dir / "report.json"
+    # METRIC-08: the full per-box match dump scaled O(detections) —
+    # hundreds of MB on large datasets, with the confusion matrix stored
+    # TWICE (in the summary and at the top level). The report now carries
+    # the summary (which already embeds the confusion once) plus a capped
+    # top-K slice of the matches; the complete stream remains reconstruct-
+    # ible by re-running the analyzer with the same inputs.
+    ordered_matches = sorted(
+        matches,
+        key=lambda match: (
+            {"fp": 0, "fn": 1, "tp": 2}.get(match.kind, 3),
+            -(match.score if match.score is not None else 0.0),
+        ),
+    )
     report_json.write_text(
         json.dumps(
             {
                 "summary": summary,
-                "confusion": confusion.to_dict(),
-                "matches": [asdict(match) for match in matches],
+                "matches_total": len(matches),
+                "matches": [asdict(match) for match in ordered_matches[:max(0, max_report_matches)]],
+                "matches_truncated": len(matches) > max(0, max_report_matches),
                 "gallery": [str(path.relative_to(out_dir)) for path in written],
                 "images": [str(path) for path in image_paths],
             },

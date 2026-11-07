@@ -110,6 +110,13 @@ class Env:
         "AUTOVISION_SERVING_API_KEY", _default=None,
         _type=_parse_optional_str, secret=True,
     )
+    # Explicit acceptance of an unauthenticated non-loopback serving bind
+    # (H2-1 escape hatch in autovision.serving.server.serve): the default is
+    # fail-closed, so an open endpoint only starts when the operator states
+    # that intent in the environment itself.
+    SERVE_ALLOW_INSECURE = EnvVar[bool](
+        "AUTOVISION_SERVE_ALLOW_INSECURE", _default=False, _type=_parse_bool
+    )
     # Opt-in deterministic training: torch determinism + cuDNN deterministic,
     # no benchmark autotuning. Some ops have no deterministic kernel and will
     # raise; slower. See engine.seed_everything.
@@ -189,10 +196,15 @@ class Env:
     MSDA_CROSS_ATTN = EnvVar[bool](
         "AUTOVISION_MSDA_CROSS_ATTN", _default=False, _type=_parse_bool
     )
-    # Reserved for the per-step watchdog (design §7) — declared so the
-    # config surface is discoverable, not yet consumed by the engine.
+    # Alerting-only per-step watchdog, consumed by TaskEngine.fit_task
+    # (H3-3f): a step whose training compute exceeds the threshold logs ONE
+    # warning when it enters the over-threshold state (edge-triggered — a
+    # new warning only after a step returns under the threshold). It is NOT
+    # a cancellation mechanism: the step is never aborted; a truly stuck job
+    # is still failed by the process-group watchdog (DDP_TIMEOUT_SEC).
+    # 0 (default) disables the watchdog.
     STEP_TIMEOUT_SEC = EnvVar[float](
-        "AUTOVISION_STEP_TIMEOUT_SEC", _default=0.0, _type=float  # 0 disables the watchdog
+        "AUTOVISION_STEP_TIMEOUT_SEC", _default=0.0, _type=float
     )
     # Dataset scan cache (design doc §4.8 D8): per-file manifest verdicts
     # are cached next to the dataset so repeated startups skip the full

@@ -16,8 +16,9 @@ from pathlib import Path
 
 import pytest
 import torch
+from torch.utils.data import DataLoader
 
-from autovision.engine.engine import _maybe_clear_accelerator_cache
+from autovision.engine.engine import TaskEngine, _maybe_clear_accelerator_cache
 from autovision.errors import CheckpointError
 from autovision.runtime import checkpoint as checkpoint_module
 from autovision.runtime.checkpoint import Checkpoint, CheckpointMetadata
@@ -169,3 +170,94 @@ class TestCheckpointWriteRetry:
             checkpoint.save_serialized(target, payload)
         reloaded = Checkpoint.from_path(target).state_dict
         assert torch.equal(reloaded["w"], torch.ones(2))
+
+
+class TestExportWeightsAtomicity:
+    """H1-5: export_weights publishes via tmp+fsync+os.replace.
+
+    A failed export write must surface (through the rank-zero write barrier
+    in DDP) while the previous artifacts and any tmp files stay intact.
+    """
+
+    @staticmethod
+    def _fit_with_exports(tmp_path: Path, **kwargs):
+        from tests.test_early_stopping_callbacks import _Dataset, _MetricModel
+
+        model = _MetricModel([0.5, 0.6, 0.7])
+        loader = DataLoader(_Dataset(), batch_size=2)
+        return model, TaskEngine().fit_task(
+            model, loader, loader,
+            out_dir=tmp_path, steps=3, val_every_num_steps=1,
+            save_every_num_steps=100, save_last=True, save_best=True,
+            devices="cpu", visualize_examples=False, **kwargs,
+        )
+
+    def test_successful_export_publishes_a_complete_payload(
+        self, tmp_path: Path
+    ) -> None:
+        """The happy path still writes a loadable payload, without tmp residue."""
+        _, result = self._fit_with_exports(tmp_path)
+        exported = result.exported_model_path
+        assert exported is not None and exported.exists()
+        payload = torch.load(exported, weights_only=True)
+        assert payload["kind"] == "task_model"
+        assert payload["schema_version"] == 1
+        assert "train_model" in payload
+        assert not list((tmp_path / "exported_models").glob("*.tmp"))
+
+    def test_failed_export_keeps_previous_artifacts_and_no_tmp(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A disk failure during the export write surfaces as CheckpointError
+        after the atomic-write retries; previous artifacts keep their bytes
+        and no tmp file survives (checkpoint writes are unaffected)."""
+        from tests.test_early_stopping_callbacks import _Dataset, _MetricModel
+
+        export_dir = tmp_path / "exported_models"
+        export_dir.mkdir(parents=True)
+        (export_dir / "exported_best.pt").write_bytes(b"old-best-bytes")
+        (export_dir / "exported_last.pt").write_bytes(b"old-last-bytes")
+
+        real_save = torch.save
+
+        def _exploding_save(obj, path, *args, **kwargs):
+            # Only the task-model export payload fails; the Checkpoint
+            # payloads (no "kind" key) go through untouched.
+            if isinstance(obj, dict) and obj.get("kind") == "task_model":
+                raise OSError("disk full")
+            return real_save(obj, path, *args, **kwargs)
+
+        monkeypatch.setattr(torch, "save", _exploding_save)
+
+        model = _MetricModel([0.5, 0.6, 0.7])
+        loader = DataLoader(_Dataset(), batch_size=2)
+        with pytest.raises(CheckpointError, match="disk full"):
+            TaskEngine().fit_task(
+                model, loader, loader,
+                out_dir=tmp_path, steps=3, val_every_num_steps=1,
+                save_every_num_steps=100, save_last=True, save_best=True,
+                devices="cpu", visualize_examples=False,
+            )
+        assert (export_dir / "exported_best.pt").read_bytes() == b"old-best-bytes"
+        assert (export_dir / "exported_last.pt").read_bytes() == b"old-last-bytes"
+        assert not list(export_dir.glob("*.tmp"))
+        assert (tmp_path / "checkpoints" / "best.ckpt").exists()
+
+    def test_early_stop_export_still_publishes(self, tmp_path: Path) -> None:
+        """The restructured early-stop export (try/except + barrier) still
+        publishes the last artifact when stopping before the final step."""
+        from tests.test_early_stopping_callbacks import _Dataset, _MetricModel
+
+        model = _MetricModel([0.5] * 10)
+        loader = DataLoader(_Dataset(), batch_size=2)
+        result = TaskEngine().fit_task(
+            model, loader, loader,
+            out_dir=tmp_path, steps=6, val_every_num_steps=1,
+            save_every_num_steps=100, save_last=True, save_best=False,
+            devices="cpu", visualize_examples=False,
+            early_stopping_patience=2,
+        )
+        assert result.stopped_early is True
+        assert result.exported_model_path is not None
+        assert result.exported_model_path.exists()
+        assert not list((tmp_path / "exported_models").glob("*.tmp"))

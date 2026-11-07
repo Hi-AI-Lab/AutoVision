@@ -7,6 +7,8 @@ from typing import Any
 
 import torch
 
+from autovision.errors import AutoVisionError
+
 __all__ = ["SegmentationMetricCollector"]
 
 
@@ -29,6 +31,24 @@ class SegmentationMetricCollector:
         valid = targets != self.ignore_index
         predictions = predictions[valid]
         targets = targets[valid]
+        # METRIC-09: the TARGET domain is annotation truth — a negative
+        # value (some datasets use -1 as ignore instead of 255) used to
+        # crash bincount with a raw RuntimeError, and a value at/above
+        # num_classes crashed the reshape; both are annotation corruption
+        # and must be named. (PREDICTION out-of-range stays defensive: a
+        # misconfigured head is a recoverable training-time condition.)
+        target_bad = (targets < 0) | (targets >= self.num_classes)
+        if bool(target_bad.any()):
+            raise AutoVisionError(
+                f"Segmentation target(s) contain {int(target_bad.sum())} "
+                f"value(s) outside [0, {self.num_classes}) other than the "
+                f"ignore_index={self.ignore_index} — annotation corruption "
+                f"(min={int(targets.min())}, max={int(targets.max())}). "
+                "Set ignore_index to the dataset's convention or fix the "
+                "labels."
+            )
+        targets = targets[~target_bad]
+        predictions = predictions[~target_bad]
         # Drop predictions of out-of-range classes defensively.
         in_range = (predictions >= 0) & (predictions < self.num_classes)
         predictions = predictions[in_range]

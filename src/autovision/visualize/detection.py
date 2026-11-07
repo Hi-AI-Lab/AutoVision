@@ -147,7 +147,12 @@ def draw_prediction(
         elif array.ndim == 3 and array.shape[-1] == 4:
             array = array[..., :3]
         if array.dtype != np.uint8:
-            if array.max() > 1.5:
+            if np.issubdtype(array.dtype, np.integer) and array.max() > 255:
+                # INFER-11: 16-bit frames scale by their own full range —
+                # the old /255 heuristic wrapped uint16 values back around
+                # (uint16(40000)/255*255 truncated to a dark 64).
+                array = array / float(np.iinfo(array.dtype).max)
+            elif array.max() > 1.5:
                 array = array / 255.0
             else:
                 array = np.clip(array, 0, 1)

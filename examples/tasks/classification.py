@@ -20,11 +20,10 @@ from pathlib import Path
 from _common import (
     build_inference_parser,
     load_class_names,
+    load_exported_model,
     predict_and_annotate,
     resolve_device,
 )
-
-import autovision
 
 
 def main() -> None:
@@ -51,7 +50,7 @@ def main() -> None:
             "--weights .../exported_models/exported_last.pt."
         )
     device = "cpu" if args.onnx is not None else resolve_device(args.device)
-    model = autovision.load_model(args.weights, device=device)
+    model = load_exported_model(args.weights, device=device)
     names = load_class_names(args.class_names)
     predict_and_annotate(model, args, names, title="classification")
 

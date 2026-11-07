@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 from typing import Mapping, Protocol
 
+from autovision.compliance.licenses import DEFAULT_ALLOWLIST, normalize_license
 from autovision.registry.model_card import load_model_card
 from autovision.registry.model_registry import RegistryEntry, compute_file_sha256
 
@@ -25,11 +26,14 @@ __all__ = [
     "ParityGate",
     "Sha256Gate",
     "default_gates",
-]
+    "VerifyStrengthGate",]
 
-_DEFAULT_ALLOWLIST = frozenset(
-    {"Apache-2.0", "MIT", "BSD-2-Clause", "BSD-3-Clause", "ISC", "MPL-2.0"}
-)
+# H3-4h: one allowlist. The registry gate and the compliance report used to
+# carry two hand-maintained copies that had already drifted (Python-2.0 /
+# PSF-2.0 present in one, missing in the other); both now read the
+# authoritative table from compliance/licenses. (registry -> compliance is a
+# same-rank import: check_layering puts both at rank 5.)
+_DEFAULT_ALLOWLIST = DEFAULT_ALLOWLIST
 
 
 class DeploymentGate(Protocol):
@@ -81,8 +85,13 @@ class LicenseGate:
             return [f"cannot read model card: {error}"]
         if not card.license:
             return ["model card has no license"]
-        if card.license not in self.allowlist:
-            return [f"license '{card.license}' is not in the deployment allowlist"]
+        # H3-4h: cards may declare a vendor alias ("Apache Software License");
+        # judging the raw string would fail-closed on a license the aliases
+        # table already maps into the allowlist. UNKNOWN never matches.
+        if normalize_license(card.license) not in self.allowlist:
+            return [
+                f"license '{card.license}' is not in the deployment allowlist"
+            ]
         return []
 
 
@@ -137,6 +146,51 @@ class ParityGate:
         except Exception as error:  # noqa: BLE001
             return [f"invalid parity report: {error}"]
         return [] if payload.get("passed") is True else ["parity report did not pass"]
+
+
+class VerifyStrengthGate:
+    """EXPORT-02: require artifacts whose numbers were actually verified.
+
+    Opt-in (design 5.2): ``check`` reads the artifact's identity metadata
+    (in-graph for ONNX, sidecar for TRT/OV via the same
+    :func:`autovision.export.artifact_metadata.read_metadata` the engine
+    loader uses) and rejects anything exported with
+    ``verify=smoke-only`` — an fp16 export made on a machine without a
+    CUDA execution provider, where the parity gate only executed the
+    graph. Artifacts without any recorded strength (legacy exports) are
+    reported too: the gate is about KNOWING, not about trusting defaults.
+    """
+
+    name = "verify_strength"
+
+    def __init__(self, *, require_full: bool = True) -> None:
+        self.require_full = require_full
+
+    def check(self, entry: RegistryEntry) -> list[str]:
+        from autovision.export.artifact_metadata import read_metadata
+
+        path = entry.path
+        if Path(path).suffix.lower() in (".engine", ".trt"):
+            backend = "tensorrt"
+        elif Path(path).suffix.lower() == ".xml":
+            backend = "openvino"
+        elif Path(path).suffix.lower() == ".onnx":
+            backend = "onnx"
+        else:
+            return [f"unknown artifact carrier '{Path(path).suffix}'"]
+        metadata = read_metadata(path, backend=backend)
+        strength = metadata.get("autovision_verify_strength")
+        if strength is None:
+            return ["artifact records no verify strength (pre-0.6.1 export)"]
+        if self.require_full and strength != "full":
+            # Review P2-1: "unverified" (verify=False debug exports) joins
+            # "smoke-only" on the rejection list.
+            return [
+                f"verify strength is {strength!r}; full numerical parity "
+                "required (re-export with verify=True on a CUDA-enabled "
+                "onnxruntime build)"
+            ]
+        return []
 
 
 class DataSnapshotGate:

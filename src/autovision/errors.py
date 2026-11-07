@@ -13,6 +13,7 @@ __all__ = [
     "ConfigUnknownKeyError",
     "ConfigValidationError",
     "CheckpointError",
+    "ResultValidationError",
     "UnresolvedAutoError",
     "UnknownModelError",
 ]
@@ -52,3 +53,15 @@ class UnresolvedAutoError(AutoVisionError):
 
 class CheckpointError(AutoVisionError):
     """A checkpoint is missing, unreadable, or incompatible."""
+
+
+class ResultValidationError(AutoVisionError, ValueError):
+    """A result payload failed its shape/cardinality contract (H3-1h).
+
+    Dual inheritance is deliberate: :class:`AutoVisionError` keeps the
+    framework error family catchable as one type, while :class:`ValueError`
+    preserves compatibility with callers written before the hierarchy
+    existed — these checks raised bare ``ValueError`` previously. The MRO
+    (ResultValidationError -> AutoVisionError -> ValueError) has both bases
+    as siblings under ``Exception``, so no linearization conflict arises.
+    """

@@ -45,7 +45,9 @@ from _common import (
     gtr_eager_device_guard,
     gtr_requirement,
     load_class_names,
+    load_exported_model,
     resolve_device,
+    run_prediction,
 )
 from PIL import Image
 
@@ -174,13 +176,13 @@ def main() -> None:
         if args.weights is not None:
             # Exported checkpoint: its network provides the pre/post
             # contract; the trained weights themselves stay unused.
-            model = autovision.load_model(args.weights, device="cpu")
+            model = load_exported_model(args.weights, device="cpu")
             names = load_class_names(args.class_names)
         else:
             names = pretrained_class_names(args.model)
             model = autovision.detection(args.model, pretrained=True)
     elif args.weights is not None:
-        model = autovision.load_model(args.weights, device=device)
+        model = load_exported_model(args.weights, device=device)
         gtr_eager_device_guard(model.network, device=device)
         names = load_class_names(args.class_names)
     else:
@@ -193,13 +195,11 @@ def main() -> None:
         model = autovision.detection(args.model, pretrained=True)
         model.to(device)
 
-    if args.onnx is not None:
-        from autovision.inference import InferenceEngine
-
-        engine = InferenceEngine(model.network, backend="onnx", artifact=args.onnx)
-        prediction = engine.run(args.image, threshold=args.threshold)
-    else:
-        prediction = model.predict(args.image, threshold=args.threshold)
+    # run_prediction routes --onnx through InferenceEngine and converts
+    # identity-mismatch failures (e.g. a trained 2-class artifact against
+    # the 80-class default network) into the same one-line exit every
+    # other example failure uses — the inline form leaked raw tracebacks.
+    prediction = run_prediction(model, args)
     labels = _tolist(prediction["labels"])
     scores = _tolist(prediction["scores"])
     boxes = _tolist(prediction["bboxes"])

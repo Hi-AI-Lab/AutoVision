@@ -8,6 +8,7 @@ from autovision.data.mmap_helpers import (
     _increment_ref_count,
     _ref_count_path,
     dataset_mmap_context,
+    get_dataset_mmap_file,
     get_dataset_temp_mmap_path,
 )
 from autovision.data.serialize.memory_mapped_sequence import (
@@ -180,3 +181,151 @@ class TestMmapFingerprintHardening:
         ) as seq:
             assert len(seq) == 3
         assert not path.exists()
+
+
+def _concurrent_opener(barrier, path, rows, results, index):
+    """Child worker: synchronize on the barrier, then race the open path.
+
+    H3-2g/H4-2: every process must succeed and take exactly one reference.
+    """
+    try:
+        barrier.wait(timeout=60)
+        seq = get_dataset_mmap_file(lambda: items(rows), path)
+        results.put((index, len(seq), None))
+    except Exception as error:  # noqa: BLE001 - reported to the parent verbatim
+        results.put((index, None, repr(error)))
+
+
+class TestConcurrentOpen:
+    def test_double_process_open_race_keeps_refcount_exact(self, tmp_path):
+        """H3-2g/H4-2: several processes racing the exists->open->increment
+        sequence on one mmap file all succeed and the refcount ends at
+        exactly the number of openers — no lost increments and no ghost
+        references (a refcount pointing at a deleted file)."""
+        import multiprocessing
+
+        path = tmp_path / "shared.mmap"
+        write_items_to_file(items(50), path)
+        # One active holder in the parent so the cleanup path can never
+        # remove the file mid-race; the refcount must end at 1 + N.
+        _increment_ref_count(path)
+
+        num_processes = 4
+        ctx = multiprocessing.get_context("fork")
+        barrier = ctx.Barrier(num_processes)
+        results = ctx.Queue()
+        processes = [
+            ctx.Process(
+                target=_concurrent_opener,
+                args=(barrier, path, 50, results, index),
+            )
+            for index in range(num_processes)
+        ]
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(timeout=120)
+        assert all(process.exitcode == 0 for process in processes)
+
+        outcomes = [results.get(timeout=10) for _ in range(num_processes)]
+        for _, rows_seen, error in outcomes:
+            assert error is None, error
+            assert rows_seen == 50  # every opener actually opened the data
+
+        ref = _ref_count_path(path)
+        assert json.loads(ref.read_text()) == 1 + num_processes
+        assert path.exists()  # no ghost reference: the file is still real
+
+
+class TestDataFingerprintImageManifest:
+    """DATA-03: image add/delete must invalidate the mmap row cache.
+
+    The YOLO/pretrain loaders enumerate image files per mmap row, so the
+    directory fingerprint has to cover the image manifest — not only the
+    label files. Otherwise a newly added image silently never enters
+    training and a deleted one crashes mid-epoch in ``open_image``.
+    """
+
+    def _tree(self, tmp_path):
+        images = tmp_path / "train" / "images"
+        labels = tmp_path / "train" / "labels"
+        images.mkdir(parents=True)
+        labels.mkdir(parents=True)
+        (images / "img_0.jpg").write_bytes(b"fake-jpeg")
+        (labels / "img_0.txt").write_text("0 0.5 0.5 0.2 0.2\n")
+        return images, labels
+
+    def test_added_image_changes_the_fingerprint(self, tmp_path):
+        from autovision.data.mmap_helpers import _data_fingerprint
+
+        images, _labels = self._tree(tmp_path)
+        before = _data_fingerprint(str(images))
+        (images / "img_1.jpg").write_bytes(b"fake-jpeg")
+        assert _data_fingerprint(str(images)) != before
+
+    def test_deleted_image_changes_the_fingerprint(self, tmp_path):
+        from autovision.data.mmap_helpers import _data_fingerprint
+
+        images, _labels = self._tree(tmp_path)
+        (images / "img_1.jpg").write_bytes(b"fake-jpeg")
+        before = _data_fingerprint(str(images))
+        (images / "img_1.jpg").unlink()
+        assert _data_fingerprint(str(images)) != before
+
+    def test_label_edit_still_changes_the_fingerprint(self, tmp_path):
+        """The pre-existing label-content invalidation must not regress."""
+        from autovision.data.mmap_helpers import _data_fingerprint
+
+        images, labels = self._tree(tmp_path)
+        before = _data_fingerprint(str(images))
+        # A different LENGTH, not just different values: mtime granularity
+        # can swallow a same-size rewrite inside one timestamp tick.
+        (labels / "img_0.txt").write_text("0 0.40 0.4 0.2 0.2\n")
+        assert _data_fingerprint(str(images)) != before
+
+    def test_yolo_args_mmap_hash_tracks_the_image_set(self, tmp_path):
+        from autovision.data.yolo_object_detection_dataset import (
+            YOLOObjectDetectionDataArgs,
+        )
+
+        images, _labels = self._tree(tmp_path)
+        args = YOLOObjectDetectionDataArgs(
+            path=tmp_path,
+            train=tmp_path / "train" / "images",
+            val=tmp_path / "train" / "images",
+            names={0: "dog"},
+        )
+        before = args.train_data_mmap_hash()
+        (images / "img_1.jpg").write_bytes(b"fake-jpeg")
+        assert args.train_data_mmap_hash() != before
+
+
+class TestOverwriteDeletionOwnership:
+    """DATA-12: overwrite deletes belong to rank zero only."""
+
+    def test_rank_zero_overwrite_replaces_the_file(self, tmp_path, monkeypatch):
+        import autovision.data.mmap_helpers as helpers
+
+        monkeypatch.setattr(helpers, "is_local_rank_zero", lambda: True)
+        path = tmp_path / "data.mmap"
+        write_items_to_file(items(1), path)
+        _ref_count_path(path).write_text(json.dumps(1))
+
+        sequence = helpers.get_dataset_mmap_file(lambda: items(2), path, overwrite=True)
+        assert len(sequence) == 2  # rebuilt with the new row set
+        assert path.is_file()
+
+    def test_non_zero_rank_overwrite_never_deletes(self, tmp_path, monkeypatch):
+        """A slow rank used to unlink the file rank0 had JUST published;
+        as a reader it must leave the mmap (and refcount) in place."""
+        import autovision.data.mmap_helpers as helpers
+
+        monkeypatch.setattr(helpers, "is_local_rank_zero", lambda: False)
+        path = tmp_path / "data.mmap"
+        write_items_to_file(items(3), path)
+        _ref_count_path(path).write_text(json.dumps(1))
+
+        sequence = helpers.get_dataset_mmap_file(lambda: items(3), path, overwrite=True)
+        assert len(sequence) == 3  # opened the existing rows (reader role)
+        assert path.is_file()
+        assert json.loads(_ref_count_path(path).read_text()) == 2  # referenced, not deleted

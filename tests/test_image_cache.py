@@ -72,7 +72,7 @@ class TestDiskCache:
         """Disk mode decodes the source once and writes a fresh sidecar."""
         path = _write_image(tmp_path / "img.png", seed=1)
         cached = open_image_cached(path, num_channels=3, mode="disk")
-        sidecar = tmp_path / "img.npy"
+        sidecar = tmp_path / "img.png.npy"
         assert sidecar.exists()
         expected = open_image(path, num_channels=3)
         assert torch.equal(cached, expected)
@@ -99,7 +99,7 @@ class TestDiskCache:
         rebuilt = open_image_cached(path, num_channels=3, mode="disk")
         assert not torch.equal(stale, rebuilt)
         assert torch.equal(rebuilt, open_image(path, num_channels=3))
-        with np.load(tmp_path / "img.npy") as data:
+        with np.load(tmp_path / "img.png.npy") as data:
             assert int(data["meta"][1]) == new_mtime
 
     def test_shape_mismatch_triggers_rebuild(self, tmp_path):
@@ -107,7 +107,7 @@ class TestDiskCache:
         path = _write_image(tmp_path / "img.png", seed=5)
         assert open_image_cached(path, num_channels=3, mode="disk") is not None
         mtime = path.stat().st_mtime_ns
-        sidecar = tmp_path / "img.npy"
+        sidecar = tmp_path / "img.png.npy"
         with sidecar.open("wb") as handle:
             np.savez(
                 handle,
@@ -125,7 +125,7 @@ class TestDiskCache:
         """A corrupt sidecar is discarded and the next read restores it."""
         path = _write_image(tmp_path / "img.png", seed=6)
         assert open_image_cached(path, num_channels=3, mode="disk") is not None
-        sidecar = tmp_path / "img.npy"
+        sidecar = tmp_path / "img.png.npy"
         sidecar.write_bytes(b"definitely not an npy container")
         recovered = open_image_cached(path, num_channels=3, mode="disk")
         assert torch.equal(recovered, open_image(path, num_channels=3))
@@ -143,7 +143,7 @@ class TestDiskCache:
         with ThreadPoolExecutor(max_workers=8) as executor:
             results = list(executor.map(read, range(16)))
         assert all(torch.equal(result, expected) for result in results)
-        with np.load(tmp_path / "img.npy") as data:
+        with np.load(tmp_path / "img.png.npy") as data:
             assert np.array_equal(data["image"], expected.numpy())
 
 
@@ -279,3 +279,39 @@ class TestImageDatasetWiring:
         assert torch.equal(
             dataset[0]["views"][0], open_image(paths[0], num_channels=3)
         )
+
+
+class TestSidecarNamingAndFreshness:
+    """DATA-05: one sidecar per source file, keyed on (mtime, size)."""
+
+    def test_same_stem_different_suffix_gets_separate_sidecars(self, tmp_path):
+        """`a.jpg` and `a.png` must not share `a.npy` — the old
+        with_suffix layout made every read thrash (mtime mismatch) or, with
+        equal mtimes, serve one file's pixels for the other."""
+        jpg = _write_image(tmp_path / "a.jpg", seed=0)
+        png = _write_image(tmp_path / "a.png", seed=1)
+
+        first = open_image_cached(jpg, num_channels=3, mode="disk")
+        second = open_image_cached(png, num_channels=3, mode="disk")
+        assert not torch.equal(first, second)
+        assert (tmp_path / "a.jpg.npy").is_file()
+        assert (tmp_path / "a.png.npy").is_file()
+
+        sidecar_mtime = (tmp_path / "a.jpg.npy").stat().st_mtime_ns
+        again = open_image_cached(jpg, num_channels=3, mode="disk")
+        assert torch.equal(again, first)  # cache hit, identical pixels
+        assert (tmp_path / "a.jpg.npy").stat().st_mtime_ns == sidecar_mtime
+
+    def test_equal_mtime_size_change_rebuilds(self, tmp_path):
+        """A same-mtime content swap (cp -p style tools preserve mtimes) is
+        caught by the size component of the freshness key."""
+        path = _write_image(tmp_path / "a.jpg", seed=0, size=(16, 16))
+        stale = open_image_cached(path, num_channels=3, mode="disk")
+        assert stale.shape == (3, 16, 16)
+
+        original_mtime = path.stat().st_mtime_ns
+        _write_image(path, seed=5, size=(32, 32))
+        os.utime(path, ns=(original_mtime, original_mtime))
+
+        rebuilt = open_image_cached(path, num_channels=3, mode="disk")
+        assert rebuilt.shape == (3, 32, 32)  # the stale 16x16 array must not return

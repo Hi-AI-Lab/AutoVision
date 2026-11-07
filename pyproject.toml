@@ -198,6 +198,11 @@ testpaths = ["tests"]
 # sys.path): pin the repo root so `tests.conftest` resolves to THIS tree
 # (a same-named package in site-packages must never shadow it).
 pythonpath = ["."]
+markers = [
+    # Long-running soak suite (tests/test_soak.py); only runs when
+    # AUTOVISION_RUN_SOAK=1 is set (H4-1, docs/hardening_plan.md §9).
+    "soak: long-running lifecycle/leak soak tests (deselect by default)",
+]
 
 [tool.mypy]
 # Incremental type gate for the core, dependency-light modules (CI runs an

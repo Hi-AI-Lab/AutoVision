@@ -4,8 +4,12 @@
 import asyncio
 import base64
 import io
+import json
+import logging
+import os
 import threading
 import time
+from typing import Any
 
 import httpx
 import numpy as np
@@ -13,11 +17,19 @@ import pytest
 from tests.test_tracking import tiny_model  # noqa: F401 - local fixture reuse
 
 pytest.importorskip("fastapi")
+pytest.importorskip("uvicorn")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
 from autovision.errors import AutoVisionError  # noqa: E402
 from autovision.serving import create_app  # noqa: E402
+from autovision.serving import server as serving_server  # noqa: E402
+from autovision.serving.app import (  # noqa: E402
+    _DEFAULT_MAX_IMAGE_PIXELS,
+    _sanitize_request_id,
+)
+from autovision.serving.server import serve  # noqa: E402
+from autovision.serving.worker import SERVE_CONFIG_ENV  # noqa: E402
 
 
 def _b64_image(size: int = 64, seed: int = 0) -> str:
@@ -148,6 +160,8 @@ class TestFailureVisibility:
         text = client.get("/metrics").text
         assert 'autovision_requests_total{endpoint="predict",status="500"}' in text
         assert "autovision_errors_total 1" in text
+        # H2-5d: even 500s land in the latency histogram.
+        assert 'autovision_predict_latency_seconds_count{error_class="internal"}' in text
 
     def test_inference_timeout_returns_504_then_poisons_the_engine(self):
         class _HungEngine:
@@ -181,6 +195,9 @@ class TestFailureVisibility:
             text = client.get("/metrics").text
             assert 'status="504"' in text
             assert "autovision_inference_timeouts_total 1" in text
+            # H2-5d: timeout-bound failures carry their latency class.
+            assert 'autovision_predict_latency_seconds_count{error_class="timeout"}' in text
+            assert 'autovision_predict_latency_seconds_count{error_class="poisoned"}' in text
         finally:
             engine.release.set()
 
@@ -222,6 +239,168 @@ class TestFailureVisibility:
             assert 'autovision_variant_ready{variant="default"} 0' in text
         finally:
             engine.release.set()
+
+
+class TestVariantIsolation:
+    """H2-3/H2-5a: per-variant poison isolation and A/B routing control."""
+
+    class _OkEngine:
+        backend = "torch"
+        artifact = None
+        network = None
+
+        def run_batch(self, images, *, threshold=0.5):
+            return [{"depth": np.zeros((2, 2), dtype=np.float32)} for _ in images]
+
+    class _HungEngine:
+        backend = "torch"
+        artifact = None
+        network = None
+
+        def __init__(self):
+            self.release = threading.Event()
+
+        def run_batch(self, images, *, threshold=0.5):
+            self.release.wait(timeout=5.0)
+            return [{} for _ in images]
+
+    def test_poisoned_variant_does_not_take_down_the_other(self):
+        """H2-3: one wedged variant is 503/readyz-flagged; the other serves."""
+        hung = self._HungEngine()
+        app = create_app(
+            variants={"a": hung, "b": self._OkEngine()},
+            threshold=0.0,
+            allow_variant_override=True,
+            inference_timeout_s=0.05,
+            queue_timeout_s=0.5,
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+        try:
+            first = client.post(
+                "/predict",
+                json={"image": _b64_image(seed=41)},
+                headers={"X-AB-Variant": "a"},
+            )
+            assert first.status_code == 504
+            # The healthy variant still answers (single-variant poison used
+            # to 503 the whole process).
+            second = client.post(
+                "/predict",
+                json={"image": _b64_image(seed=42)},
+                headers={"X-AB-Variant": "b"},
+            )
+            assert second.status_code == 200, second.text
+            assert second.json()["variant"] == "b"
+            # Partial poison keeps the process ready, with per-variant detail.
+            ready = client.get("/readyz")
+            assert ready.status_code == 200
+            assert ready.json()["poisoned_variants"] == ["a"]
+            assert ready.json()["variants"]["b"] is True
+            health = client.get("/healthz")
+            assert health.json()["poisoned"] is True
+            assert health.json()["poisoned_variants"] == ["a"]
+            text = client.get("/metrics").text
+            assert 'autovision_variant_ready{variant="a"} 0' in text
+            assert 'autovision_variant_ready{variant="b"} 1' in text
+            assert "autovision_model_ready 1" in text
+        finally:
+            hung.release.set()
+
+    def test_readyz_503_only_when_every_variant_is_poisoned(self):
+        """H2-3: /readyz stays 200 until all variants are wedged."""
+        hung_a = self._HungEngine()
+        hung_b = self._HungEngine()
+        app = create_app(
+            variants={"a": hung_a, "b": hung_b},
+            threshold=0.0,
+            allow_variant_override=True,
+            inference_timeout_s=0.05,
+            queue_timeout_s=0.5,
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+        try:
+            client.post(
+                "/predict",
+                json={"image": _b64_image(seed=43)},
+                headers={"X-AB-Variant": "a"},
+            )
+            ready = client.get("/readyz")
+            assert ready.status_code == 200
+            client.post(
+                "/predict",
+                json={"image": _b64_image(seed=44)},
+                headers={"X-AB-Variant": "b"},
+            )
+            ready = client.get("/readyz")
+            assert ready.status_code == 503
+            assert ready.json()["poisoned"] is True
+            assert ready.json()["poisoned_variants"] == ["a", "b"]
+        finally:
+            hung_a.release.set()
+            hung_b.release.set()
+
+    def test_ab_variant_header_requires_override(self):
+        """H2-5a: X-AB-Variant steering is opt-in; the bucket key is not
+        the client-controlled X-Request-ID."""
+        engines = {"a": self._OkEngine(), "b": self._OkEngine()}
+        default_app = create_app(variants=dict(engines), threshold=0.0)
+        default_client = TestClient(default_app)
+        # Without the opt-in the header is ignored (unknown names included):
+        # the request routes normally instead of failing.
+        response = default_client.post(
+            "/predict",
+            json={"image": _b64_image(seed=45)},
+            headers={"X-AB-Variant": "nonexistent"},
+        )
+        assert response.status_code == 200
+        assert response.json()["variant"] in {"a", "b"}
+
+        override_app = create_app(
+            variants=dict(engines), threshold=0.0, allow_variant_override=True
+        )
+        override_client = TestClient(override_app)
+        forced = override_client.post(
+            "/predict",
+            json={"image": _b64_image(seed=46)},
+            headers={"X-AB-Variant": "b"},
+        )
+        assert forced.status_code == 200
+        assert forced.json()["variant"] == "b"
+        unknown = override_client.post(
+            "/predict",
+            json={"image": _b64_image(seed=47)},
+            headers={"X-AB-Variant": "nonexistent"},
+        )
+        assert unknown.status_code == 400
+        assert "X-AB-Variant" in unknown.json()["error"]
+
+    def test_summarized_depth_is_flagged_as_truncated(self):
+        """H2-5f: a depth map summarized by max_elements must be flagged —
+        a shape digest is not pixels, and silent truncation is unusable."""
+
+        class _DepthEngine:
+            backend = "torch"
+            artifact = None
+            network = None
+
+            def run_batch(self, images, *, threshold=0.5):
+                return [{"depth": np.full((8, 8), 0.5, dtype=np.float32)}]
+
+        truncated = TestClient(
+            create_app(engine=_DepthEngine(), threshold=0.0, max_json_elements=16)
+        )
+        response = truncated.post("/predict", json={"image": _b64_image(seed=48)})
+        assert response.status_code == 200
+        entry = response.json()["results"][0]
+        assert entry["depth"]["summarized"] is True
+        assert entry["depth_truncated"] is True
+
+        intact = TestClient(
+            create_app(engine=_DepthEngine(), threshold=0.0, max_json_elements=100)
+        )
+        response = intact.post("/predict", json={"image": _b64_image(seed=49)})
+        assert response.status_code == 200
+        assert "depth_truncated" not in response.json()["results"][0]
 
 
 class TestAppValidation:
@@ -437,13 +616,16 @@ class TestQueueBackpressure:
                 )
                 release.set()
                 first_response = await first
-            return first_response, second
+                # H2-5d: queue timeouts are observable in the latency histogram.
+                metrics_text = (await client.get("/metrics")).text
+            return first_response, second, metrics_text
 
-        first_response, second = asyncio.run(scenario())
+        first_response, second, metrics_text = asyncio.run(scenario())
         assert first_response.status_code == 200
         assert second.status_code == 503
         assert second.headers["Retry-After"] == "1"
         assert "saturated" in second.json()["error"]
+        assert 'autovision_predict_latency_seconds_count{error_class="queue_timeout"}' in metrics_text
 
 
 class TestObservabilityAuth:
@@ -481,3 +663,322 @@ class TestObservabilityAuth:
         throttled = client.get("/metrics")
         assert throttled.status_code == 429
         assert throttled.headers["Retry-After"]
+
+
+class _StubEngine:
+    """Minimal callable engine: plumbing tests only need decode + dispatch."""
+
+    backend = "torch"
+    artifact = None
+    network = None
+
+    def run_batch(self, images, *, threshold=0.5):
+        return [{"score": 1.0} for _ in images]
+
+
+class _UvicornCapture:
+    """Record a single uvicorn.run invocation without binding a socket."""
+
+    def __init__(self) -> None:
+        self.args: tuple[Any, ...] = ()
+        self.kwargs: dict[str, Any] = {}
+
+    def __call__(self, *args: Any, **kwargs: Any) -> None:
+        self.args = args
+        self.kwargs = kwargs
+
+
+@pytest.fixture()
+def uvicorn_run(monkeypatch):
+    capture = _UvicornCapture()
+    monkeypatch.setattr("uvicorn.run", capture)
+    return capture
+
+
+@pytest.fixture()
+def stub_app(monkeypatch):
+    """Replace the real app build inside serve(): launcher tests must not
+    load a model onto a device just to assert transport options."""
+    monkeypatch.setattr(
+        serving_server,
+        "create_app",
+        lambda model, **kwargs: ("APP", model, kwargs),
+    )
+
+
+class TestServeLauncherHardening:
+    """H2-1/H2-4/H2-2a/H2-5e: launch-time guards of autovision.serving.server."""
+
+    def test_non_loopback_without_a_key_is_fail_closed(self, uvicorn_run):
+        """H2-1: 0.0.0.0 + no key + no env key refuses to start (P0 fix)."""
+        with pytest.raises(AutoVisionError, match="AUTOVISION_SERVE_ALLOW_INSECURE"):
+            serve("model.pt", host="0.0.0.0")
+        assert uvicorn_run.args == ()  # uvicorn.run was never reached
+
+    def test_non_loopback_with_env_key_starts(self, monkeypatch, uvicorn_run, stub_app):
+        """H2-1: AUTOVISION_SERVING_API_KEY satisfies the non-loopback guard."""
+        monkeypatch.setenv("AUTOVISION_SERVING_API_KEY", "env-secret")
+        serve("model.pt", host="0.0.0.0", threshold=0.2)
+        assert uvicorn_run.kwargs["host"] == "0.0.0.0"
+        assert uvicorn_run.args[0] == ("APP", "model.pt", {"threshold": 0.2})
+
+    def test_non_loopback_with_explicit_key_starts(self, uvicorn_run, stub_app):
+        """H2-1: api_key= keeps working for non-loopback single-process serving."""
+        serve("model.pt", host="192.168.1.10", api_key="k")
+        assert uvicorn_run.kwargs["host"] == "192.168.1.10"
+
+    def test_allow_insecure_env_opt_in_starts(self, monkeypatch, uvicorn_run, stub_app):
+        """H2-1: the explicit open-endpoint escape hatch is honored."""
+        monkeypatch.setenv("AUTOVISION_SERVE_ALLOW_INSECURE", "1")
+        serve("model.pt", host="0.0.0.0")
+        assert uvicorn_run.kwargs["host"] == "0.0.0.0"
+
+    def test_loopback_without_a_key_keeps_the_legacy_behavior(
+        self, uvicorn_run, stub_app
+    ):
+        """H2-1: loopback binding stays unauthenticated by default."""
+        serve("model.pt")
+        assert uvicorn_run.kwargs["host"] == "127.0.0.1"
+
+    def test_non_loopback_is_guarded_for_multi_worker_too(self, uvicorn_run):
+        """H2-1: the import-string factory path is checked before uvicorn.run."""
+        with pytest.raises(AutoVisionError, match="AUTOVISION_SERVING_API_KEY"):
+            serve("model.pt", host="0.0.0.0", workers=2)
+        assert uvicorn_run.args == ()
+
+    def test_api_key_is_rejected_for_multi_worker(self, uvicorn_run):
+        """H2-4: the key would be serialized into the env and leak via /proc."""
+        with pytest.raises(AutoVisionError, match="AUTOVISION_SERVING_API_KEY"):
+            serve("model.pt", workers=2, api_key="secret")
+        assert uvicorn_run.args == ()
+
+    def test_multi_worker_env_key_stays_out_of_the_serialized_config(
+        self, monkeypatch, uvicorn_run
+    ):
+        """H2-4: with the env channel the config payload carries no credential."""
+        monkeypatch.setenv("AUTOVISION_SERVING_API_KEY", "env-secret")
+        monkeypatch.setenv(SERVE_CONFIG_ENV, "")  # tracked for teardown restore
+        observed: dict[str, str] = {}
+        real_run = uvicorn_run
+
+        def recording_run(*args, **kwargs):
+            # SERVE-09: serve() cleans the config env up on exit, so the
+            # payload is observed at uvicorn.run call time.
+            observed["payload"] = os.environ[SERVE_CONFIG_ENV]
+            real_run(*args, **kwargs)
+
+        import uvicorn as _uvicorn
+
+        monkeypatch.setattr(_uvicorn, "run", recording_run)
+        serve("model.pt", workers=2)
+        payload = json.loads(observed["payload"])
+        assert payload == {"model": "model.pt"}
+        assert uvicorn_run.kwargs["workers"] == 2
+        assert uvicorn_run.kwargs["factory"] is True
+        assert SERVE_CONFIG_ENV not in os.environ
+
+    def test_graceful_shutdown_defaults_to_thirty_seconds(
+        self, uvicorn_run, stub_app
+    ):
+        """H2-5e: the SIGTERM drain is bounded by default, not unbounded."""
+        serve("model.pt")
+        assert uvicorn_run.kwargs["timeout_graceful_shutdown"] == 30
+
+    def test_graceful_shutdown_none_restores_unbounded_wait(
+        self, uvicorn_run, stub_app
+    ):
+        """H2-5e: explicit None still restores uvicorn's unbounded drain."""
+        serve("model.pt", timeout_graceful_shutdown=None)
+        assert "timeout_graceful_shutdown" not in uvicorn_run.kwargs
+
+    def test_connection_limits_are_forwarded_to_uvicorn(self, uvicorn_run, stub_app):
+        """H2-2a: concurrency/keep-alive bounds reach uvicorn (single process)."""
+        serve("model.pt", limit_concurrency=8, timeout_keep_alive=5)
+        assert uvicorn_run.kwargs["limit_concurrency"] == 8
+        assert uvicorn_run.kwargs["timeout_keep_alive"] == 5
+
+    def test_connection_limits_have_safe_defaults(self, uvicorn_run, stub_app):
+        """H2-2a: unbounded queues are not the default launch posture."""
+        serve("model.pt")
+        assert uvicorn_run.kwargs["limit_concurrency"] == 64
+        assert uvicorn_run.kwargs["timeout_keep_alive"] == 30
+
+    def test_connection_limits_forwarded_for_multi_worker(self, monkeypatch, uvicorn_run):
+        """H2-2a: the import-string factory path forwards the bounds too."""
+        monkeypatch.setenv(SERVE_CONFIG_ENV, "")  # tracked for teardown restore
+        serve("model.pt", workers=2, limit_concurrency=8)
+        assert uvicorn_run.kwargs["limit_concurrency"] == 8
+
+    def test_bad_connection_limits_fail_loud(self):
+        with pytest.raises(AutoVisionError, match="limit_concurrency"):
+            serve("model.pt", limit_concurrency=0)
+        with pytest.raises(AutoVisionError, match="timeout_keep_alive"):
+            serve("model.pt", timeout_keep_alive=0)
+
+
+class TestPixelBudget:
+    """H2-2b/c: request-wide pixel budget and the 16M single-image default."""
+
+    @staticmethod
+    def _flat_image(width: int, height: int) -> str:
+        """Solid-color PNG: tiny payload, exact decoded pixel count."""
+        from PIL import Image
+
+        image = Image.new("RGB", (width, height), (17, 34, 51))
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        return base64.b64encode(buffer.getvalue()).decode()
+
+    def test_default_cap_is_16_megapixels(self):
+        """H2-2c: the default now covers 4000x4000 frames, not 6000x6000+."""
+        assert _DEFAULT_MAX_IMAGE_PIXELS == 16_000_000
+
+    def test_batch_total_over_budget_is_413(self):
+        """H2-2b: four 15M-pixel images exceed a (60M - 1) request budget."""
+        client = TestClient(
+            create_app(
+                engine=_StubEngine(),
+                threshold=0.0,
+                max_batch=4,
+                max_image_pixels=16_000_000,
+                max_request_pixels=59_999_999,
+            )
+        )
+        images = [self._flat_image(3750, 4000) for _ in range(4)]  # 4 x 15M
+        response = client.post("/predict", json={"images": images})
+        assert response.status_code == 413
+        error = response.json()["error"]
+        # The aggregate message must be distinguishable from the per-image one.
+        assert "max_request_pixels" in error
+        assert "in total" in error
+        assert 'status="413"' in client.get("/metrics").text
+
+    def test_batch_total_at_the_boundary_passes(self):
+        """H2-2b: exactly max_request_pixels decodes and serves."""
+        client = TestClient(
+            create_app(
+                engine=_StubEngine(),
+                threshold=0.0,
+                max_batch=4,
+                max_image_pixels=16_000_000,
+                max_request_pixels=60_000_000,
+            )
+        )
+        images = [self._flat_image(3750, 4000) for _ in range(4)]  # 4 x 15M
+        response = client.post("/predict", json={"images": images})
+        assert response.status_code == 200, response.text
+
+    def test_default_budget_is_batch_times_image_pixels(self):
+        """H2-2b: with no explicit budget, max_batch x max_image_pixels fits."""
+        client = TestClient(
+            create_app(
+                engine=_StubEngine(), threshold=0.0, max_batch=3, max_image_pixels=100
+            )
+        )
+        images = [self._flat_image(10, 10) for _ in range(3)]  # 300 == 3 x 100
+        assert client.post("/predict", json={"images": images}).status_code == 200
+
+    def test_single_image_at_the_per_image_limit_passes(self):
+        """H2-2b: the per-image check stays inclusive at the exact boundary."""
+        client = TestClient(
+            create_app(engine=_StubEngine(), threshold=0.0, max_image_pixels=100)
+        )
+        response = client.post("/predict", json={"image": self._flat_image(10, 10)})
+        assert response.status_code == 200
+
+    def test_request_budget_below_the_image_cap_is_rejected(self, tiny_model):  # noqa: F811
+        """H2-2b: a total budget under the per-image cap is incoherent."""
+        with pytest.raises(AutoVisionError, match="max_request_pixels"):
+            create_app(tiny_model, max_request_pixels=5, max_image_pixels=100)
+
+
+class TestRequestIdHardening:
+    """H2-5b: client-supplied request ids cannot forge log lines."""
+
+    def test_malformed_ids_are_truncated_and_neutralized(self):
+        dirty = "evil\nFAKE status=200 request_id=forged"
+        clean = _sanitize_request_id(dirty)
+        assert clean == "evil?FAKE?status?200?request?id?forged"
+        assert _sanitize_request_id("req-abc") == "req-abc"  # conforming ids pass
+        assert len(_sanitize_request_id("x" * 500)) == 64
+        assert _sanitize_request_id("a b/c!d") == "a?b?c?d"
+
+    def test_injected_request_id_never_reaches_the_log(self, client, caplog):
+        dirty = "evil\nFAKE status=200 request_id=forged"
+        with caplog.at_level(logging.INFO, logger="autovision.serving"):
+            response = client.post(
+                "/predict",
+                json={"image": _b64_image(seed=18)},
+                headers={"X-Request-ID": dirty},
+            )
+        assert response.status_code == 200
+        echoed = response.headers["X-Request-ID"]
+        assert echoed == "evil?FAKE?status?200?request?id?forged"
+        assert response.json()["request_id"] == echoed
+        for record in caplog.records:
+            assert "\n" not in record.getMessage()
+        assert any("evil?FAKE" in record.getMessage() for record in caplog.records)
+
+
+class TestErrorDisclosure:
+    """H2-5c: framework-internal 400s cannot echo server internals."""
+
+    def test_internal_engine_error_is_masked_with_a_stable_phrase(self, caplog):
+        class _LeakyEngine:
+            backend = "torch"
+            artifact = None
+            network = None
+
+            def run_batch(self, images, *, threshold=0.5):
+                raise AutoVisionError(
+                    "cannot load engine artifact /srv/private/secret.engine"
+                )
+
+        app = create_app(engine=_LeakyEngine(), threshold=0.0)
+        client = TestClient(app)
+        with caplog.at_level(logging.ERROR, logger="autovision.serving"):
+            response = client.post("/predict", json={"image": _b64_image(seed=19)})
+        # SERVE-02: an engine-boundary failure is a SERVER error now —
+        # the stable-phrase masking is unchanged, the status moved 400→500.
+        assert response.status_code == 500
+        body = response.json()
+        assert body["request_id"] == response.headers["X-Request-ID"]
+        assert "/srv/private" not in body["error"]
+        assert "Prediction failed" in body["error"]
+        # The original text stays server-side, keyed by request id.
+        assert any("/srv/private" in record.getMessage() for record in caplog.records)
+
+    def test_client_input_errors_keep_the_original_text(self, client):
+        """Validation messages are built from client input and stay verbatim."""
+        response = client.post("/predict", json={"images": ["!!not-base64!!"]})
+        assert response.status_code == 400
+        assert "Invalid base64 image payload" in response.json()["error"]
+
+
+class TestErrorPathMetrics:
+    """H2-5d: failed requests land in the latency histogram with error_class."""
+
+    def test_rate_limited_predict_latency_is_observed(self, tiny_model):  # noqa: F811
+        app = create_app(
+            tiny_model,
+            threshold=0.0,
+            rate_limit_per_minute=1,
+            rate_limit_burst=1,
+            trust_proxy_headers=True,
+        )
+        client = TestClient(app)
+        first = client.post("/predict", json={"image": _b64_image(seed=23)})
+        assert first.status_code == 200
+        throttled = client.post("/predict", json={"image": _b64_image(seed=24)})
+        assert throttled.status_code == 429
+        # The limiter is per client key: scrape from a different key so the
+        # shared bucket does not throttle the /metrics read itself.
+        text = client.get(
+            "/metrics", headers={"X-Forwarded-For": "10.0.0.9"}
+        ).text
+        assert 'autovision_predict_latency_seconds_count{error_class="rate_limited"}' in text
+
+    def test_validation_error_latency_is_observed(self, client):
+        response = client.post("/predict", json={"nope": 1})
+        assert response.status_code == 400
+        assert 'error_class="validation"' in client.get("/metrics").text

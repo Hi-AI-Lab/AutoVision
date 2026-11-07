@@ -88,6 +88,10 @@ class ObjectDetectionDataset(TaskDataset):
             image_path: PathLike = row["image_path"]
             bboxes = json.loads(row["bboxes"])
             class_labels = json.loads(row["class_labels"])
+            # METRIC-03: the COCO loader emits per-box crowd flags (the mAP
+            # evaluator ignores crowd GT under the official protocol); the
+            # YOLO loader emits no such key, so absence means all zeros.
+            iscrowds = json.loads(row.get("iscrowds", "[]"))
         else:
             raise TypeError(f"Unsupported image info row: {type(row).__name__}")
         image = open_image(image_path, num_channels=self.num_channels)
@@ -109,11 +113,14 @@ class ObjectDetectionDataset(TaskDataset):
             boxes_tv = tv_tensors.BoundingBoxes(
                 torch.zeros(0, 4), format="XYXY", canvas_size=(height, width)
             )
+        if len(iscrowds) != len(labels):
+            iscrowds = [0] * len(labels)
         item = {
             "image_path": str(image_path),
             "image": image,
             "bboxes": boxes_tv,
             "classes": labels,
+            "iscrowds": torch.as_tensor(iscrowds, dtype=torch.long),
             "original_size": (width, height),
         }
         if self.transform is not None:

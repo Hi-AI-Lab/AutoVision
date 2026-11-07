@@ -141,13 +141,28 @@ def export_onnx_to_tensorrt(
     fp32_attention_scores: "bool" = False,
     verbose: "bool" = False,
     model_dtype: "torch.dtype" = torch.float32,
+    resolved_precision_out: "dict[str, str] | None" = None,
+    keep_staged_onnx: "bool" = False,
 ) -> pathlib.Path:
     """Build a TensorRT engine at ``out`` from the model's ONNX export.
 
     ``export_onnx_fn`` (typically ``model.export_onnx``) materializes the
     intermediate ONNX file; the entries of ``onnx_args`` are forwarded to
     it as keywords. Unless ``onnx_args["out"]`` points elsewhere, that file
-    is written next to the engine (same stem, ``.onnx`` suffix).
+    is written next to the engine (same stem, ``.onnx`` suffix) — and
+    (H3-4b) removed again once the engine built successfully, unless
+    ``keep_staged_onnx`` is set (or ``debug`` needs it for per-layer
+    dumps). An unverified staged graph must not sit beside a verified
+    engine under the same stem: only the int8 route keeps its QDQ graph
+    alive past the build, because there the caller staged it explicitly
+    (``pre_staged_onnx``) and owns its lifecycle.
+
+    ``resolved_precision_out`` (H3-4a), when given, receives
+    ``{"precision": <resolved>}`` from the BUILD DECISION POINT: the
+    precision class the engine will actually run at ("fp32" / "fp16" /
+    "int8") — ``precision="auto"`` resolves from the model dtype and the
+    installed TensorRT's flags, not to a fixed answer, so callers can gate
+    the engine with tolerances that match its real numerics.
 
     ``precision="int8"`` takes a **pre-quantized QDQ ONNX** (roadmap D4):
     pass ``pre_staged_onnx`` with the graph produced by
@@ -239,6 +254,8 @@ def export_onnx_to_tensorrt(
         precision=precision,
         model_dtype=model_dtype,
         strongly_typed=strongly_typed,
+        staged_fp16=graph_drives_precision,
+        resolved_out=resolved_precision_out,
     )
     if debug:  # pragma: no cover - requires trt debugging workflow
         _switch_on_engine_introspection(tensorrt, build_config)
@@ -280,9 +297,13 @@ def export_onnx_to_tensorrt(
             # preserves Conv node names there.
             from autovision.export.quantization import suggest_first_layer_nodes
 
+            # ``staged_onnx`` IS the pre-staged QDQ graph here (int8
+            # validated ``pre_staged_onnx`` non-None up front), so the
+            # optional-path annotation of the parameter stays out of the
+            # checker's way.
             candidates = suggest_first_layer_nodes(
-                pre_staged_onnx.with_suffix(".fp32.onnx")
-            ) or suggest_first_layer_nodes(pre_staged_onnx)
+                staged_onnx.with_suffix(".fp32.onnx")
+            ) or suggest_first_layer_nodes(staged_onnx)
             if candidates:
                 hint += (
                     " In this build the leading Conv nodes are "
@@ -298,11 +319,58 @@ def export_onnx_to_tensorrt(
             + hint
         ) from build_error
     _require_engine_blob(engine_blob)
+    # EXPORT-11 (partial): the audit recommended dropping the self-staged
+    # graph on FAILURE too, but H3-4b's keep-on-failure is a deliberate,
+    # tested decision (tests/test_deployment.py TestTensorRTStagedOnnx) —
+    # the failed build is debugged against its staged graph. The audit's
+    # OTHER half (pid in the staged name, below) prevents the real
+    # concurrent-export collision; the "staged beside old good engine"
+    # concern is deferred to a debug-args redesign.
 
     os.makedirs(engine_path.parent, exist_ok=True)
-    engine_path.write_bytes(engine_blob)
+    _publish_engine(engine_path, engine_blob)
+    # H3-4b: only a self-staged graph is ours to clean (the int8 route's
+    # ``pre_staged_onnx`` is caller-owned lifecycle). ``debug`` keeps it:
+    # the exposed-tensor graph is the per-layer dump's companion artifact.
+    if pre_staged_onnx is None and not (keep_staged_onnx or debug):
+        _drop_staged_graph(staged_onnx)
+    else:
+        _announce("Intermediate ONNX kept at '%s'.", staged_onnx)
     _announce("TensorRT engine saved to '%s'.", engine_path)
     return engine_path
+
+
+def _drop_staged_graph(staged_onnx: "pathlib.Path") -> None:
+    """Delete the staged ONNX and its external-data sidecar after a
+    successful build (H3-4b).
+
+    The staged graph was exported with ``verify=False``: leaving it beside
+    the parity-verified engine under the same stem invites deploying the
+    one artifact nobody gated. Failure paths keep it — a failed build is
+    debugged against its staged graph.
+    """
+    _announce("Removing intermediate ONNX '%s' (engine verified; graph was not).", staged_onnx)
+    staged_onnx.unlink(missing_ok=True)
+    staged_onnx.with_suffix(staged_onnx.suffix + ".data").unlink(missing_ok=True)
+
+
+def _publish_engine(engine_path: "pathlib.Path", engine_blob: "ty.Any") -> None:
+    """Stage the serialized engine under ``.tmp-<pid>`` and ``os.replace`` it
+    into place.
+
+    The rename publishes only a fully fsynced blob: a writer killed mid-write
+    leaves an orphan temp file that fs_utils' mtime-guarded sweep collects,
+    never a half-written engine at the target path (H1-6).
+    """
+    tmp_path = engine_path.with_name(engine_path.name + f".tmp-{os.getpid()}")
+    try:
+        with open(tmp_path, "wb") as handle:
+            handle.write(engine_blob)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, engine_path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 def _prefers_half_precision(precision, model_dtype) -> bool:
@@ -321,22 +389,26 @@ def _first_available_flag(builder_flags, candidates):
     return None
 
 
-def _enable_half_precision(tensorrt, engine_builder, build_config):
+def _enable_half_precision(tensorrt, engine_builder, build_config) -> "bool":
     """Set the FP16 flag when the platform accelerates it.
 
     ``IBuilder.platform_has_fast_fp16`` was removed in TensorRT 11 (the
     platform query left the builder API); a missing attribute now means
     "unknown", so the flag is set and the builder decides.
+
+    Returns whether the engine will actually run FP16 — the two downgrade
+    exits (no fast-FP16 platform, no FP16 flag in this TensorRT build)
+    leave the engine FP32, and the parity gate must know that (H3-4a).
     """
     platform_has_fast_fp16 = getattr(engine_builder, "platform_has_fast_fp16", None)
     if platform_has_fast_fp16 is False:
         LOG.warning("FP16 not supported on this platform; using FP32.")
-        return
+        return False
     builder_flags = tensorrt.BuilderFlag
     fp16_flag = getattr(builder_flags, "FP16", None)
     if fp16_flag is None:
         LOG.warning("This TensorRT build defines no FP16 builder flag; using FP32.")
-        return
+        return False
     build_config.set_flag(fp16_flag)
     constraint_flag = _first_available_flag(
         builder_flags, _PRECISION_CONSTRAINT_LADDER
@@ -345,6 +417,7 @@ def _enable_half_precision(tensorrt, engine_builder, build_config):
         # Ensure layer.precision overrides are respected, not merely preferred.
         build_config.set_flag(constraint_flag)
     _announce("FP16 optimization enabled.")
+    return True
 
 
 def _apply_precision_policy(
@@ -355,16 +428,33 @@ def _apply_precision_policy(
     precision,
     model_dtype,
     strongly_typed,
-):
-    """Resolve the precision knob into builder flags."""
-    if strongly_typed:
+    staged_fp16: "bool" = False,
+    resolved_out: "dict[str, str] | None" = None,
+) -> "str":
+    """Resolve the precision knob into builder flags.
+
+    Returns the precision class the engine will actually run at — the
+    single decision point the parity-gate tolerance reads (H3-4a): "auto"
+    resolves from the model dtype, the installed TensorRT's flag surface
+    and any platform downgrade, never to a fixed "fp16".
+    """
+    if precision == "int8":
+        # The QDQ graph IS the precision contract: mixed int8/fp32 numerics.
+        resolved = "int8"
+    elif strongly_typed:
         # Precisions come from the ONNX graph's dtypes and Cast nodes; the
         # FP16/precision-constraint flags do not apply to such networks.
         _announce("Strongly-typed network: precision taken from the ONNX graph.")
-        return
-    if not _prefers_half_precision(precision, model_dtype):
-        return
-    _enable_half_precision(tensorrt, engine_builder, build_config)
+        resolved = "fp16" if staged_fp16 else "fp32"
+    elif not _prefers_half_precision(precision, model_dtype):
+        resolved = "fp32"
+    elif _enable_half_precision(tensorrt, engine_builder, build_config):
+        resolved = "fp16"
+    else:
+        resolved = "fp32"
+    if resolved_out is not None:
+        resolved_out["precision"] = resolved
+    return resolved
 
 
 def _input_tensors(trt_network):
@@ -506,7 +596,7 @@ def _sanitize_qdq_for_tensorrt(staged_onnx: pathlib.Path) -> int:
             continue  # non-constant scale: cannot fold, leave it (parser will complain loudly)
         values = numpy_helper.to_array(source).astype(np.float32)
         scale = numpy_helper.to_array(scale_init).astype(np.float32)
-        zero_point = np.zeros(1, dtype=np.float32)
+        zero_point: ty.Any = np.zeros(1, dtype=np.float32)
         if len(node.input) > 2 and node.input[2]:
             zp_init = initializers.get(node.input[2])
             if zp_init is not None:

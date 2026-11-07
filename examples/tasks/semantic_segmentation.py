@@ -21,11 +21,10 @@ from _common import (
     gtr_eager_device_guard,
     gtr_requirement,
     load_class_names,
+    load_exported_model,
     predict_and_annotate,
     resolve_device,
 )
-
-import autovision
 
 
 def main() -> None:
@@ -51,7 +50,7 @@ def main() -> None:
     # CPU EP), so the eager-only CUDA requirements do not apply.
     device = "cpu" if args.onnx is not None else resolve_device(args.device)
     if args.weights is not None:
-        model = autovision.load_model(args.weights, device=device)
+        model = load_exported_model(args.weights, device=device)
         if args.onnx is None:
             gtr_eager_device_guard(model.network, device=device)
         names = load_class_names(args.class_names) or _cityscapes_names()

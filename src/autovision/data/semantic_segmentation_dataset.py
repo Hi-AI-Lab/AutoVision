@@ -8,6 +8,7 @@ class-index images; label 255 marks ignored pixels.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -15,9 +16,16 @@ from typing import Any
 import torch
 from torch.utils.data import Dataset
 
-from autovision.data.file_helpers import open_image
+from autovision.data.file_helpers import (
+    build_relative_lookup,
+    match_with_stem_fallback,
+    open_image,
+)
+from autovision.errors import AutoVisionError
 
 __all__ = ["SemanticSegmentationDataset", "list_segmentation_pairs"]
+
+logger = logging.getLogger("autovision")
 
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
@@ -38,7 +46,12 @@ def _read_mask(path: Path) -> torch.Tensor:
 def list_segmentation_pairs(
     images_dir: Path, masks_dir: Path, ignore_index: int = 255
 ) -> tuple[list[tuple[Path, Path]], int]:
-    """Match image/mask files by stem.
+    """Match image/mask files, preferring the suffix-stripped relative path.
+
+    H3-2i: bare-stem matching cross-matched masks in nested trees where two
+    directories both contain e.g. ``a.jpg``; the relative path is now the
+    primary key and the bare stem only a fallback (warned once when the
+    stem is shared across mask directories — the old silent mis-pairing).
 
     Returns ``(pairs, max_label)`` where ``max_label`` is the highest class
     index found in any sampled mask (0 for an empty list). Pixels labeled
@@ -46,23 +59,36 @@ def list_segmentation_pairs(
     label range.
     """
     images_dir, masks_dir = Path(images_dir), Path(masks_dir)
-    mask_by_stem: dict[str, Path] = {}
-    for path in sorted(masks_dir.rglob("*")):
-        if path.is_file():
-            mask_by_stem[path.stem] = path
+    mask_paths = [path for path in sorted(masks_dir.rglob("*")) if path.is_file()]
+    by_relative, by_stem, ambiguous = build_relative_lookup(mask_paths, masks_dir)
     pairs: list[tuple[Path, Path]] = []
+    stem_fallbacks: list[tuple[Path, Path]] = []
     max_label = 0
     for image_path in sorted(images_dir.rglob("*")):
         if not image_path.is_file() or image_path.suffix.lower() not in _IMAGE_EXTENSIONS:
             continue
-        mask_path = mask_by_stem.get(image_path.stem)
+        mask_path, fell_back = match_with_stem_fallback(
+            image_path, images_dir, by_relative, by_stem
+        )
         if mask_path is None:
             continue
+        if fell_back:
+            if image_path.stem in ambiguous:
+                stem_fallbacks.append((image_path, mask_path))
         pairs.append((image_path, mask_path))
         mask = _read_mask(mask_path)
         valid = mask[mask != ignore_index]
         if valid.numel():
             max_label = max(max_label, int(valid.max().item()))
+    if stem_fallbacks:
+        image_path, mask_path = stem_fallbacks[0]
+        logger.warning(
+            "%d image(s) matched segmentation masks by bare stem because the "
+            "relative path missed, and that stem is shared across mask "
+            "directories — the pairing may be wrong (H3-2i); first example: "
+            "'%s' -> '%s'.",
+            len(stem_fallbacks), image_path, mask_path,
+        )
     if not pairs:
         raise ValueError(
             f"No image/mask pairs found ('{images_dir}' x '{masks_dir}'); "
@@ -91,6 +117,17 @@ class SemanticSegmentationDataset(Dataset):
         image_path, mask_path = self.pairs[index]
         image = open_image(image_path, num_channels=self.num_channels)
         mask = _read_mask(mask_path)
+        if mask.shape != image.shape[-2:]:
+            # Segmentation labels must stay pixel-aligned — resampling a
+            # class map is lossy and semantically wrong, so a mismatched
+            # pair is annotation corruption. It used to surface only as a
+            # confusing crop/resize failure deep in the transform (DATA-11).
+            raise AutoVisionError(
+                f"Segmentation pair '{image_path.name}' / '{mask_path.name}' "
+                f"is misaligned: image spatial size {tuple(image.shape[-2:])} "
+                f"vs mask {tuple(mask.shape)} (image '{image_path}', mask "
+                f"'{mask_path}')."
+            )
         if self.transform is not None:
             image, mask = self.transform(image, mask)
         return {

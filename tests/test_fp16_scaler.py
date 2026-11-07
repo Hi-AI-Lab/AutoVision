@@ -88,7 +88,7 @@ class TestScalerCheckpoint:
             scaler=_FakeScaler(),
         )
         restored = _FakeScaler()
-        start_epoch, step = Engine._resume(
+        start_epoch, step, _state = Engine._resume(
             path, method, optimizer, scheduler, torch.device("cpu"),
             scaler=restored,
         )

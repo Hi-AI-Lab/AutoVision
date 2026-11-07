@@ -284,7 +284,10 @@ class TestMirrorFallback:
         monkeypatch.setattr(dl, "_download", fake_download)
         out = dl.resolve_downloadable("mirror-test", cache_dir=tmp_path)
         assert out.read_bytes() == payload
-        assert attempted == ["https://primary.invalid/w.pt", "https://mirror.invalid/w.pt"]
+        # EXPORT-19: each source gets a bounded retry burst before falling
+        # to the next mirror.
+        assert attempted.count("https://primary.invalid/w.pt") == dl._DOWNLOAD_ATTEMPTS_PER_SOURCE
+        assert attempted[-1] == "https://mirror.invalid/w.pt"
 
     def test_mirror_sha_mismatch_tries_next(self, monkeypatch, tmp_path):
         import hashlib

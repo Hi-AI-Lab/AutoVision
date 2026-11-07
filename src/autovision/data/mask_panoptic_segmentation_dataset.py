@@ -19,7 +19,7 @@ segment is unknown or unmapped.
 
 from __future__ import annotations
 
-import json
+import logging
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -27,7 +27,13 @@ from typing import Any
 import torch
 from torch.utils.data import Dataset
 
-from autovision.data.file_helpers import open_image
+from autovision.data.file_helpers import (
+    build_relative_lookup,
+    load_annotation_json,
+    match_with_stem_fallback,
+    open_image,
+)
+from autovision.errors import AutoVisionError
 
 __all__ = [
     "MaskPanopticSegmentationDataset",
@@ -36,12 +42,18 @@ __all__ = [
     "split_panoptic_classes",
 ]
 
+logger = logging.getLogger("autovision")
+
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 
 def load_panoptic_segments(path: Path) -> tuple[dict[int, dict], dict[str, list[dict]]]:
-    """Load the segments json → (categories, annotations-by-stem)."""
-    payload = json.loads(Path(path).read_text())
+    """Load the segments json → (categories, annotations-by-stem).
+
+    Parse failures are wrapped with the file name instead of a bare
+    ``JSONDecodeError`` (H3-2e).
+    """
+    payload = load_annotation_json(path, kind="panoptic segments")
     categories = {
         int(category["id"]): {
             "name": str(category.get("name", category["id"])),
@@ -75,19 +87,39 @@ def split_panoptic_classes(
 
 
 def list_panoptic_pairs(images_dir: Path, masks_dir: Path) -> list[tuple[Path, Path]]:
-    """Match image files and segment-id mask PNGs by stem."""
+    """Match image files and segment-id mask PNGs.
+
+    Matching is by suffix-stripped RELATIVE path first (H3-2i) so nested
+    trees never cross-match same-stem files; the bare stem is only a
+    fallback (with a warning when the stem is shared across mask
+    directories — the old silent mis-pairing).
+    """
     images_dir, masks_dir = Path(images_dir), Path(masks_dir)
-    mask_by_stem: dict[str, Path] = {}
-    for path in sorted(masks_dir.rglob("*")):
-        if path.is_file():
-            mask_by_stem[path.stem] = path
+    mask_paths = [path for path in sorted(masks_dir.rglob("*")) if path.is_file()]
+    by_relative, by_stem, ambiguous = build_relative_lookup(mask_paths, masks_dir)
     pairs: list[tuple[Path, Path]] = []
+    stem_fallbacks: list[tuple[Path, Path]] = []
     for image_path in sorted(images_dir.rglob("*")):
         if not image_path.is_file() or image_path.suffix.lower() not in _IMAGE_EXTENSIONS:
             continue
-        mask_path = mask_by_stem.get(image_path.stem)
-        if mask_path is not None:
-            pairs.append((image_path, mask_path))
+        mask_path, fell_back = match_with_stem_fallback(
+            image_path, images_dir, by_relative, by_stem
+        )
+        if mask_path is None:
+            continue
+        if fell_back:
+            if image_path.stem in ambiguous:
+                stem_fallbacks.append((image_path, mask_path))
+        pairs.append((image_path, mask_path))
+    if stem_fallbacks:
+        image_path, mask_path = stem_fallbacks[0]
+        logger.warning(
+            "%d image(s) matched panoptic masks by bare stem because the "
+            "relative path missed, and that stem is shared across mask "
+            "directories — the pairing may be wrong (H3-2i); first example: "
+            "'%s' -> '%s'.",
+            len(stem_fallbacks), image_path, mask_path,
+        )
     if not pairs:
         raise ValueError(
             f"No image/mask pairs found ('{images_dir}' x '{masks_dir}'); "
@@ -188,6 +220,17 @@ class MaskPanopticSegmentationDataset(Dataset):
 
         image = open_image(image_path, num_channels=self.num_channels)
         segments = _read_mask(mask_path)
+        if segments.shape != image.shape[-2:]:
+            # Panoptic labels must stay pixel-aligned — resampling an id map
+            # invents segments, so a mismatched pair is annotation corruption
+            # that used to surface only as a confusing transform failure
+            # (DATA-11).
+            raise AutoVisionError(
+                f"Panoptic pair '{image_path.name}' / '{mask_path.name}' is "
+                f"misaligned: image spatial size {tuple(image.shape[-2:])} vs "
+                f"segments {tuple(segments.shape)} (image '{image_path}', "
+                f"mask '{mask_path}')."
+            )
         if self.transform is not None:
             # Retry so the random crop keeps at least one valid segment.
             for _ in range(20):

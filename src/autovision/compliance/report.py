@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -25,6 +26,7 @@ from autovision.compliance.inventory import (
 from autovision.compliance.licenses import (
     DEFAULT_ALLOWLIST,
     dependency_inventory,
+    normalize_license,
 )
 
 __all__ = ["ComplianceIssue", "ComplianceReport", "build_compliance_report"]
@@ -103,16 +105,34 @@ class ComplianceReport:
         self.report_md = directory / "compliance.md"
         self.report_sbom = directory / "compliance.sbom.json"
         self.report_manifest = directory / "compliance.manifest.json"
-        self.report_json.write_text(
-            json.dumps(self.to_dict(), indent=2, sort_keys=True)
+        # METRIC audit P3-18: the compliance pack is an audit artifact — a
+        # torn write must not leave a half-readable pack for a reviewer (or
+        # the manifest re-hash) to trip over; every artifact goes through
+        # tmp + fsync + os.replace like the rest of the repo's writers.
+        def _atomic_write(path: Path, payload: str) -> None:
+            tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+            try:
+                with tmp.open("w", encoding="utf-8") as handle:
+                    handle.write(payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(tmp, path)
+            finally:
+                tmp.unlink(missing_ok=True)
+
+        _atomic_write(
+            self.report_json,
+            json.dumps(self.to_dict(), indent=2, sort_keys=True),
         )
-        self.report_md.write_text(self._render_markdown())
-        self.report_sbom.write_text(
-            json.dumps(self.to_cyclonedx(), indent=2, sort_keys=True)
+        _atomic_write(self.report_md, self._render_markdown())
+        _atomic_write(
+            self.report_sbom,
+            json.dumps(self.to_cyclonedx(), indent=2, sort_keys=True),
         )
         # Integrity manifest: reviewers can re-hash the three artifacts and
         # compare without trusting the report's own "passed" field.
-        self.report_manifest.write_text(
+        _atomic_write(
+            self.report_manifest,
             json.dumps(
                 {
                     "schema_version": 1,
@@ -128,7 +148,7 @@ class ComplianceReport:
                 },
                 indent=2,
                 sort_keys=True,
-            )
+            ),
         )
         return self
 
@@ -166,10 +186,22 @@ class ComplianceReport:
         return {
             "bomFormat": "CycloneDX",
             "specVersion": "1.5",
-            "serialNumber": f"urn:uuid:{uuid.uuid4()}",
+            # METRIC audit P3-18: a random serial made two saves of the
+            # SAME report incomparable — derive it from the payload so
+            # identical content yields identical SBOMs (uuid5 over the
+            # report content; not a security boundary).
+            "serialNumber": (
+                "urn:uuid:"
+                + str(uuid.uuid5(uuid.NAMESPACE_URL, json.dumps(self.to_dict(), sort_keys=True)))
+            ),
             "version": 1,
             "metadata": {
-                "timestamp": self.generated_at,
+                # RFC-3339: omit the field entirely when timestamp=False.
+                **(
+                    {"timestamp": self.generated_at}
+                    if self.generated_at is not None
+                    else {}
+                ),
                 "tools": [
                     {
                         "vendor": "AutoVision",
@@ -209,10 +241,16 @@ class ComplianceReport:
         else:
             lines.append("| package | version | license | status |")
             lines.append("|---|---|---|---|")
+
+            def _cell(value: Any) -> str:
+                # METRIC audit P3-19: a pipe in a name/license broke the
+                # table; every cell escapes like the issues table did.
+                return str(value).replace("|", "\\|").replace("\n", " ")
+
             for entry in self.dependencies:
                 lines.append(
-                    f"| {entry.get('name')} | {entry.get('version')} | "
-                    f"{entry.get('license')} | {entry.get('status')} |"
+                    f"| {_cell(entry.get('name'))} | {_cell(entry.get('version'))} | "
+                    f"{_cell(entry.get('license'))} | {_cell(entry.get('status'))} |"
                 )
         lines.append("\n## 问题\n")
         if not self.issues:
@@ -275,7 +313,12 @@ def build_compliance_report(
         inventory, model_issues = model_inventory(model)
         if inventory is not None:
             models.append(inventory)
-            license_id = str(inventory.get("license", "UNKNOWN"))
+            # H3-4h: the dependency path normalizes through the aliases
+            # table; the model-card path used to compare the RAW card string,
+            # so a vendor alias ("Apache Software License") was misreported
+            # as review while the identical dependency passed. UNKNOWN
+            # (unresolvable) still fails closed below.
+            license_id = normalize_license(str(inventory.get("license", "")))
             if license_id == "UNKNOWN":
                 issues.append(
                     ComplianceIssue(

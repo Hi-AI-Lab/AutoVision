@@ -32,7 +32,7 @@ def main() -> None:
 
     data = args.data or depth_demo(demo_root(args, "depth_estimation"))
     if args.dry_run:
-        dry_run("depth_estimation", data)
+        dry_run("depth_estimation", data, args)
         return
     ensure_out_available(args.out, overwrite=args.overwrite)
     gtr_requirement()
