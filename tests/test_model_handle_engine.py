@@ -34,6 +34,7 @@ class _RecordingEngine:
         device: Any,
         providers: Any,
         openvino_device: str,
+        require_metadata: bool = False,
     ) -> None:
         type(self).builds += 1
         self.model = model
@@ -43,6 +44,7 @@ class _RecordingEngine:
             "device": device,
             "providers": providers,
             "openvino_device": openvino_device,
+            "require_metadata": require_metadata,
         }
 
     def run(self, image: Any, *, threshold: float = 0.5) -> dict[str, Any]:

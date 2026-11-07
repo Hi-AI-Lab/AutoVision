@@ -16,7 +16,7 @@ import pytest
 from autovision import detection, ensure_coco8, evaluate_object_detection, load_model
 from autovision.data.convert import coco_to_yolo, yolo_to_coco
 from autovision.data.downloads import DATASET_REGISTRY, download_dataset
-from autovision.errors import AutoVisionError
+from autovision.errors import AutoVisionError, ConfigValidationError
 
 TINY_MODEL_ARGS = {
     "backbone": "torchvision/resnet18",
@@ -155,7 +155,7 @@ class TestPredictInferenceContract:
         silently (ema_warmup_steps belongs in model_args) — now loud."""
         from autovision import train_object_detection
 
-        with pytest.raises(ValueError, match="Unknown trainer_args"):
+        with pytest.raises(ConfigValidationError, match="Unknown trainer_args"):
             train_object_detection(
                 out=tmp_path / "run",
                 data=coco8,

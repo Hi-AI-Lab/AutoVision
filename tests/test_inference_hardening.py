@@ -299,10 +299,13 @@ class TestMetadataGate:
             "_make_onnx_forward",
             lambda self, providers: (lambda batch: []),
         )
+        # The engine validates artifact existence before the metadata gate.
+        artifact = tmp_path / "fake.onnx"
+        artifact.touch()
         return InferenceEngine(
             _StubNetwork(),
             backend="onnx",
-            artifact=tmp_path / "fake.onnx",
+            artifact=artifact,
             require_metadata=require_metadata,
         )
 

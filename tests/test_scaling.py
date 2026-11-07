@@ -1,6 +1,7 @@
 # Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 import pytest
 
+from autovision.errors import ConfigValidationError
 from autovision.scaling import (
     IMAGENET_SIZE,
     QUEUE_SIZE_BUCKETS,
@@ -133,5 +134,5 @@ class TestGetEpochs:
             def method_args_cls():
                 return Args
 
-        with pytest.raises(ValueError, match="auto_steps"):
+        with pytest.raises(ConfigValidationError, match="auto_steps"):
             get_epochs(Recipe, "auto", dataset_size=50_000, batch_size=64)

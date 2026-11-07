@@ -7,6 +7,7 @@ import torch
 
 from autovision import list_methods, list_models, pretrain
 from autovision.cli.train import PretrainConfig
+from autovision.errors import ConfigValidationError
 
 pytestmark = pytest.mark.filterwarnings("ignore::UserWarning")
 
@@ -122,7 +123,7 @@ class TestPretrainEndToEnd:
             out=out, data=image_dir, model="torchvision/resnet18",
             epochs=1, batch_size=4, num_workers=0, method_args={"queue_size": 4},
         )
-        with pytest.raises(ValueError, match="not empty"):
+        with pytest.raises(ConfigValidationError, match="not empty"):
             pretrain(
                 out=out, data=image_dir, model="torchvision/resnet18",
                 epochs=1, batch_size=4, num_workers=0,
