@@ -90,11 +90,12 @@
   uv publish --token "$PYPI_TOKEN" dist/*
   ```
 
-- tag 推送后由 CI 的 `publish` job 以 trusted publishing 上传；首次发布前在 PyPI
-  配置 pending publisher（project `autovision-framework`、workflow `ci.yml`、
-  environment `pypi`）。
-- `README_PYPI.md` 是 PyPI 页面正文（自包含、无相对链接）；首次发布前补
-  `[project.urls]` 与文档站绝对 URL。
+- tag 推送后由 CI 的 `publish` job 以 trusted publishing 上传。PyPI trusted
+  publisher 已配置（project `autovision-framework`、repo `Hi-AI-Lab/AutoVision`、
+  workflow `ci.yml`、environment `pypi`，2026-11-07）；改动 workflow 文件名、仓库
+  或 environment 时必须同步更新，否则 `publish` job 报 `invalid-publisher`。
+- `README_PYPI.md` 是 PyPI 页面正文（自包含、无相对链接）；`[project.urls]` 已
+  配置，改动后跑 `scripts/configure_release.py --check` 校验。
 
 ## 权重与模型发布（政策）
 

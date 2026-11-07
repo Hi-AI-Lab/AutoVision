@@ -16,16 +16,16 @@
 | PyPI 发行名 | `autovision-framework`（PyPI / TestPyPI 当前均可用） |
 | import 名 | `autovision` |
 | CLI | `autovision-cli` |
-| 版本源 | `src/autovision/_version.py`（当前 `0.3.0`） |
-| 已具备 | `pyproject.toml` 元数据、`README_PYPI.md`、`MANIFEST.in`、`uv.lock`、CI `publish` job、Pages 部署 workflow |
-| 待配置 | 公开仓库与文档 URL（用 `scripts/configure_release.py`）、PyPI trusted publisher、正式版本 tag |
+| 版本源 | `src/autovision/_version.py`（当前 `0.6.1`） |
+| 已具备 | `pyproject.toml` 元数据、`README_PYPI.md`、`MANIFEST.in`、`uv.lock`、CI `publish` job、Pages 部署 workflow、公开仓库与文档 URL（`scripts/configure_release.py --check` 通过） |
+| 已配置（2026-11-07） | PyPI trusted publisher：`Hi-AI-Lab/AutoVision` / `ci.yml` / `pypi` |
 | **许可状态** | DEIMv2 派生的 `SpatialPriorModule` 已删除；0.3.0 可按 Apache-2.0 发布，见 `THIRD_PARTY_LICENSES.md` |
 
 > ✅ **许可阻塞已解除（2026-10-17）**：DEIMv2 派生的 `SpatialPriorModule`
 > 已删除，DINOv3 ViT 改用 no-STA adapter。发布前请重新构建 wheel/sdist
 > （旧产物仍含 STA），再执行 `twine check` 与许可审计。
 
-包**尚未上传** PyPI；本文中的 `pip install autovision-framework` 要等第一次发布后才生效。
+包已发布到 PyPI（最新 `0.6.1`，2026-11-07），`pip install autovision-framework` 可直接使用。
 
 ## 1. 一次性配置
 
@@ -49,7 +49,8 @@ export PYPI_TOKEN=pypi-...
 
 ### 1.3 方式 B：Trusted Publishing（推荐，CI 无长期 token）
 
-PyPI → 项目页面 → Publishing → **Add a pending publisher**，填写：
+PyPI → 项目页面 → Publishing → **Add a publisher**（项目尚未在 PyPI 上创建时才是
+**Add a pending publisher**），填写：
 
 | 字段 | 值 |
 |---|---|
@@ -63,7 +64,9 @@ TestPyPI workflow）。仓库的 `.github/workflows/ci.yml` 已有 tag 触发的
 job，使用 `pypa/gh-action-pypi-publish` 与 OIDC，不需要 token。
 
 > pending publisher 必须在第一次上传前配置好；否则 tag 推上去后 `publish` job 会以
-> `invalid-publisher` 失败。
+> `invalid-publisher` 失败。`autovision-framework` 已于 2026-11-07 配置为常规
+> publisher；改 workflow 文件名、仓库或 environment 时必须同步更新，否则同样报
+> `invalid-publisher`。
 
 ### 1.4 公开 URL 与 project.urls
 
@@ -319,7 +322,7 @@ uv tool run --from twine twine upload \
 
 ### 6.2 tag + CI trusted publishing
 
-确认 PyPI pending publisher 已配置后：
+确认 PyPI trusted publisher 已配置后（本项目已于 2026-11-07 配置）：
 
 ```bash
 git tag vX.Y.Z
@@ -402,7 +405,7 @@ PyPI 不允许覆盖已上传版本：
 发布前必须补齐：
 
 1. `[project.urls]` 与公开仓库/文档 URL；
-2. PyPI trusted publisher（或 API token）；
+2. PyPI trusted publisher（已配置；或改用 API token）；
 3. 版本号、CHANGELOG、tag 三者一致。
 
 最小命令序列：
