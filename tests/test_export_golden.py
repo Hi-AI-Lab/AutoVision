@@ -144,12 +144,25 @@ def _build_panoptic_segmentation():
     )
 
 
+def _gtr_available() -> bool:
+    from autovision.tasks.detection.shared.gtr import gtr_available
+
+    return gtr_available()
+
+
+# The GTR backbones need the optional fla dependency; CI installs the test
+# extras without it, so only the non-GTR faces run there.
+_GTR_SKIP = pytest.mark.skipif(
+    not _gtr_available(),
+    reason="GTR backbones require flash-linear-attention (pip install -e '.[gtr]')",
+)
+
 _BUILDERS: list[pytest.param] = [
-    pytest.param(_build_detection, id="detection"),
-    pytest.param(_build_obb, id="obb"),
-    pytest.param(_build_pose, id="pose"),
-    pytest.param(_build_depth, id="depth"),
-    pytest.param(_build_semseg, id="semseg"),
+    pytest.param(_build_detection, id="detection", marks=_GTR_SKIP),
+    pytest.param(_build_obb, id="obb", marks=_GTR_SKIP),
+    pytest.param(_build_pose, id="pose", marks=_GTR_SKIP),
+    pytest.param(_build_depth, id="depth", marks=_GTR_SKIP),
+    pytest.param(_build_semseg, id="semseg", marks=_GTR_SKIP),
     pytest.param(_build_classification, id="classification"),
     pytest.param(_build_instance_segmentation, id="instance_segmentation"),
     pytest.param(_build_panoptic_segmentation, id="panoptic_segmentation"),
