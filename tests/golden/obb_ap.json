@@ -1,0 +1,75 @@
+{
+  "kind": "autovision-obb-ap-golden",
+  "note": "METRIC-06: OBB AP correctness baselines. This is the ONLY self-implemented matcher+AP in the repo, which is exactly why it had no parity anchor and carried two silent correctness bugs (audit METRIC-01 FP-dropping, METRIC-02 envelope interleaving). Every vector here is hand-computable; the audit reproductions pin the exact failure modes. Recording follows the fail-fast convention: delete the file and the suite fails once, then re-records.",
+  "vectors": {
+    "envelope_tp_then_fp": {
+      "description": "METRIC-02: one GT, TP(0.9) then FP(0.8) — the all-point envelope must integrate the higher precision over the full recall span. Pre-fix: 0.5 (interleaved envelope); correct: 1.0.",
+      "scores_tps": [
+        [
+          0.9,
+          1
+        ],
+        [
+          0.8,
+          0
+        ]
+      ],
+      "num_gt": 1,
+      "all_point": 1.0,
+      "coco101": 1.0
+    },
+    "envelope_tp_then_two_fp": {
+      "description": "METRIC-02 variant: three predictions, one TP — AP is 1.0 at all-point (envelope lifts the trailing FPs' precision to 1.0 over their recall span, which is zero-width) and 1.0 at coco101.",
+      "scores_tps": [
+        [
+          0.9,
+          1
+        ],
+        [
+          0.8,
+          0
+        ],
+        [
+          0.7,
+          0
+        ]
+      ],
+      "num_gt": 1,
+      "all_point": 1.0,
+      "coco101": 1.0
+    },
+    "two_gt_one_tp_one_fp": {
+      "description": "Two GT, TP(0.9) then FP(0.8): recall reaches 0.5 with precision 1.0; AP = 0.5.",
+      "scores_tps": [
+        [
+          0.9,
+          1
+        ],
+        [
+          0.8,
+          0
+        ]
+      ],
+      "num_gt": 2,
+      "all_point": 0.5,
+      "coco101": 0.504950495049505,
+      "note": "Two GT, TP(0.9) then FP(0.8): recall reaches 0.5 with precision 1.0; all-point = 0.5; coco101 = 51/101 (points at/above recall 0.5 take the envelope precision 1.0 for the first 51 grid steps — COCO's grid semantics differ from plain half-area)."
+    },
+    "fp_before_tp": {
+      "description": "FP(0.95) ranked ABOVE TP(0.9): precision 0.5 over the whole span — AP 0.5 under both interpolations (the METRIC-01 audit scenario's PR stream).",
+      "scores_tps": [
+        [
+          0.95,
+          0
+        ],
+        [
+          0.9,
+          1
+        ]
+      ],
+      "num_gt": 1,
+      "all_point": 0.5,
+      "coco101": 0.5
+    }
+  }
+}
