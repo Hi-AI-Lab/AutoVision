@@ -154,5 +154,20 @@ jobs:
           pip install build twine
           python -m build
           python -m twine check dist/*
+      - name: Check whether this version is already published
+        id: pypi_version
+        # A release tag can be pushed or rerun more than once. PyPI rejects a
+        # duplicate upload with "400 File already exists" and used to fail the
+        # job. Decide at version level (not per file, as skip-existing would)
+        # so a version never ends up with a mix of old and new dists.
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if curl -fsS --max-time 20 "https://pypi.org/pypi/autovision-framework/${version}/json" > /dev/null; then
+            echo "already_published=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::autovision-framework ${version} is already on PyPI; skipping upload"
+          else
+            echo "already_published=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Publish to PyPI
+        if: steps.pypi_version.outputs.already_published != 'true'
         uses: pypa/gh-action-pypi-publish@release/v1

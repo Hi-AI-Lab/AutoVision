@@ -3,8 +3,8 @@
 本文说明 AutoVision 的**权重/模型发布**流程：许可审计、冻结与读数、模型卡、HuggingFace
 上传、可下载注册表、发布门禁、模型库登记与验证。
 
-> **先分清两件事**：PyPI 发布的是框架代码（见[PyPI 发布指南](pypi_publish.md)）；
-> 模型权重是独立发布物，单独许可、单独版本、单独钉 sha256，不进入框架的 wheel/sdist。
+> **先分清两件事**：PyPI 发布的是框架代码；模型权重是独立发布物，单独许可、
+> 单独版本、单独钉 sha256，不进入框架的 wheel/sdist。
 
 当前仓库**没有已发布的自研权重**：`detr/n`、`detr/s` 为 `spec-frozen`，
 `RELEASED_SPECTRUM_WEIGHTS` 为空。第一次模型发布需要先把下文的“发布接线”补齐。

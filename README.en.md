@@ -262,7 +262,7 @@ reference implementation, not a complete production gateway.
 
 Vertical scenario solutions built on AutoVision (solution engines consume the
 framework's stable seams via `pip install autovision-framework`; see the
-[industry solutions page](https://hi-agi-lab.github.io/AutoVision/en/ecosystem/)):
+[industry solutions page](https://hi-ai-lab.github.io/AutoVision/en/ecosystem/)):
 
 | Repository | Scenario |
 | --- | --- |

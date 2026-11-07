@@ -21,8 +21,8 @@ absolute paths.
 Scope note: directory symbolic links are not descended (``Path.rglob``
 semantics) and link identity is not recorded — snapshot the real trees.
 
-Ultralytics ``data.yaml`` specs are understood natively (DATA-01, see
-``docs/design/data_layer.md``): ``path`` anchors the relative
+Ultralytics ``data.yaml`` specs are understood natively (DATA-01):
+``path`` anchors the relative
 ``train``/``val``/``test`` roots, ``names`` is recorded as metadata and
 never treated as a path. A payload that declares an explicit ``format:``
 key opts out of the YOLO interpretation and follows the generic rules.

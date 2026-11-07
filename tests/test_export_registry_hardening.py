@@ -3,8 +3,8 @@
 metadata, identity-sidecar copying, bounded reads, gate-bypass auditing,
 cache-name validation, sidecar-ordered publication.
 
-Covers the EXPORT-01..10 / 18 / 19 designs from
-``docs/design/export_registry.md`` plus the implemented P3s. The P1 here
+Covers the EXPORT-01..10 / 18 / 19 hardening designs plus the
+implemented P3s. The P1 here
 (register killed mid-write wedging a (name, version) key forever) is a
 production-pipeline availability bug — every test pins the pre-fix failure
 by construction.

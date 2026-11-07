@@ -1,8 +1,8 @@
 # Copyright (c) 2026 AutoVision contributors. Apache-2.0.
 """Pretraining resume: drift guards, scheduler two-stage restore, atomic export.
 
-Covers the TRAIN-01..05 / 09 / 12 / 15 designs from
-``docs/design/training_engine.md``. The load-bearing invariant is that a
+Covers the TRAIN-01..05 / 09 / 12 / 15 hardening designs. The
+load-bearing invariant is that a
 resume WITHOUT parameter changes reproduces the uninterrupted LR schedule
 bit for bit; every behavior change (extended max_epochs, drift warnings)
 is asserted on top of that anchor.

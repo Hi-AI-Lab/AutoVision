@@ -98,15 +98,12 @@ CC-BY-NC 4.0 / DINOv3 License 需显式自证接受条款），许可边界见�
 | [合规报告](compliance.md) | 依赖许可 / 模型卡 / 数据快照证据包 |
 | [硬件伙伴包](hardware_packs.md) | 一伙伴一包、转换与目标端 parity 契约 |
 | [LTS 政策](lts_policy.md) | LTS 节奏、支持窗口、安全 backport |
-| [支持政策](support_policy.md) | 社区/企业支持、P1–P3 SLA、支持矩阵 |
 | [用户自持权重](user_held_weights.md) | 仓库外 DINOv3 检测器的加载路线与许可边界 |
 | [已知限制](known_limits.md) | 定位、适配缺口、谱系状态、导出边界 |
 | [架构总览](framework_design.md) | as-built 分层契约 / 模块地图 / 质量门禁 |
 | [贡献指南](contributing.md) | 开发环境 / 提交前门禁 / 许可与溯源红线 |
 | [发布流程](release_process.md) | 版本政策 / 发布清单 / 权重发布政策 |
-| [PyPI 发布](pypi_publish.md) | 发行名 / TestPyPI / PyPI / trusted publishing / 排错 |
 | [模型发布](model_publish.md) | 许可审计 / 模型卡 / HF 上传 / 注册表 / 发布门禁 |
-| [变更日志](changelog.md) | Keep a Changelog 格式的对外变更记录 |
 
 ## 许可
 

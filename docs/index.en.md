@@ -112,15 +112,12 @@ the [model zoo](model_zoo.md).
 | [Compliance report](compliance.md) | Dependency licenses / model cards / data snapshot evidence pack |
 | [Hardware partner packs](hardware_packs.md) | One pack per partner, conversion and target-side parity contract |
 | [LTS policy](lts_policy.md) | LTS cadence, support windows, security backports |
-| [Support policy](support_policy.md) | Community/enterprise support, P1–P3 SLA, support matrix |
 | [User-held weights](user_held_weights.md) | Loading routes and license boundaries for out-of-tree DINOv3 detectors |
 | [Known limits](known_limits.md) | Scope, adaptation gaps, lineage status, export boundaries |
 | [Architecture](framework_design.md) | As-built layering contract / module map / quality gates |
 | [Contributing](contributing.md) | Development environment / pre-submit gates / licensing and provenance rules |
 | [Release process](release_process.md) | Version policy / release checklist / weight publishing policy |
-| [PyPI publishing](pypi_publish.md) | Distribution name / TestPyPI / PyPI / trusted publishing / troubleshooting |
 | [Model publishing](model_publish.md) | License audit / model cards / HF upload / registry / release gates |
-| [Changelog](changelog.md) | Keep a Changelog-format external change log |
 
 ## License
 

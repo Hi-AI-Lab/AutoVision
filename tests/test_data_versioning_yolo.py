@@ -3,8 +3,8 @@
 
 Covers the DATA-01 (native Ultralytics data.yaml interpretation), DATA-02
 (splits that appear after the snapshot fail verification) and DATA-22
-(truncated snapshot schema fails loudly) designs from
-``docs/design/data_layer.md``. Snapshot files only need bytes — the
+(truncated snapshot schema fails loudly) hardening designs. Snapshot
+files only need bytes — the
 snapshot digests sizes, it never decodes images.
 """
 

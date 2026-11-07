@@ -81,8 +81,8 @@ workers>1 下被拒绝，key 必须走环境变量）、进程内 token-bucket
   `overwrite=True` 会强制重建，删除动作仅由 rank0 执行（DATA-12）。残余
   边界：DDP + `overwrite=True` 下早于 rank0 到达的非 0 rank 可能在删除前
   打开**旧** mmap 并 pin 引用——该 rank 本轮训练的行集合与 rank0 静默
-  分叉（挂死已闭合，分叉窗口未根治；根治需要版本化发布协议，见
-  `docs/design/data_layer.md` §4 P3 登记）。
+  分叉（挂死已闭合，分叉窗口未根治；根治需要版本化发布协议，属 P3
+  遗留项）。
   user-held 权重解析现在强制校验 sha256（按路径/大小/mtime 缓存摘要）。
 - **指标口径（METRIC 系列）**：OBB mAP 的 PR 构建（背景 FP 计入）与
   AP 包络积分均已修正，**历史 OBB 数字与 0.6.x 之前不可比**；headline
@@ -154,8 +154,7 @@ workers>1 下被拒绝，key 必须走环境变量）、进程内 token-bucket
   （`trainer_args={"parallel": "fsdp"}`，full-state checkpoint/resume/导出，
   2-rank 单卡测试）与梯度检查点已实现；FSDP 的 EMA 更新需按
   `AUTOVISION_FSDP_EMA_INTERVAL` 做 full-param gather，整模型未做 auto-wrap。
-  DeepSpeed / ZeRO / 弹性训练未接入；多机 NCCL 与故障注入未在公开 CI 验证，
-  边界见[并行训练](parallelism.md)。
+  DeepSpeed / ZeRO / 弹性训练未接入；多机 NCCL 与故障注入未在公开 CI 验证。
 - **注册表**：文件系统后端与 MLflow 后端都执行标准部署门禁
   （`gates=None` 默认 fail-closed）；rollback/audit 仍以文件系统后端为准。
 - **CI**：公开 CI 为 Ubuntu + Python 3.10/3.11 的 CPU 任务，测试作业安装

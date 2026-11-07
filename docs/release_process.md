@@ -1,7 +1,6 @@
 # 发布流程
 
-本文档定义 AutoVision 的版本政策与发布清单。对应的变更记录见[变更日志](changelog.md)，
-开发约定见[贡献指南](contributing.md)。
+本文档定义 AutoVision 的版本政策与发布清单。开发约定见[贡献指南](contributing.md)。
 
 ## 版本政策
 
@@ -77,9 +76,6 @@
    周期继续在 `[Unreleased]` 段记录变更。
 
 ## PyPI 发布（发行名 ≠ import 名）
-
-> 完整操作手册（账号、token、TestPyPI 演练、trusted publishing、故障排查）见
-> [PyPI 发布指南](pypi_publish.md)。
 
 - 发行名：`autovision-framework`；import 名：`autovision`；CLI：`autovision-cli`。
 - PyPI 上 `autovision` 已被无关项目占用，**不要**使用该发行名；也不要把

@@ -1868,7 +1868,7 @@ class TaskEngine(Engine):
             raise NotImplementedError(
                 f"parallel='{parallel}' is not implemented; supported: "
                 "ddp (default) and fsdp. DeepSpeed/ZeRO/elastic training "
-                "need an external launcher (see docs/parallelism.md)."
+                "need an external launcher."
             )
         out_dir = Path(out_dir)
         if early_stopping_patience is not None:

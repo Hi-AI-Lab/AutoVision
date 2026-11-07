@@ -395,7 +395,7 @@
 
 ### 文档
 
-- 新增「工程加固计划」（`docs/hardening_plan.md`）：2026-11 全仓库审计的
+- 新增「工程加固计划」（`docs/hardening_plan.md`）：2026-11 全仓库审计的 <!-- docpath-ok -->
   修复设计与实施计划，含逐项设计、测试计划、验收标准、兼容性与回滚策略；
   批次 0–3 的实施项均在文档中标注状态。
 - `docs/known_limits.md` 同步 serving 认证姿态、数据加载严格性、推理
@@ -431,7 +431,16 @@
 
 ## [Unreleased]
 
-（无。下一个开发周期从本段开始记录。）
+### 文档与发布
+
+- **公开文档树精简**：移除不随 GitHub 公开发布的内部设计/加固计划、
+  PyPI 与支持政策等页面，同步清理 `mkdocs.yml` 导航及全仓悬空引用。
+- **站点地址对齐**：`site_url`、项目元数据与 README 外链统一为 GitHub
+  Pages 实际域名 `https://hi-ai-lab.github.io/AutoVision/`。
+- **发布幂等**：`publish` job 上传前检查该版本是否已在 PyPI，已发布则
+  整体跳过并输出提示，同一 tag 重复触发时不再因
+  `400 File already exists` 失败；不使用逐文件的 `skip-existing`，避免
+  同一版本混装新旧分发包。
 
 ### 修复
 
@@ -1030,7 +1039,7 @@
     `Sha256Gate` / `ModelCardGate` / `LicenseGate` / `BenchmarkGate` /
     `ParityGate` / `DataSnapshotGate`；CLI
     `registry action=register|promote|rollback|current|list|audit`。
-  - **LTS / SLA 文档**：`docs/lts_policy.md`、`docs/support_policy.md`
+  - **LTS / SLA 文档**：`docs/lts_policy.md`、`docs/support_policy.md` <!-- docpath-ok -->
     （6 个月 LTS 节奏、12/6 个月支持窗、P1–P3 响应目标）。
   - **硬件伙伴包模板**：`deploy/packs/_template/` 的 `convert.py`（校验
     ONNX/spec、执行厂商命令）与 `parity.py`（目标端 JSONL 对拍）；一伙伴
@@ -1314,7 +1323,7 @@
 ### 第二轮企业级加固
 
 - **统一冒烟入口**：新增 `scripts/smoke_enterprise.py`（quick/full 两档）与
-  `docs/smoke_test.md`，覆盖训练→ONNX/OpenVINO/TensorRT→serving→registry→
+  `docs/smoke_test.md`，覆盖训练→ONNX/OpenVINO/TensorRT→serving→registry→ <!-- docpath-ok -->
   compliance→数据快照→K8s→DDP/FSDP，并作为 CI 门禁；full 在本机 RTX 4090D
   全绿（TensorRT 使用最终框级 parity，int8 保持张量级门禁）。
 
@@ -1322,7 +1331,7 @@
   ViT-GTR blocks）与 `parallel="fsdp"` 任务训练：full-state checkpoint/optimizer
   gather、所有 rank resume、rank0 导出、验证期 `summon_full_params`、EMA 按
   `AUTOVISION_FSDP_EMA_INTERVAL` 更新、rank0 写失败 barrier 与进程组超时。
-  `docs/parallelism.md` 记录 DDP/FSDP 及 DeepSpeed/ZeRO/弹性训练的明确边界。
+  `docs/parallelism.md` 记录 DDP/FSDP 及 DeepSpeed/ZeRO/弹性训练的明确边界。 <!-- docpath-ok -->
 - **EoMT**：补 `forward`（ONNX 导出可用）；加载 hub 权重强制 DINOv2/DINOv3
   许可 opt-in，未钉 sha256 时默认拒绝（`AUTOVISION_ALLOW_UNPINNED_WEIGHTS=1`
   显式放行）；`adapt_eomt_head` 已接入构建流程。

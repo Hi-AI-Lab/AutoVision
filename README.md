@@ -354,7 +354,7 @@ A/B / canary 分流（Python API `create_app(variants=...)`）。属参考实现
 
 基于 AutoVision 的行业场景方案（方案引擎经 `pip install autovision-framework`
 消费本框架稳定接缝；介绍与接入见
-[行业方案](https://hi-agi-lab.github.io/AutoVision/ecosystem/)）：
+[行业方案](https://hi-ai-lab.github.io/AutoVision/ecosystem/)）：
 
 | 仓库 | 场景 |
 | --- | --- |

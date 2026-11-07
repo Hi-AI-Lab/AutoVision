@@ -58,7 +58,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/Hi-AI-Lab/AutoVision"
-Documentation = "https://hi-agi-lab.github.io/AutoVision/"
+Documentation = "https://hi-ai-lab.github.io/AutoVision/"
 Repository = "https://github.com/Hi-AI-Lab/AutoVision"
 Issues = "https://github.com/Hi-AI-Lab/AutoVision/issues"
 Changelog = "https://github.com/Hi-AI-Lab/AutoVision/blob/main/CHANGELOG.md"
@@ -200,7 +200,7 @@ testpaths = ["tests"]
 pythonpath = ["."]
 markers = [
     # Long-running soak suite (tests/test_soak.py); only runs when
-    # AUTOVISION_RUN_SOAK=1 is set (H4-1, docs/hardening_plan.md §9).
+    # AUTOVISION_RUN_SOAK=1 is set (H4-1).
     "soak: long-running lifecycle/leak soak tests (deselect by default)",
 ]
 

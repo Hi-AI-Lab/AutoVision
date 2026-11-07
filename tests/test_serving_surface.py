@@ -3,8 +3,8 @@
 semantics, decode/warmup budgets, rate-limit topology, parent-side config
 validation.
 
-Covers the SERVE-01..09 / 11 / 12 / 13 designs from
-``docs/design/serving_surface.md``. Every behavioral test here fails on
+Covers the SERVE-01..09 / 11 / 12 / 13 hardening designs. Every
+behavioral test here fails on
 the pre-fix code by construction (typo applied-then-rejected, engine 500s
 reported as 400s, decode timeouts poisoning healthy engines, ...).
 """

@@ -12,8 +12,8 @@ Full profile (adds DDP, FSDP, OpenVINO, TensorRT; several minutes):
 
 The script is intentionally black-box: it trains a tiny detector, exports,
 serves, registers, builds a compliance pack, and snapshots data. It does NOT
-prove production scale, soak/load behavior, or multi-node NCCL — see
-docs/smoke_test.md for the boundary. Exit code 1 on any FAIL.
+prove production scale, soak/load behavior, or multi-node NCCL.
+Exit code 1 on any FAIL.
 """
 
 from __future__ import annotations
@@ -592,7 +592,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "\nSmoke scope note: this proves the functional paths on this host. "
         "It does not prove production load/soak, multi-node NCCL, or "
-        "DeepSpeed/ZeRO/elastic training; see docs/smoke_test.md."
+        "DeepSpeed/ZeRO/elastic training."
     )
     if not args.keep:
         shutil.rmtree(tmp, ignore_errors=True)

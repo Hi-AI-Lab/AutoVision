@@ -13,7 +13,7 @@ validation surface.
 > `autovision-framework`.
 
 **Links**: [Source repository](https://github.com/Hi-AI-Lab/AutoVision) ·
-[Documentation](https://hi-agi-lab.github.io/AutoVision/) ·
+[Documentation](https://hi-ai-lab.github.io/AutoVision/) ·
 [Changelog](https://github.com/Hi-AI-Lab/AutoVision/blob/main/CHANGELOG.md)
 
 ## Installation
@@ -102,5 +102,5 @@ are not downloaded by default; user-held weights may not be redistributed.
 
 Full documentation (model zoo, benchmarks, export details, known limits) is
 available on the
-[documentation site](https://hi-agi-lab.github.io/AutoVision/) and in the
+[documentation site](https://hi-ai-lab.github.io/AutoVision/) and in the
 `docs/` directory of the source repository.

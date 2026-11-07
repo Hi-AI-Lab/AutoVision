@@ -2,7 +2,7 @@
 """Second-round metrics/compliance hardening: OBB correctness, crowd wiring,
 single-point headline, streaming depth, report slimming, domain validation.
 
-Covers the METRIC-01..09 designs from ``docs/design/metrics_compliance.md``.
+Covers the METRIC-01..09 hardening designs.
 Every P1 here is an "external number" bug — each test pins the exact audit
 reproduction (pre-fix behavior is asserted against in comments).
 """

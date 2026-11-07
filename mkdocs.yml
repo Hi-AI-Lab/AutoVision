@@ -8,7 +8,7 @@
 #     Markdown，超出本站点范围）。
 site_name: AutoVision
 site_description: 企业级视觉模型训练框架：预训练/蒸馏 → 微调 → 评测 → 导出
-site_url: https://hi-agi-lab.github.io/AutoVision/
+site_url: https://hi-ai-lab.github.io/AutoVision/
 repo_url: https://github.com/Hi-AI-Lab/AutoVision
 
 theme:
@@ -43,7 +43,7 @@ markdown_extensions:
   - pymdownx.emoji:
       emoji_index: !!python/name:material.extensions.emoji.twemoji
       emoji_generator: !!python/name:material.extensions.emoji.to_svg
-  # 站点页包含仓库根 CONTRIBUTING.md / CHANGELOG.md（单一来源，避免漂移）。
+  # 站点页包含仓库根 CONTRIBUTING.md（单一来源，避免漂移）。
   - pymdownx.snippets:
       base_path: ["."]
 
@@ -75,33 +75,18 @@ plugins:
             权重下载: Weight downloads
             基准: Benchmarks
             导出与部署: Export & deployment
-            并行训练: Parallel training
             插件协议: Plugin protocol
             私有注册表: Private registry
             合规报告: Compliance report
             溯源台账: Provenance ledger
             硬件伙伴包: Hardware partner packs
             用户自持权重: User-held weights
-            导入 EoMT 权重: Import EoMT weights
-            冒烟测试: Smoke test
             已知限制: Known limits
             架构总览: Architecture
             贡献指南: Contributing
             发布流程: Release process
-            PyPI 发布: PyPI publishing
             模型发布: Model publishing
             LTS 政策: LTS policy
-            支持政策: Support policy
-            安全政策: Security policy
-            变更日志: Changelog
-            模块设计实施: Module design & implementation
-            总览与整改路线: Overview & roadmap
-            数据层: Data layer
-            训练引擎与任务面: Training engine & tasks
-            推理运行时与跟踪: Inference runtime & tracking
-            导出与模型注册表: Export & model registry
-            服务面: Serving surface
-            指标与合规: Metrics & compliance
 
 nav:
   - 首页: index.md
@@ -110,7 +95,6 @@ nav:
   - 权重下载: download_weights.md
   - 基准: benchmarks.md
   - 导出与部署: export.md
-  - 并行训练: parallelism.md
   - 插件协议: plugins.md
   - 行业方案: ecosystem.md
   - 私有注册表: registry.md
@@ -118,24 +102,9 @@ nav:
   - 溯源台账: provenance/LEDGER.md
   - 硬件伙伴包: hardware_packs.md
   - 用户自持权重: user_held_weights.md
-  - 导入 EoMT 权重: import_eomt.md
-  - 冒烟测试: smoke_test.md
   - 已知限制: known_limits.md
-  - 工程加固计划: hardening_plan.md
-  - 模块设计实施:
-      - 总览与整改路线: design/overview.md
-      - 数据层: design/data_layer.md
-      - 训练引擎与任务面: design/training_engine.md
-      - 推理运行时与跟踪: design/inference_runtime.md
-      - 导出与模型注册表: design/export_registry.md
-      - 服务面: design/serving_surface.md
-      - 指标与合规: design/metrics_compliance.md
   - 架构总览: framework_design.md
   - 贡献指南: contributing.md
   - 发布流程: release_process.md
-  - PyPI 发布: pypi_publish.md
   - 模型发布: model_publish.md
   - LTS 政策: lts_policy.md
-  - 支持政策: support_policy.md
-  - 安全政策: security.md
-  - 变更日志: changelog.md

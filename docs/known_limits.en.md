@@ -81,8 +81,7 @@ responsibility of a production gateway.
   FSDP EMA updates gather full parameters according to
   `AUTOVISION_FSDP_EMA_INTERVAL`; the entire model is not auto-wrapped.
   DeepSpeed / ZeRO / elastic training are not integrated; multi-node NCCL and
-  fault injection are not covered by public CI. See
-  [parallel training](parallelism.md).
+  fault injection are not covered by public CI.
 - **Registry**: file-system and MLflow backends both run the standard deployment
   gates (`gates=None` is fail-closed by default); rollback/audit remain
   file-system-only.

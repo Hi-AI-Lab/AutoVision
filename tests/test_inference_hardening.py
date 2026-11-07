@@ -2,8 +2,8 @@
 """Second-round inference hardening: writer isolation, per-frame isolation,
 metadata gate, output contract, trail bounds.
 
-Covers the INFER-01..06 / 08 / 09 / 11 / 13 / 16 designs from
-``docs/design/inference_runtime.md``. The load-bearing invariant for the
+Covers the INFER-01..06 / 08 / 09 / 11 / 13 / 16 hardening designs.
+The load-bearing invariant for the
 stream changes: a single bad frame (or a single failing source's video
 writer) must never end a 24/7 run — every test here fails on the
 pre-fix behavior by construction.
