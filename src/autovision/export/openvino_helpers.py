@@ -105,8 +105,12 @@ def export_onnx_to_openvino(
     """Convert ``model``'s ONNX export to an OpenVINO IR at ``out``.
 
     ``out`` is the ``.xml`` path or a directory (then ``<dir>/model.xml``;
-    the ``.bin`` weights land beside it). The intermediate ONNX is removed
-    unless ``keep_onnx``. Metadata rides in a ``<stem>.json`` sidecar (IR
+    the ``.bin`` weights land beside it). The intermediate ONNX is staged
+    under a ``.tmp-<pid>`` name and removed after the call; only an explicit
+    ``keep_onnx=True`` publishes it as ``<stem>.onnx`` (replacing any file
+    at that path, and without a decode sidecar). With ``keep_onnx=False``
+    staging keeps a pre-existing ``<stem>.onnx`` (a user's own artifact)
+    untouched. Metadata rides in a ``<stem>.json`` sidecar (IR
     cannot carry ONNX metadata); with ``verify`` the torch reference and
     the COMPILED OpenVINO model are compared on the example input via
     ``model.verify_onnx_export_outputs``. The IR pair is staged under temp
@@ -120,7 +124,7 @@ def export_onnx_to_openvino(
 
     xml_path = _resolve_ir_path(out)
     bin_path = xml_path.with_suffix(".bin")
-    onnx_path = xml_path.with_suffix(".onnx")
+    published_onnx = xml_path.with_suffix(".onnx")
 
     # H1-7: the IR pair is staged under ".tmp-<pid>" names and published
     # with os.replace only after the parity gate passes. The marker sits
@@ -131,23 +135,41 @@ def export_onnx_to_openvino(
     stem_glob = glob.escape(xml_path.stem)
     sweep_stale_temp_files(xml_path.parent, f"{stem_glob}.tmp-*.xml")
     sweep_stale_temp_files(xml_path.parent, f"{stem_glob}.tmp-*.bin")
+    sweep_stale_temp_files(xml_path.parent, f"{stem_glob}.tmp-*.onnx*")
+    sweep_stale_temp_files(xml_path.parent, f"{stem_glob}.json.tmp-*")
     pid = os.getpid()
     tmp_xml = xml_path.with_name(f"{xml_path.stem}.tmp-{pid}.xml")
     tmp_bin = tmp_xml.with_suffix(".bin")
+    # EXPORT-09: the intermediate graph shares the IR's temp marker. Using
+    # ``published_onnx`` here silently overwrote — and then deleted — a
+    # user's ONNX artifact sitting next to the requested IR.
+    staged_onnx = xml_path.with_name(f"{xml_path.stem}.tmp-{pid}.onnx")
 
     def _drop_ir_tmp() -> None:
         tmp_xml.unlink(missing_ok=True)
         tmp_bin.unlink(missing_ok=True)
 
     def _drop_intermediate() -> None:
-        for candidate in (onnx_path, onnx_path.with_suffix(".onnx.data")):
+        """Remove only the files this call staged, never ``published_onnx``."""
+        for candidate in (
+            staged_onnx,
+            staged_onnx.with_suffix(".onnx.data"),
+            pathlib.Path(str(staged_onnx) + ".postprocess.json"),
+        ):
             candidate.unlink(missing_ok=True)
+
+    def _publish_intermediate() -> None:
+        """Keep the staged graph under the stable ``<stem>.onnx`` name."""
+        os.replace(staged_onnx, published_onnx)
+        data = staged_onnx.with_suffix(".onnx.data")
+        if data.exists():
+            os.replace(data, published_onnx.with_suffix(".onnx.data"))
 
     export_kwargs: dict[str, Any] = dict(onnx_args or {})
     export_kwargs.setdefault("precision", precision)
     try:
-        export_onnx_fn(onnx_path, **export_kwargs)
-        ov_model = openvino.convert_model(str(onnx_path))
+        export_onnx_fn(staged_onnx, **export_kwargs)
+        ov_model = openvino.convert_model(str(staged_onnx))
         openvino.save_model(ov_model, str(tmp_xml))
         if verify:
             _verify_openvino_parity(openvino, model, tmp_xml, device, precision)
@@ -157,13 +179,8 @@ def export_onnx_to_openvino(
         # "previous good artifact survives a failed gate" semantics the ONNX
         # exporter provides.
         _drop_ir_tmp()
+        _drop_intermediate()
         raise
-    finally:
-        # The intermediate ONNX (and dynamo's external-data sidecar) never
-        # outlives the call unless the caller asked for it — including the
-        # gate-failure path.
-        if not keep_onnx:
-            _drop_intermediate()
 
     # EXPORT-09 publish order: identity json → weights bin → entry-point
     # xml LAST. The xml is the file every consumer opens first, so after
@@ -195,9 +212,20 @@ def export_onnx_to_openvino(
             json_path.write_bytes(json_backup)
         else:
             json_path.unlink(missing_ok=True)
+        _drop_ir_tmp()
+        _drop_intermediate()
         raise
     finally:
         tmp_json.unlink(missing_ok=True)
+
+    # Publish the optional ONNX graph only after the IR triple is in place:
+    # a failed IR publish must never replace a user's existing ONNX graph.
+    # The kept graph carries no decode sidecar — the IR owns that contract.
+    try:
+        if keep_onnx:
+            _publish_intermediate()
+    finally:
+        _drop_intermediate()
     logger.info("Published OpenVINO IR to '%s'.", xml_path)
     return xml_path
 

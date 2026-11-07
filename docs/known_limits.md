@@ -234,6 +234,14 @@ base→x，选型标准为可导出 + 许可干净），实现待落地。`detr/
   在 TensorRT ≥ 11 上构建前会主动告警；引擎对拍门禁会拒绝并删除这类引擎
   （fail-closed）；该 TRT 版本上勿对 GTR 关闭 verify，部署走受支持的
   TensorRT 版本或上游 plugin 路线（见 docs/export.md）。
+- **GTR 检测模型的 OpenVINO 导出门禁**：`examples/tasks/detection_train.py`
+  的随机初始化 GTR 检测 smoke 模型在部分权重上会被 `export_openvino` 的
+  数值对拍拒绝（一次实测 4/8 元素不符，最大绝对偏差约 0.149，阈值
+  `atol=0.005`；另一次 1-step 权重则正常通过），并非必现。被拒时 `.xml`
+  不会发布（fail-closed，已有 IR 不受影响）。已发布的 IR 仍
+  可通过 `--openvino` 正常推理——`decode_detection_outputs` 已支持编译
+  运行器返回的扁平 `list`。该数值差异尚未定位，请勿为绕过而关闭 `verify`；
+  CPU 部署可改用 ONNX 后端。
 - GTR 的 eager 前向依赖 fla 的 Triton 核（CUDA-only）：CPU 上构造
   `backend='torch'` 的推理引擎会被可读报错拒绝（用 `backend='onnx'` 或
   `device='cuda'`）；CPU eager 部署走 ONNX 后端。TensorRT / OpenVINO 导出

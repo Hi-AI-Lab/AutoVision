@@ -79,6 +79,10 @@ python examples/tasks/detection_backends.py
 python examples/tasks/export_demo.py \
     --weights runs/examples/classification_train/exported_models/exported_last.pt --int8
 
+# A GTR detection checkpoint may be refused by the TRT/OpenVINO parity gates:
+# the script then exits 1; add --allow-skips to accept those known-unhealthy
+# targets explicitly.
+
 # Reference serving: wrap a checkpoint in the FastAPI app, hit /predict + /healthz
 python examples/tasks/serving_demo.py
 
@@ -101,11 +105,16 @@ python examples/tasks/compliance_demo.py
 python examples/tasks/pretrain_demo.py
 ```
 
-> Known framework limits surfaced by these examples: detection (`gtr`) TensorRT
-> export fails the parity gate, and detection OpenVINO serving crashes in the
-> postprocess (`decode.py` expects a structured output, gets a `list`). Those
-> are `src/autovision` defects, not example bugs — the ONNX and OpenVINO
-> artifacts still build/serve where the path is healthy.
+> Known framework limits surfaced by these examples: on TensorRT 11.4 the GTR
+> pure-ONNX graph is miscompiled, so a detection (`gtr`) TensorRT export is
+> rejected by the parity gate; a GTR detection OpenVINO IR export can also
+> fail its numerical parity gate on a random-init smoke checkpoint. Those are
+> `src/autovision` boundaries, not example bugs (see `docs/export.md` and
+> `docs/known_limits.md`). `export_demo.py` prints them as `SKIPPED` and exits
+> non-zero unless `--allow-skips` is passed. ONNX artifacts and
+> compiled-backend *inference* are unaffected: `decode_detection_outputs`
+> accepts the flat `list` a compiled runner returns, so `--onnx` /
+> `--openvino` / `--engine` serving works with a matching artifact.
 
 > **`--onnx` needs `--weights` for trained artifacts**: without `--weights`,
 > the inference script builds its task's DEFAULT checkpoint network (e.g.
@@ -151,12 +160,15 @@ Apache-2.0 core.
 | `--image PATH` | input image (default: bundled `assets/airport_aerial.jpg`) |
 | `--weights PATH` | exported `.pt` from `<task>_train.py` |
 | `--onnx PATH` | exported `.onnx` artifact: run the forward through it (any device; network supplies pre/post only) |
-| `--engine PATH` | compiled TensorRT `.engine` artifact: run the forward via backend=`tensorrt` (needs CUDA) |
-| `--openvino PATH` | OpenVINO `.xml` IR artifact: run the forward via backend=`openvino` |
+| `--engine PATH` | **detection.py only**: TensorRT `.engine` artifact via backend=`tensorrt` (needs CUDA) |
+| `--openvino PATH` | **detection.py only**: OpenVINO `.xml` IR artifact via backend=`openvino` |
 | `--class-names PATH` | optional JSON `{class_id: name}` for exported checkpoints |
 | `--threshold F` | score threshold (default: 0.3) |
 | `--device auto\|cpu\|cuda` | inference device |
 | `--out DIR` | output directory (default: `runs/examples/<task>`) |
+
+`--engine` / `--openvino` are wired only in `detection.py` (and its
+`inference_demo.py` alias); the other task scripts expose `--onnx` alone.
 
 The ONNX artifact must match the constructed network (image size, class
 count — the loader verifies the artifact's embedded metadata and exits with

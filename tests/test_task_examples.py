@@ -455,3 +455,215 @@ def test_example_dry_run_writes_data_contract(task: str, tmp_path: Path) -> None
     if task != "detection_train":  # coco8 comes from the shared cache, not --out
         demo_root = tmp_path / "_demo_data"
         assert demo_root.is_dir() and any(demo_root.iterdir())
+
+
+def _load_example_module(name: str, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Import an examples/tasks script in-process for stubbed unit tests."""
+    monkeypatch.syspath_prepend(str(EXAMPLES))
+    spec = importlib.util.spec_from_file_location(
+        f"_example_{name}", EXAMPLES / f"{name}.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class TestDryRunNotes:
+    """dry_run names ignored flags with matching singular/plural wording."""
+
+    def test_single_flag_uses_singular(self, capsys) -> None:
+        common = _load_examples_common()
+        args = argparse.Namespace(
+            predict_image=None, export=None, export_onnx=Path("x.onnx")
+        )
+        common.dry_run("demo", {}, args)
+        out = capsys.readouterr().out
+        assert "--export-onnx ignored" in out
+        assert "it needs a trained model" in out
+        assert "they need" not in out
+
+    def test_multiple_flags_use_plural(self, capsys) -> None:
+        common = _load_examples_common()
+        args = argparse.Namespace(
+            predict_image=Path("x.png"),
+            export=Path("x.pt"),
+            export_onnx=Path("x.onnx"),
+        )
+        common.dry_run("demo", {}, args)
+        out = capsys.readouterr().out
+        assert "--predict-image, --export and --export-onnx" in out
+        assert "they need a trained model" in out
+
+
+def _stub_export_demo(
+    module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    fail: tuple[str, ...] = (),
+    missing: tuple[str, ...] = (),
+) -> None:
+    """Replace the exporters with file-writing stubs (no model, no CUDA)."""
+    def fake_onnx(pt: Path, out: Path) -> Path:
+        out = Path(out)
+        if "onnx" in fail:
+            raise SystemExit("parity refused")
+        if "onnx" not in missing:
+            out.write_bytes(b"onnx")
+        return out
+
+    def fake_export_model(pt: Path, out: Path, *, device: str = "cpu", **kwargs: Any) -> Path:
+        out = Path(out)
+        label = "tensorrt" if out.suffix == ".engine" else "openvino"
+        if label in fail:
+            raise RuntimeError(f"{label} parity refused")
+        if label not in missing:
+            out.write_bytes(b"model")
+        return out
+
+    monkeypatch.setattr(module, "export_task_to_onnx", fake_onnx)
+    monkeypatch.setattr(module, "export_model", fake_export_model)
+    monkeypatch.setattr(module.torch.cuda, "is_available", lambda: True)
+
+
+class TestExportDemo:
+    """export_demo must fail closed on skipped or missing artifacts."""
+
+    @staticmethod
+    def _args(tmp_path: Path, *extra: str) -> list[str]:
+        weights = tmp_path / "weights.pt"
+        weights.write_bytes(b"weights")
+        return ["--weights", str(weights), "--out", str(tmp_path / "out"), *extra]
+
+    def test_all_targets_succeed(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        """Three healthy targets report 3 exported and exit 0."""
+        module = _load_example_module("export_demo", monkeypatch)
+        _stub_export_demo(module, monkeypatch)
+        assert module.main(self._args(tmp_path)) == 0
+        out = capsys.readouterr().out
+        assert "3 exported, 0 skipped" in out
+        assert (tmp_path / "out" / "model.onnx").is_file()
+
+    @pytest.mark.parametrize(
+        "fail",
+        [pytest.param(("openvino",), id="openvino-gate"),
+         pytest.param(("tensorrt",), id="tensorrt-gate")],
+    )
+    def test_refused_target_exits_nonzero(
+        self, tmp_path: Path, monkeypatch, capsys, fail: tuple[str, ...]
+    ) -> None:
+        """A parity-gate refusal is a failed run, not a silent SKIPPED line."""
+        module = _load_example_module("export_demo", monkeypatch)
+        _stub_export_demo(module, monkeypatch, fail=fail)
+        assert module.main(self._args(tmp_path)) == 1
+        err = capsys.readouterr().err
+        assert fail[0] in err
+        assert "--allow-skips" in err
+
+    def test_allow_skips_accepts_known_unhealthy(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """--allow-skips is an explicit, visible opt-in."""
+        module = _load_example_module("export_demo", monkeypatch)
+        _stub_export_demo(module, monkeypatch, fail=("openvino",))
+        assert module.main(self._args(tmp_path, "--allow-skips")) == 0
+
+    def test_reported_success_without_artifact_is_a_skip(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """An exporter claiming success without writing a file is detected."""
+        module = _load_example_module("export_demo", monkeypatch)
+        _stub_export_demo(module, monkeypatch, missing=("onnx",))
+        assert module.main(self._args(tmp_path)) == 1
+        assert "artifact missing" in capsys.readouterr().out
+
+
+def test_export_demo_help_offers_allow_skips() -> None:
+    """--allow-skips is the documented escape hatch for known-bad backends."""
+    result = _run("export_demo", "--help")
+    assert result.returncode == 0, result.stderr
+    assert "--allow-skips" in result.stdout
+
+
+class _OOMOnceModel:
+    """Fake handle: the first CUDA predict OOMs; the CPU retry succeeds."""
+
+    def __init__(self) -> None:
+        self.devices: list[str] = []
+        self.calls = 0
+
+    def to(self, device: str):
+        self.devices.append(device)
+        return self
+
+    def predict(self, image, threshold):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("CUDA out of memory")
+        return {"labels": []}
+
+
+class _BrokenModel(_OOMOnceModel):
+    """Fails with an unrelated kernel error on every device."""
+
+    def predict(self, image, threshold):
+        raise RuntimeError("bad kernel")
+
+
+class _ToOOMModel:
+    """Fails while moving to CUDA, but predicts fine once on CPU."""
+
+    def __init__(self) -> None:
+        self.devices: list[str] = []
+
+    def to(self, device: str):
+        self.devices.append(device)
+        if device == "cuda":
+            raise RuntimeError("CUDA out of memory")
+        return self
+
+    def predict(self, image, threshold):
+        return {"labels": []}
+
+
+class TestDetectionBackendsFallback:
+    """The CUDA OOM retry never hides an ordinary inference failure."""
+
+    def test_cuda_oom_retries_on_cpu(self, monkeypatch, capsys) -> None:
+        """A CUDA OOM moves the model to CPU and retries once."""
+        module = _load_example_module("detection_backends", monkeypatch)
+        model = _OOMOnceModel()
+        result, device = module._predict_with_fallback(
+            model, Path("x.jpg"), 0.3, "cuda"
+        )
+        assert result == {"labels": []}
+        assert device == "cpu"
+        assert model.devices == ["cuda", "cpu"]
+        assert "retried on CPU" in capsys.readouterr().out
+
+    def test_cuda_to_oom_retries_on_cpu(self, monkeypatch) -> None:
+        """An OOM while moving the model to CUDA also triggers the retry."""
+        module = _load_example_module("detection_backends", monkeypatch)
+        model = _ToOOMModel()
+        result, device = module._predict_with_fallback(
+            model, Path("x.jpg"), 0.3, "cuda"
+        )
+        assert result == {"labels": []}
+        assert device == "cpu"
+        assert model.devices == ["cuda", "cpu"]
+
+    def test_non_oom_cuda_error_propagates(self, monkeypatch) -> None:
+        """Only out-of-memory errors trigger the CPU retry."""
+        module = _load_example_module("detection_backends", monkeypatch)
+        with pytest.raises(RuntimeError, match="bad kernel"):
+            module._predict_with_fallback(
+                _BrokenModel(), Path("x.jpg"), 0.3, "cuda"
+            )
+
+    def test_cpu_error_propagates(self, monkeypatch) -> None:
+        """A CPU failure has no fallback device and must surface."""
+        module = _load_example_module("detection_backends", monkeypatch)
+        with pytest.raises(RuntimeError, match="out of memory"):
+            module._predict_with_fallback(
+                _OOMOnceModel(), Path("x.jpg"), 0.3, "cpu"
+            )

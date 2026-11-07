@@ -66,6 +66,48 @@ class TestOpenVINOExport:
         assert metadata["device"] == "CPU"
         assert not xml.with_suffix(".onnx").exists()  # intermediate cleaned up
 
+    def test_ir_export_preserves_preexisting_onnx(self, tiny_export, tmp_path):
+        """A user's ONNX artifact beside the IR target survives the export."""
+        net = load_task_model(tiny_export, device="cpu")
+        out_dir = tmp_path / "ov_existing"
+        out_dir.mkdir()
+        existing = out_dir / "model.onnx"
+        existing.write_bytes(b"user-owned onnx artifact")
+        xml = net.export_openvino(out_dir / "model.xml", verify=True)
+        assert xml.exists()
+        assert existing.read_bytes() == b"user-owned onnx artifact"
+        assert not list(out_dir.glob("*.tmp-*"))
+
+    def test_failed_gate_preserves_preexisting_onnx(
+        self, tiny_export, tmp_path, monkeypatch
+    ):
+        """A rejected IR must not take the user's ONNX artifact with it."""
+        from autovision.export import openvino_helpers
+
+        def reject(*args, **kwargs):
+            raise AssertionError("parity gate refused")
+
+        monkeypatch.setattr(openvino_helpers, "_verify_openvino_parity", reject)
+        net = load_task_model(tiny_export, device="cpu")
+        out_dir = tmp_path / "ov_rejected"
+        out_dir.mkdir()
+        existing = out_dir / "model.onnx"
+        existing.write_bytes(b"user-owned onnx artifact")
+        with pytest.raises(AssertionError, match="parity gate refused"):
+            net.export_openvino(out_dir / "model.xml", verify=True)
+        assert existing.read_bytes() == b"user-owned onnx artifact"
+        assert not list(out_dir.glob("*.tmp-*"))
+        assert not (out_dir / "model.xml").exists()
+
+    def test_keep_onnx_publishes_the_intermediate(self, tiny_export, tmp_path):
+        """keep_onnx=True still publishes the graph under <stem>.onnx."""
+        net = load_task_model(tiny_export, device="cpu")
+        xml = net.export_openvino(
+            tmp_path / "ov_keep" / "model.xml", verify=True, keep_onnx=True
+        )
+        assert xml.with_suffix(".onnx").is_file()
+        assert not list(xml.parent.glob("*.tmp-*"))
+
     def test_runtime_matches_torch(self, tiny_export, tmp_path):
         from autovision.export.openvino_helpers import OpenVINOEngineRunner
 

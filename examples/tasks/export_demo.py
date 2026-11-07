@@ -9,20 +9,23 @@ the parity-gated export layer, so those code paths are covered too.
 
     python examples/tasks/export_demo.py \
         --weights runs/examples/classification_train/exported_models/exported_last.pt
-    python examples/tasks/export_demo.py --weights <det.pt> --int8 --calib-dir assets
+    python examples/tasks/export_demo.py --weights <det.pt> --int8 --allow-skips
 
-Note (verified coverage boundaries): classification ``.pt`` exports cleanly to
-all four formats. For detection (``gtr`` family) the TensorRT build fails the
-parity gate (``assert_outputs_close_sum`` — GLA unrolled-graph numerical
-drift); that is a framework limitation surfaced by this example, not an example
-bug. The OpenVINO / ONNX / INT8 paths run end to end — the detection
-postprocess now accepts the flat ``list`` the compiled runners (OpenVINO /
-TensorRT) return, in the exported output-port order ``[logits, boxes]``.
+Coverage boundaries: a classification ``.pt`` exports cleanly to all four
+formats. GTR detection checkpoints can be refused by the parity gates —
+TensorRT 11.4 miscompiles the unrolled GLA graph and the OpenVINO IR can
+drift numerically (see ``docs/export.md``). Such refusals are reported as
+``SKIPPED`` and make the script exit non-zero, unless ``--allow-skips``
+accepts a known-unhealthy backend. Compiled-backend *inference*
+(``--onnx`` / ``--openvino`` / ``--engine``) is unaffected: the detection
+postprocess accepts the flat ``list`` a compiled runner returns.
 """
 
 from __future__ import annotations
 
 import argparse
+import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 import torch
@@ -30,8 +33,11 @@ from _common import export_task_to_onnx
 
 from autovision.cli.export import export_model
 
+_LABEL_WIDTH = 12
 
-def main() -> None:
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Export every target, reporting skipped gates through the exit code."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--weights",
@@ -52,6 +58,14 @@ def main() -> None:
         "--int8", action="store_true", help="also build an INT8 ONNX via static PTQ"
     )
     parser.add_argument(
+        "--allow-skips",
+        action="store_true",
+        help=(
+            "exit 0 even when a parity gate refuses a target; use only for "
+            "known-unhealthy backend/weight combinations"
+        ),
+    )
+    parser.add_argument(
         "--calib-dir",
         type=Path,
         default=None,
@@ -63,24 +77,46 @@ def main() -> None:
         default="fp16",
         help="TensorRT build precision",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if not args.weights.is_file():
-        raise SystemExit(f"Weights not found: '{args.weights}'")
+        print(f"Weights not found: '{args.weights}'", file=sys.stderr)
+        return 1
 
     device = "cuda" if torch.cuda.is_available() and args.device != "cpu" else "cpu"
     args.out.mkdir(parents=True, exist_ok=True)
+    produced: list[str] = []
+    skipped: list[str] = []
+
+    def ok(label: str, artifact: Path) -> None:
+        """Report a target only when the artifact is really on disk."""
+        if not artifact.is_file():
+            skipped.append(
+                f"{label}: export reported success but '{artifact}' is missing"
+            )
+            print(
+                f"{label:<{_LABEL_WIDTH}}= SKIPPED: artifact missing at {artifact}"
+            )
+            return
+        produced.append(label)
+        print(f"{label:<{_LABEL_WIDTH}}= {artifact}")
+
+    def fail(label: str, error: BaseException) -> None:
+        """Record a backend/parity refusal instead of hiding it."""
+        reason = str(error) or type(error).__name__
+        skipped.append(f"{label}: {type(error).__name__}: {reason}")
+        print(f"{label:<{_LABEL_WIDTH}}= SKIPPED: {type(error).__name__}: {reason}")
 
     # 1) ONNX (parity-gated). Reproduced here for a complete artifact set; the
     #    per-task examples already cover the same call.
-    onnx_path = args.out / "model.onnx"
     try:
-        export_task_to_onnx(args.weights, onnx_path)
-        print(f"onnx        = {onnx_path}")
-    except SystemExit as error:
-        print(f"onnx        = SKIPPED: {error}")
+        onnx_path = Path(export_task_to_onnx(args.weights, args.out / "model.onnx"))
+        ok("onnx", onnx_path)
+    except (SystemExit, Exception) as error:
+        fail("onnx", error)
 
-    # 2) TensorRT (.engine) — needs CUDA + the tensorrt package.
+    # 2) TensorRT (.engine) — needs CUDA + the tensorrt package. An explicit
+    #    --device cpu is a user choice, not a failed export.
     if device == "cuda":
         try:
             engine = export_model(
@@ -89,18 +125,18 @@ def main() -> None:
                 device="cuda",
                 precision=args.trt_precision,
             )
-            print(f"tensorrt    = {engine}")
+            ok("tensorrt", Path(engine))
         except Exception as error:  # noqa: BLE001 - export may refuse (parity gate)
-            print(f"tensorrt    = SKIPPED: {type(error).__name__}: {error}")
+            fail("tensorrt", error)
     else:
-        print("tensorrt    = SKIPPED (needs CUDA)")
+        print(f"{'tensorrt':<{_LABEL_WIDTH}}= SKIPPED (needs CUDA; --device cpu)")
 
     # 3) OpenVINO (.xml) — needs the openvino package (CPU IR).
     try:
         openvino = export_model(args.weights, args.out / "model.xml", device="cpu")
-        print(f"openvino    = {openvino}")
+        ok("openvino", Path(openvino))
     except Exception as error:  # noqa: BLE001 - export may refuse (parity gate)
-        print(f"openvino    = SKIPPED: {type(error).__name__}: {error}")
+        fail("openvino", error)
 
     # 4) INT8 ONNX (static PTQ) — needs an image folder for calibration.
     if args.int8:
@@ -114,10 +150,23 @@ def main() -> None:
             int8 = network.export_onnx_int8(
                 args.out / "model_int8.onnx", calibration_reader=reader
             )
-            print(f"int8_onnx   = {int8}")
+            ok("int8_onnx", Path(int8))
         except Exception as error:  # noqa: BLE001 - calibration can fail broadly
-            print(f"int8_onnx   = SKIPPED: {error}")
+            fail("int8_onnx", error)
+
+    print(f"{'summary':<{_LABEL_WIDTH}}= {len(produced)} exported, {len(skipped)} skipped")
+    if skipped and not args.allow_skips:
+        for item in skipped:
+            print(f"  - {item}", file=sys.stderr)
+        print(
+            "Export skipped one or more targets; inspect the reasons above. "
+            "Pass --allow-skips only when the backend is a known-unhealthy "
+            "combination (e.g. GTR detection on TensorRT 11.x).",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -634,10 +634,15 @@ def dry_run(name: str, data: Any, args: argparse.Namespace | None = None) -> Non
             if getattr(args, attr, None) is not None
         ]
         if ignored:
-            joined = ", ".join(ignored[:-1]) + f" and {ignored[-1]}" if len(ignored) > 1 else ignored[0]
+            if len(ignored) == 1:
+                joined = ignored[0]
+                need = "it needs"
+            else:
+                joined = ", ".join(ignored[:-1]) + f" and {ignored[-1]}"
+                need = "they need"
             print(
                 f"note: {joined} ignored under --dry-run "
-                "(they need a trained model; re-run without --dry-run)."
+                f"({need} a trained model; re-run without --dry-run)."
             )
     print(f"[{name}] demo data config:")
     print(json.dumps(data, default=str, indent=2))

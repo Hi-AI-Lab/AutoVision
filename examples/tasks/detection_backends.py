@@ -22,6 +22,7 @@ import shutil
 import tempfile
 from collections import Counter
 from pathlib import Path
+from typing import Any
 
 from _common import gtr_requirement, resolve_device
 
@@ -46,11 +47,33 @@ def _tolist(value):
     return value.detach().cpu().tolist() if hasattr(value, "detach") else list(value)
 
 
+def _predict_with_fallback(
+    model: Any, image: Path, threshold: float, device: str
+) -> tuple[Any, str]:
+    """Predict on ``device``, retrying on CPU after a CUDA OOM.
+
+    A shared GPU can be short on memory for the random-init smoke models.
+    Only an out-of-memory failure triggers the retry; every other error
+    propagates unchanged instead of being hidden by the coverage example.
+    """
+    try:
+        if device == "cuda" and hasattr(model, "to"):
+            model.to(device)
+        return model.predict(image, threshold=threshold), device
+    except RuntimeError as error:
+        if device != "cuda" or "out of memory" not in str(error).lower():
+            raise
+        if hasattr(model, "to"):
+            model.to("cpu")
+        print("note        = CUDA inference ran out of memory; retried on CPU")
+        return model.predict(image, threshold=threshold), "cpu"
+
+
 def _run_inference(model, key, tag, names, args, out_path, device=None) -> None:
     device = device or resolve_device(args.device)
-    if device == "cuda" and hasattr(model, "to"):
-        model.to(device)
-    prediction = model.predict(args.image, threshold=args.threshold)
+    prediction, device = _predict_with_fallback(
+        model, args.image, args.threshold, device
+    )
     rendered = draw_prediction(
         args.image, prediction, class_names=names, min_score=args.threshold
     )
@@ -124,6 +147,7 @@ def main() -> None:
         # Train-only family: a 2-step smoke run on coco8, then inference on
         # the exported checkpoint. Exercise the backend's training + export.
         print(f"family      = {tag} ({key}) [train {args.train_steps} steps]")
+        work: Path | None = None
         try:
             data = autovision.ensure_coco8()
             work = Path(tempfile.mkdtemp(prefix=f"av_{tag}_"))
@@ -144,15 +168,25 @@ def main() -> None:
                 print("              (backend training path exercised; skip inference)")
                 print()
                 continue
-            model = autovision.load_model(pt, device="cpu")
+            # Honour --device for the train-only families too. A shared GPU
+            # may still be short on memory, so an OOM load falls back to CPU.
+            requested = resolve_device(args.device)
+            try:
+                model = autovision.load_model(pt, device=requested)
+            except RuntimeError as error:
+                if requested != "cuda" or "out of memory" not in str(error).lower():
+                    raise
+                print("note        = CUDA model load ran out of memory; using CPU")
+                requested = "cpu"
+                model = autovision.load_model(pt, device="cpu")
             # Trained checkpoints carry no class names; label by index.
-            # CPU keeps the random-init smoke model light (no CUDA OOM).
-            _run_inference(model, key, tag, None, args, out_path, device="cpu")
+            _run_inference(model, key, tag, None, args, out_path, device=requested)
         except Exception as error:  # noqa: BLE001 - smoke run may fail broadly
             print(f"SKIPPED     = {type(error).__name__}: {error}")
             print()
         finally:
-            shutil.rmtree(work, ignore_errors=True)
+            if work is not None:
+                shutil.rmtree(work, ignore_errors=True)
 
 
 if __name__ == "__main__":

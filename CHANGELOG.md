@@ -14,6 +14,24 @@
 
 ### 修复
 
+- **OpenVINO 导出不再删除同目录已有的 ONNX 工件**：`export_openvino` 此前把
+  `model.xml` 同名的 `model.onnx` 当作中间图并在 `finally` 删除，若用户已在
+  该路径放有正式导出的 ONNX（例如 `examples/tasks/export_demo.py` 第一步的
+  产物），会被静默覆盖后删除。中间图现在统一使用 `model.tmp-<pid>.onnx`
+  暂存名，只有显式 `keep_onnx=True` 才发布为 `<stem>.onnx`；清理同时覆盖
+  外部数据与后处理 sidecar，且绝不触碰用户的已发布文件。该修复同样覆盖
+  `benchmark` 中 onnx + openvino 双后端共用同一 `out_dir` 的场景，以及
+  `scripts/smoke_enterprise.py` 的连续导出检查。
+- **`export_demo.py` 对跳过项 fail-closed**：此前 parity 门禁拒绝 TensorRT /
+  OpenVINO 时只打印 `SKIPPED` 并以 0 退出，CI 无法察觉目标产物缺失。现在
+  校验每个声称成功的产物确实落盘，汇总 `N exported, M skipped`，有跳过项时
+  默认返回 1 并在 stderr 列出原因；`--allow-skips` 供已知不健康组合显式放行。
+- **示例文档与行为对齐**：`examples/tasks/README.md` 移除已修复的
+  `decode.py` 列表崩溃说明、登记 GTR 检测 OpenVINO 导出 parity 边界，参数表
+  标明 `--engine` / `--openvino` 仅 `detection.py` 支持；`--dry-run` 忽略提示
+  修正单复数；`detection_backends.py` 的 train-only 家族现在遵循 `--device`
+  并在 CUDA OOM 时回退 CPU。
+
 - **合规许可证归一化误判 `UNKNOWN`**：`compliance/licenses.py` 的
   `normalize_license` 把 SPDX 的 `WITH <exception>`（如
   `Apache-2.0 WITH LLVM-exception`）当作顶层连接符拆分，导致例外名作为独立
